@@ -9,7 +9,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::hover());
         ui.painter()
-            .circle_filled(rect.center(), 18.0, theme::ACCENT);
+            .circle_filled(rect.center(), 18.0, theme::accent().base);
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -62,7 +62,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     let (icon, color) = if ok {
                         (icons::CHECK_CIRCLE, theme::MUTED)
                     } else {
-                        (icons::WARNING_CIRCLE, theme::ACCENT)
+                        (icons::WARNING_CIRCLE, theme::accent().base)
                     };
                     ui.label(RichText::new(icon).size(16.0).color(color));
                     ui.label(RichText::new(name).color(if ok { theme::MUTED } else { theme::TEXT }));
@@ -73,7 +73,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                 ui.label(
                     RichText::new(format!("Set up in Settings {}", icons::ARROW_RIGHT))
                         .small()
-                        .color(theme::ACCENT_HOVER),
+                        .color(theme::accent().hover),
                 );
             }
         });

@@ -153,7 +153,7 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
                 let (icon, color) = if found.is_some() {
                     (icons::CHECK_CIRCLE, theme::TEXT)
                 } else {
-                    (icons::WARNING_CIRCLE, theme::ACCENT)
+                    (icons::WARNING_CIRCLE, theme::accent().base)
                 };
                 ui.label(RichText::new(icon).size(20.0).color(color));
                 ui.vertical(|ui| {
@@ -189,7 +189,7 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
             ui.label(RichText::new(&status.step).color(theme::TEXT));
             theme::progress_line(ui, ui.available_width().min(480.0), status.progress);
         } else if let Some(err) = &status.error {
-            ui.label(RichText::new(format!("{} {err}", icons::WARNING)).color(theme::ACCENT_HOVER));
+            ui.label(RichText::new(format!("{} {err}", icons::WARNING)).color(theme::accent().hover));
         }
         ui.add_space(4.0);
 
@@ -212,14 +212,14 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
                 let _ = open::that_detached(dir);
             }
             if updating {
-                ui.add(Spinner::new().color(theme::ACCENT));
+                ui.add(Spinner::new().color(theme::accent().base));
             }
             match &page.update_msg {
                 Some(Ok(m)) => {
                     ui.label(theme::muted(m));
                 }
                 Some(Err(e)) => {
-                    ui.label(RichText::new(e).color(theme::ACCENT_HOVER));
+                    ui.label(RichText::new(e).color(theme::accent().hover));
                 }
                 None => {}
             }

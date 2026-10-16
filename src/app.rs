@@ -497,7 +497,7 @@ impl eframe::App for App {
             painter.rect_stroke(
                 screen.shrink(12.0),
                 CornerRadius::same(12),
-                egui::Stroke::new(2.0, theme::ACCENT),
+                egui::Stroke::new(2.0, theme::accent().base),
                 egui::StrokeKind::Inside,
             );
             painter.text(
@@ -505,7 +505,7 @@ impl eframe::App for App {
                 egui::Align2::CENTER_CENTER,
                 icons::FILE_PLUS,
                 FontId::proportional(64.0),
-                theme::ACCENT,
+                theme::accent().base,
             );
             painter.text(
                 screen.center() + egui::vec2(0.0, 36.0),

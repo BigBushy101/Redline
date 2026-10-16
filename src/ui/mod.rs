@@ -33,7 +33,7 @@ pub fn tools_banner(ui: &mut Ui, app: &mut App, why: &str) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::WRENCH).size(28.0).color(theme::ACCENT));
+                ui.label(RichText::new(icons::WRENCH).size(28.0).color(theme::accent().base));
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
                     ui.label(theme::heading("Finish setting up"));
@@ -44,7 +44,7 @@ pub fn tools_banner(ui: &mut Ui, app: &mut App, why: &str) {
                         theme::progress_line(ui, ui.available_width().min(420.0), status.progress);
                     } else {
                         if let Some(err) = &status.error {
-                            ui.label(RichText::new(format!("{} {err}", icons::WARNING)).color(theme::ACCENT_HOVER));
+                            ui.label(RichText::new(format!("{} {err}", icons::WARNING)).color(theme::accent().hover));
                             ui.add_space(4.0);
                         }
                         let label = if status.error.is_some() { "Try again" } else { "Download tools" };
@@ -73,7 +73,7 @@ pub fn tools_banner(ui: &mut Ui, app: &mut App, why: &str) {
             ne: 0,
             se: 0,
         },
-        theme::ACCENT,
+        theme::accent().base,
     );
 }
 

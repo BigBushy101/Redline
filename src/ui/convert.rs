@@ -233,7 +233,7 @@ fn drop_zone(ui: &mut Ui, app: &mut App) {
         CornerRadius::same(8),
         Stroke::new(
             if hovering { 2.0 } else { 1.0 },
-            if hovering { theme::ACCENT } else { egui::Color32::from_gray(0x33) },
+            if hovering { theme::accent().base } else { egui::Color32::from_gray(0x33) },
         ),
         StrokeKind::Inside,
     );
@@ -254,7 +254,7 @@ fn drop_zone(ui: &mut Ui, app: &mut App) {
     ui.label(
         RichText::new(icons::FILE_PLUS)
             .size(if compact { 28.0 } else { 44.0 })
-            .color(if hovering { theme::ACCENT } else { theme::MUTED }),
+            .color(if hovering { theme::accent().base } else { theme::MUTED }),
     );
     ui.label(theme::strong(if hovering {
         "Drop to add"
@@ -806,7 +806,7 @@ fn file_list(ui: &mut Ui, app: &mut App) {
                 action = Some(RowAction::Remove(idx));
             }
             let tune = if item.is_customized() {
-                RichText::new(icons::SLIDERS_HORIZONTAL).color(theme::ACCENT)
+                RichText::new(icons::SLIDERS_HORIZONTAL).color(theme::accent().base)
             } else {
                 RichText::new(icons::SLIDERS_HORIZONTAL)
             };

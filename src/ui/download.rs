@@ -194,7 +194,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     if page.fetching.is_some() {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(Spinner::new().size(20.0).color(theme::ACCENT));
+                ui.add(Spinner::new().size(20.0).color(theme::accent().base));
                 ui.label(theme::muted("Looking up link…"));
             });
         });
@@ -202,7 +202,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     } else if let Some(err) = &page.error {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::WARNING_CIRCLE).size(22.0).color(theme::ACCENT));
+                ui.label(RichText::new(icons::WARNING_CIRCLE).size(22.0).color(theme::accent().base));
                 ui.add(egui::Label::new(RichText::new(err).color(theme::TEXT)).wrap());
             });
         });
@@ -268,7 +268,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         if let Some((title, at)) = &page.toast {
             if now - at < 4.0 {
                 ui.add_space(12.0);
-                ui.label(RichText::new(icons::CHECK_CIRCLE).size(18.0).color(theme::ACCENT));
+                ui.label(RichText::new(icons::CHECK_CIRCLE).size(18.0).color(theme::accent().base));
                 ui.add(
                     egui::Label::new(RichText::new(format!("Added “{title}” to your queue")).color(theme::TEXT))
                         .truncate(),
@@ -469,7 +469,7 @@ fn media_card(
                             fmt_timestamp(at)
                         ))
                         .small()
-                        .color(theme::ACCENT_HOVER),
+                        .color(theme::accent().hover),
                     );
                 }
                 let playable = !info.is_playlist || !info.items.is_empty();

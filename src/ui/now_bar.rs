@@ -44,7 +44,7 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
             .on_hover_text(&track.title);
         let (line, color) = match &st.status {
             Status::Loading => ("Loading…".to_owned(), theme::MUTED),
-            Status::Error(e) => (e.lines().next().unwrap_or("").to_owned(), theme::ACCENT_HOVER),
+            Status::Error(e) => (e.lines().next().unwrap_or("").to_owned(), theme::accent().hover),
             _ if st.buffering => ("Buffering…".to_owned(), theme::MUTED),
             _ => (track.artist.clone().unwrap_or_default(), theme::MUTED),
         };
@@ -162,7 +162,7 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
 
 /// Small text or icon button in the bar, red while its setting is in effect.
 fn panel_button(ui: &mut Ui, text: &str, active: bool, open: bool, tip: &str) -> egui::Response {
-    let color = if active { theme::ACCENT_HOVER } else if open { theme::TEXT } else { theme::MUTED };
+    let color = if active { theme::accent().hover } else if open { theme::TEXT } else { theme::MUTED };
     ui.add(egui::Button::new(RichText::new(text).size(15.0).color(color)).frame(open))
         .on_hover_text(tip)
 }
@@ -219,7 +219,7 @@ fn job_bar(ui: &mut Ui, app: &mut App) {
         } else {
             icons::ARROWS_LEFT_RIGHT
         },
-        if running { theme::ACCENT } else { theme::MUTED },
+        if running { theme::accent().base } else { theme::MUTED },
     );
     l.add_space(8.0);
     l.vertical(|ui| {

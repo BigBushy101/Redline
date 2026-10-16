@@ -176,7 +176,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
     // Header: art, name, meta, actions
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
-            theme::art_tile(ui, 96.0, icons::PLAYLIST, theme::ACCENT);
+            theme::art_tile(ui, 96.0, icons::PLAYLIST, theme::accent().base);
             ui.add_space(12.0);
             ui.vertical(|ui| {
                 ui.add_space(4.0);
@@ -239,7 +239,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
                         }
                     }
                     if confirming {
-                        ui.label(RichText::new("Click again to delete").small().color(theme::ACCENT_HOVER));
+                        ui.label(RichText::new("Click again to delete").small().color(theme::accent().hover));
                     }
                 });
             });
@@ -389,13 +389,13 @@ fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
     let page = &mut app.library_page;
     for a in page.adding.iter().filter(|a| a.playlist == id) {
         ui.horizontal(|ui| {
-            ui.add(Spinner::new().size(14.0).color(theme::ACCENT));
+            ui.add(Spinner::new().size(14.0).color(theme::accent().base));
             ui.add(egui::Label::new(theme::muted(format!("Adding {}…", a.what))).truncate());
         });
     }
     if let Some(e) = page.error.clone() {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(icons::WARNING_CIRCLE).color(theme::ACCENT));
+            ui.label(RichText::new(icons::WARNING_CIRCLE).color(theme::accent().base));
             ui.add(egui::Label::new(RichText::new(e).color(theme::TEXT)).wrap());
             if ui.link(RichText::new("Dismiss").small().color(theme::SUBTLE)).clicked() {
                 page.error = None;
@@ -498,7 +498,7 @@ fn track_row(
             .layout(Layout::left_to_right(Align::Center)),
     );
     let number = if playing {
-        RichText::new(icons::SPEAKER_HIGH).color(theme::ACCENT)
+        RichText::new(icons::SPEAKER_HIGH).color(theme::accent().base)
     } else {
         theme::muted((idx + 1).to_string())
     };
@@ -536,7 +536,7 @@ fn track_row(
             ui.vertical(|ui| {
                 ui.add_space(2.0);
                 let title = if playing {
-                    RichText::new(&t.title).family(theme::bold()).color(theme::ACCENT_HOVER)
+                    RichText::new(&t.title).family(theme::bold()).color(theme::accent().hover)
                 } else {
                     theme::strong(&t.title)
                 };

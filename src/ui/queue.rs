@@ -136,7 +136,7 @@ fn job_row(ui: &mut Ui, job: &Job, playlists: &[(PlaylistId, String)], actions: 
         &mut row,
         44.0,
         icon,
-        if running { theme::ACCENT } else { theme::MUTED },
+        if running { theme::accent().base } else { theme::MUTED },
     );
     row.add_space(10.0);
 
@@ -252,7 +252,7 @@ fn status_cell(ui: &mut Ui, job: &Job, width: f32) {
             ui.add_space(6.0);
             line(
                 ui,
-                RichText::new(format!("{} Failed", icons::WARNING_CIRCLE)).color(theme::ACCENT_HOVER),
+                RichText::new(format!("{} Failed", icons::WARNING_CIRCLE)).color(theme::accent().hover),
             );
             let first = err.lines().next().unwrap_or("");
             ui.add(egui::Label::new(RichText::new(first).small().color(theme::MUTED)).truncate())

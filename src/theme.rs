@@ -17,10 +17,56 @@ pub const TEXT: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
 pub const MUTED: Color32 = Color32::from_rgb(0xB3, 0xB3, 0xB3);
 pub const SUBTLE: Color32 = Color32::from_rgb(0x6A, 0x6A, 0x6A);
 pub const TRACK: Color32 = Color32::from_rgb(0x4D, 0x4D, 0x4D);
-pub const ACCENT: Color32 = Color32::from_rgb(0xE8, 0x26, 0x3A);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x4E);
-pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0xC4, 0x1A, 0x2D);
-pub const HEADER_TINT: Color32 = Color32::from_rgb(0x6E, 0x12, 0x1D);
+
+/// The highlight color set: pills, toggles, progress, the active nav bar and the page
+/// header. Redline red everywhere except a platform's Saved pages, which tint it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Accent {
+    pub base: Color32,
+    pub hover: Color32,
+    pub pressed: Color32,
+    pub header_tint: Color32,
+}
+
+impl Accent {
+    pub const REDLINE: Accent = Accent {
+        base: Color32::from_rgb(0xE8, 0x26, 0x3A),
+        hover: Color32::from_rgb(0xFF, 0x3B, 0x4E),
+        pressed: Color32::from_rgb(0xC4, 0x1A, 0x2D),
+        header_tint: Color32::from_rgb(0x6E, 0x12, 0x1D),
+    };
+}
+
+thread_local! {
+    static CURRENT: std::cell::Cell<Accent> = const { std::cell::Cell::new(Accent::REDLINE) };
+}
+
+/// The accent for whatever is being painted now. egui paints immediately, so a scope set
+/// with [`with_accent`] covers everything drawn inside it, popups included.
+pub fn accent() -> Accent {
+    CURRENT.with(|c| c.get())
+}
+
+/// Paints `add` with `accent`, including the built-in egui widgets that read it from the
+/// visuals (selection, links, slider fill and checkboxes).
+#[allow(dead_code)] // the Saved platform pages use it
+pub fn with_accent<R>(ui: &mut Ui, accent: Accent, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let before = CURRENT.with(|c| c.replace(accent));
+    let r = ui
+        .scope(|ui| {
+            apply_accent(ui.visuals_mut(), accent);
+            add(ui)
+        })
+        .inner;
+    CURRENT.with(|c| c.set(before));
+    r
+}
+
+/// The visuals fields that follow the accent.
+fn apply_accent(v: &mut egui::Visuals, accent: Accent) {
+    v.hyperlink_color = accent.hover;
+    v.selection.bg_fill = accent.base.gamma_multiply(0.55);
+}
 
 pub const BOLD: &str = "bold";
 
@@ -66,9 +112,8 @@ pub fn install(ctx: &egui::Context) {
         v.popup_shadow = v.window_shadow;
         v.extreme_bg_color = INPUT;
         v.faint_bg_color = CARD;
-        v.hyperlink_color = ACCENT_HOVER;
-        v.error_fg_color = ACCENT_HOVER;
-        v.selection.bg_fill = ACCENT.gamma_multiply(0.55);
+        apply_accent(v, Accent::REDLINE);
+        v.error_fg_color = Accent::REDLINE.hover;
         v.selection.stroke = Stroke::new(1.0, TEXT);
         v.slider_trailing_fill = true;
         v.override_text_color = None;
@@ -168,7 +213,7 @@ pub fn page_header(ui: &mut Ui, eyebrow_text: &str, title_text: &str, subtitle: 
     ui.add_space(20.0);
 }
 
-/// Paints the red-to-background gradient at the top of the rounded main panel.
+/// Paints the accent-to-background gradient at the top of the rounded main panel.
 pub fn paint_header_gradient(painter: &egui::Painter, panel: Rect) {
     let r = 8u8;
     let top = Rect::from_min_size(panel.min, vec2(panel.width(), r as f32 * 2.0));
@@ -180,13 +225,13 @@ pub fn paint_header_gradient(painter: &egui::Painter, panel: Rect) {
             sw: 0,
             se: 0,
         },
-        HEADER_TINT,
+        accent().header_tint,
     );
     let grad = Rect::from_min_max(
         pos2(panel.min.x, panel.min.y + r as f32),
         pos2(panel.max.x, (panel.min.y + 340.0).min(panel.max.y)),
     );
-    vertical_gradient(painter, grad, HEADER_TINT, BG);
+    vertical_gradient(painter, grad, accent().header_tint, BG);
 }
 
 fn vertical_gradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
@@ -230,13 +275,13 @@ fn pill(ui: &mut Ui, label: &str, enabled: bool, height: f32, size: f32) -> Resp
     let (rect, resp) = ui.allocate_exact_size(desired, sense);
     if ui.is_rect_visible(rect) {
         let fill = if !enabled {
-            ACCENT.gamma_multiply(0.35)
+            accent().base.gamma_multiply(0.35)
         } else if resp.is_pointer_button_down_on() {
-            ACCENT_PRESSED
+            accent().pressed
         } else if resp.hovered() {
-            ACCENT_HOVER
+            accent().hover
         } else {
-            ACCENT
+            accent().base
         };
         let draw = if enabled && resp.hovered() && !resp.is_pointer_button_down_on() {
             rect.expand(1.5)
@@ -352,7 +397,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         } else {
             Color32::from_gray(0x4D)
         };
-        let fill = lerp_color(off_color, ACCENT, t);
+        let fill = lerp_color(off_color, accent().base, t);
         ui.painter().rect_filled(rect, CornerRadius::same(255), fill);
         let r = rect.height() / 2.0 - 3.0;
         let x = egui::lerp(rect.left() + r + 3.0..=rect.right() - r - 3.0, t);
@@ -389,7 +434,7 @@ pub fn paint_progress(ui: &Ui, rect: Rect, frac: Option<f32>, hovered: bool) {
             let f = f.clamp(0.0, 1.0);
             let mut fill = track;
             fill.set_width(track.width() * f);
-            painter.rect_filled(fill, CornerRadius::same(2), ACCENT);
+            painter.rect_filled(fill, CornerRadius::same(2), accent().base);
             if hovered && f > 0.0 {
                 painter.circle_filled(pos2(fill.right(), fill.center().y), 6.0, TEXT);
             }
@@ -405,7 +450,7 @@ pub fn paint_progress(ui: &Ui, rect: Rect, frac: Option<f32>, hovered: bool) {
                 painter.rect_filled(
                     Rect::from_min_max(pos2(start, track.top()), pos2(end, track.bottom())),
                     CornerRadius::same(2),
-                    ACCENT,
+                    accent().base,
                 );
             }
             ui.ctx().request_repaint();
@@ -449,7 +494,7 @@ pub fn range_bar(ui: &mut Ui, start: &mut f64, end: &mut f64, total: f64) -> boo
     let painter = ui.painter();
     painter.rect_filled(track, CornerRadius::same(2), TRACK);
     let sel = Rect::from_min_max(pos2(to_x(*start), track.top()), pos2(to_x(*end), track.bottom()));
-    painter.rect_filled(sel, CornerRadius::same(2), ACCENT);
+    painter.rect_filled(sel, CornerRadius::same(2), accent().base);
     let hot = resp.hovered() || resp.dragged();
     for x in [sel.left(), sel.right()] {
         painter.circle_filled(pos2(x, track.center().y), if hot { 8.0 } else { 7.0 }, TEXT);
@@ -465,7 +510,7 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, badge: Opt
     if selected {
         painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x24));
         let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 10.0), vec2(3.0, 24.0));
-        painter.rect_filled(bar, CornerRadius::same(2), ACCENT);
+        painter.rect_filled(bar, CornerRadius::same(2), accent().base);
     } else if resp.hovered() {
         painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x1C));
     }
@@ -475,7 +520,7 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, badge: Opt
         egui::Align2::LEFT_CENTER,
         icon,
         FontId::proportional(22.0),
-        if selected { ACCENT } else { color },
+        if selected { accent().base } else { color },
     );
     painter.text(
         pos2(rect.left() + 52.0, rect.center().y),
@@ -489,7 +534,7 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, badge: Opt
         let galley = painter.layout_no_wrap(text, FontId::new(11.0, bold()), TEXT);
         let w = galley.size().x.max(10.0) + 10.0;
         let pill = Rect::from_center_size(pos2(rect.right() - 12.0 - w / 2.0, rect.center().y), vec2(w, 18.0));
-        painter.rect_filled(pill, CornerRadius::same(255), ACCENT);
+        painter.rect_filled(pill, CornerRadius::same(255), accent().base);
         painter.galley(pill.center() - galley.size() / 2.0, galley, TEXT);
     }
     pointer(resp, true)
@@ -589,7 +634,7 @@ pub fn line_slider(ui: &mut Ui, width: f32, value: &mut f32) -> Response {
     painter.rect_filled(track, CornerRadius::same(2), TRACK);
     let mut fill = track;
     fill.set_width(track.width() * value.clamp(0.0, 1.0));
-    painter.rect_filled(fill, CornerRadius::same(2), if hot { ACCENT } else { TEXT });
+    painter.rect_filled(fill, CornerRadius::same(2), if hot { accent().base } else { TEXT });
     if hot {
         painter.circle_filled(pos2(fill.right(), fill.center().y), 6.0, TEXT);
     }
@@ -630,14 +675,14 @@ pub fn toggle_icon(ui: &mut Ui, icon: &str, on: bool, tooltip: &str) -> Response
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     if ui.is_rect_visible(rect) {
         let color = match (on, resp.hovered()) {
-            (true, true) => ACCENT_HOVER,
-            (true, false) => ACCENT,
+            (true, true) => accent().hover,
+            (true, false) => accent().base,
             (false, true) => TEXT,
             (false, false) => MUTED,
         };
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::proportional(18.0), color);
         if on {
-            ui.painter().circle_filled(pos2(rect.center().x, rect.bottom() - 2.0), 2.0, ACCENT);
+            ui.painter().circle_filled(pos2(rect.center().x, rect.bottom() - 2.0), 2.0, accent().base);
         }
     }
     pointer(resp, true).on_hover_text(tooltip)
