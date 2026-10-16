@@ -367,3 +367,82 @@ fn moves_on_to_the_next_source_by_itself() {
     assert_eq!(s.advances, 1);
     assert_eq!(s.track.unwrap().title, "Tone b");
 }
+
+/// Local files play as a 3 s tone, links as a 1 s one. Links count their lookups, and their
+/// stream URLs refuse the first few opens like YouTube's.
+struct QueuedLink {
+    resolves: Mutex<u32>,
+    link_opens: Mutex<u32>,
+    refusals: u32,
+}
+
+impl Media for QueuedLink {
+    fn resolve(&self, env: &Env, source: &Source) -> Result<Resolved> {
+        let link = matches!(source, Source::Link(_));
+        let mut r = Tone::new(if link { 1.0 } else { 3.0 }).resolve(env, source)?;
+        if let Source::Link(url) = source {
+            *self.resolves.lock().unwrap() += 1;
+            r.input.location = url.clone();
+        }
+        Ok(r)
+    }
+
+    fn decode(&self, env: &Env, input: &Input, start: f64, rate: u32) -> Result<Pcm> {
+        let link = input.location.starts_with("https");
+        let mut pcm = Tone::new(if link { 1.0 } else { 3.0 }).decode(env, input, start, rate)?;
+        if link {
+            let mut opens = self.link_opens.lock().unwrap();
+            *opens += 1;
+            if *opens <= self.refusals {
+                pcm.reader = Box::new(Cursor::new(Vec::new()));
+                pcm.finish = Box::new(|| Err(anyhow!("Server returned 403 Forbidden (access denied)")));
+            }
+        }
+        Ok(pcm)
+    }
+}
+
+#[test]
+fn next_link_is_looked_up_and_warmed_while_the_current_track_plays() {
+    // Real time, so the warming's waits fit inside the first track.
+    let capture = Capture::new(RATE, 1.0);
+    let media = Arc::new(QueuedLink {
+        resolves: Mutex::default(),
+        link_opens: Mutex::default(),
+        refusals: 2,
+    });
+    let p = player(media.clone(), &capture);
+    let next = Source::Link("https://youtu.be/b".into());
+    p.send(Command::Load(track(), 0.0));
+    p.send(Command::SetNext(Some(next.clone())));
+    // Looked up once and opened until it stopped refusing, all before the first track ends.
+    let s = wait_for(&p, "warmed", |_| *media.link_opens.lock().unwrap() == 3);
+    assert_eq!(s.advances, 0, "{s:?}");
+    assert_eq!(*media.resolves.lock().unwrap(), 1);
+
+    let s = wait_for(&p, "advanced", |s| s.advances == 1);
+    assert_eq!(s.source, Some(next));
+    wait_for(&p, "end of b", |s| s.status == Status::Ended);
+    // Played from the cache, and its URL opened first time.
+    assert_eq!(*media.resolves.lock().unwrap(), 1);
+    assert_eq!(*media.link_opens.lock().unwrap(), 4);
+}
+
+#[test]
+fn prefetch_for_a_replaced_next_is_dropped() {
+    let capture = Capture::new(RATE, 8.0);
+    let media = Arc::new(QueuedLink {
+        resolves: Mutex::default(),
+        link_opens: Mutex::default(),
+        refusals: 0,
+    });
+    let p = player(media.clone(), &capture);
+    p.send(Command::Load(track(), 0.0));
+    p.send(Command::SetNext(Some(Source::Link("https://youtu.be/b".into()))));
+    wait_for(&p, "prefetched b", |_| *media.resolves.lock().unwrap() == 1);
+    p.send(Command::SetNext(Some(Source::Link("https://youtu.be/c".into()))));
+    wait_for(&p, "prefetched c", |_| *media.resolves.lock().unwrap() == 2);
+    wait_for(&p, "advanced", |s| s.advances == 1);
+    wait_for(&p, "end of c", |s| s.status == Status::Ended);
+    assert_eq!(*media.resolves.lock().unwrap(), 2, "c came from the cache");
+}

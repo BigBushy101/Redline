@@ -6,7 +6,8 @@
 //! a fresh ffmpeg at the new offset with its own ring buffer.
 //!
 //! Links are resolved to a stream URL with yt-dlp when they're played, never earlier: the
-//! URLs expire after a few hours.
+//! URLs expire after a few hours. The one queued next is looked up (and its URL warmed) while
+//! the current track plays, so it starts without waiting on yt-dlp.
 
 pub mod decode;
 pub mod dsp;
@@ -14,6 +15,7 @@ pub mod output;
 pub mod render;
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -247,6 +249,8 @@ enum Msg {
     Cmd(Command),
     Resolved(u64, Result<Resolved, String>),
     DecodeEnded(u64, Result<(), String>),
+    /// A link looked up ahead of time, with the network settings it was looked up with.
+    Prefetched(String, NetworkOptions, Result<Resolved, String>),
     Shutdown,
 }
 
@@ -286,6 +290,7 @@ impl Player {
                     next_stream: 1,
                     want_play: false,
                     next: None,
+                    prefetching: None,
                     last_wake: Instant::now(),
                     lost_at: None,
                 }
@@ -375,6 +380,9 @@ struct Engine {
     want_play: bool,
     /// Plays after the current track ends.
     next: Option<Source>,
+    /// The next link being looked up ahead of time. Kept after a failure so it isn't tried
+    /// over and over; playing it shows the error.
+    prefetching: Option<String>,
     last_wake: Instant,
     /// While the output device is gone: when to try opening it again.
     lost_at: Option<Instant>,
@@ -397,6 +405,21 @@ const REFUSAL_WAIT: Duration = Duration::from_secs(1);
 fn is_expired(err: &str) -> bool {
     let e = err.to_lowercase();
     ["403", "410"].iter().any(|code| e.contains(code)) && (e.contains("http") || e.contains("server returned"))
+}
+
+/// Opens a fresh stream URL and reads a little, again after each refusal, until audio comes
+/// or it was refused [`MAX_REFUSALS`] times. Playing it afterwards starts straight away.
+fn warm(media: &dyn Media, env: &Env, input: &Input, rate: u32) {
+    for _ in 0..MAX_REFUSALS {
+        let Ok(mut pcm) = media.decode(env, input, 0.0, rate) else { return };
+        let got_audio = pcm.reader.read(&mut [0u8; 4096]).is_ok_and(|n| n > 0);
+        (pcm.kill)();
+        let result = (pcm.finish)();
+        match result {
+            Err(e) if !got_audio && is_expired(&format!("{e:#}")) => thread::sleep(REFUSAL_WAIT),
+            _ => return,
+        }
+    }
 }
 
 impl Engine {
@@ -474,6 +497,16 @@ impl Engine {
                     && !self.refresh_link(&e)
                 {
                     self.fail(e);
+                }
+            }
+            Msg::Prefetched(url, network, result) => {
+                if self.prefetching.as_ref() == Some(&url) && result.is_ok() {
+                    self.prefetching = None;
+                }
+                // The queue or the cookies may have changed while it was looked up.
+                let wanted = self.next.as_ref() == Some(&Source::Link(url.clone())) && network == self.env.network;
+                if let (true, Ok(r)) = (wanted, result) {
+                    self.links.insert(url, (r, Instant::now()));
                 }
             }
             Msg::Shutdown => {}
@@ -560,17 +593,39 @@ impl Engine {
             stream: None,
         });
         let cached = match &source {
-            Source::Link(url) => self
-                .links
-                .get(url)
-                .filter(|(_, at)| at.elapsed() < LINK_TTL)
-                .map(|(r, _)| r.clone()),
+            Source::Link(url) => self.cached(url),
             Source::Local(_) => None,
         };
         match cached {
             Some(r) => self.handle(Msg::Resolved(load_id, Ok(r))),
             None => self.resolve(source, load_id),
         }
+    }
+
+    fn cached(&self, url: &str) -> Option<Resolved> {
+        self.links
+            .get(url)
+            .filter(|(_, at)| at.elapsed() < LINK_TTL)
+            .map(|(r, _)| r.clone())
+    }
+
+    /// While a track plays, looks the next link up on a worker and opens its stream URL until
+    /// it stops refusing, so the next track skips yt-dlp and YouTube's cold-URL wait.
+    fn prefetch(&mut self) {
+        let Some(Source::Link(url)) = &self.next else { return };
+        if self.prefetching.as_ref() == Some(url) || self.cached(url).is_some() {
+            return;
+        }
+        self.prefetching = Some(url.clone());
+        let (media, env, tx, rate) = (self.media.clone(), self.env.clone(), self.tx.clone(), self.rate);
+        let (url, source) = (url.clone(), Source::Link(url.clone()));
+        thread::spawn(move || {
+            let result = media.resolve(&env, &source).map_err(|e| format!("{e:#}"));
+            if let Ok(r) = &result {
+                warm(media.as_ref(), &env, &r.input, rate);
+            }
+            let _ = tx.send(Msg::Prefetched(url, env.network, result));
+        });
     }
 
     /// Looks `source` up on a worker; the answer comes back as `Msg::Resolved`.
@@ -807,6 +862,9 @@ impl Engine {
         st.buffering = lost || st.status == Status::Loading || st.status == Status::Playing && (underrun || !ready);
         let changed = before != (st.status.clone(), st.buffering);
         drop(st);
+        if self.status() == Status::Playing {
+            self.prefetch();
+        }
         if changed && self.status() == Status::Ended {
             match self.next.take() {
                 Some(next) => {
