@@ -48,6 +48,8 @@ pub struct Settings {
     pub recycle_originals: bool,
     pub download_presets: Vec<DownloadPreset>,
     pub convert_presets: Vec<ConvertPreset>,
+    /// Desktop notification when jobs finish while Redline isn't focused.
+    pub notify: bool,
 }
 
 impl Default for Settings {
@@ -68,6 +70,7 @@ impl Default for Settings {
             recycle_originals: false,
             download_presets: presets::default_download_presets(),
             convert_presets: presets::default_convert_presets(),
+            notify: true,
         }
     }
 }

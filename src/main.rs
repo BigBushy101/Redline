@@ -5,6 +5,7 @@ mod history;
 mod jobs;
 mod presets;
 mod settings;
+mod system;
 mod task;
 mod theme;
 mod tools;

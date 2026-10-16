@@ -4,7 +4,8 @@ use eframe::egui::{
 use egui_phosphor::regular as icons;
 
 use crate::history::History;
-use crate::jobs::JobManager;
+use crate::jobs::{JobManager, JobStatus};
+use crate::system::{self, AfterQueue};
 use crate::settings::Settings;
 use crate::theme;
 use crate::task::Task;
@@ -37,6 +38,16 @@ pub struct App {
     pub convert: ui::convert::ConvertPage,
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
+    /// One-shot action once the queue empties.
+    pub after_queue: AfterQueue,
+    /// A job finished successfully since the queue was last empty.
+    finished_ok: bool,
+    /// Last output folder, for "Open folder when done".
+    last_output: Option<std::path::PathBuf>,
+    /// The PC is being kept awake for active jobs.
+    awake: bool,
+    /// egui time when a shutdown was scheduled, for the countdown.
+    pub shutdown_at: Option<f64>,
 }
 
 impl App {
@@ -60,12 +71,106 @@ impl App {
             convert: Default::default(),
             history_page: Default::default(),
             settings_page: Default::default(),
+            after_queue: AfterQueue::Nothing,
+            finished_ok: false,
+            last_output: None,
+            awake: false,
+            shutdown_at: None,
         }
     }
 
     fn detect_encoders(ctx: &egui::Context, tools: &ToolPaths) -> Option<Task<Encoders>> {
         let ffmpeg = tools.ffmpeg.clone()?;
         Some(Task::spawn(ctx, move || hwaccel::detect(&ffmpeg)))
+    }
+
+    /// Notifies about jobs that just ended, if Redline isn't the focused window.
+    fn announce(&self, ctx: &egui::Context, ended: &[(String, JobStatus)]) {
+        let ended: Vec<_> = ended
+            .iter()
+            .filter(|(_, s)| !matches!(s, JobStatus::Cancelled))
+            .collect();
+        if ended.is_empty() || ctx.input(|i| i.viewport().focused).unwrap_or(true) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+        if !self.settings.notify {
+            return;
+        }
+        let failed = ended.iter().filter(|(_, s)| matches!(s, JobStatus::Failed(_))).count();
+        let (title, body) = match ended.as_slice() {
+            [(name, status)] => (
+                match status {
+                    JobStatus::Failed(_) => "Failed".to_owned(),
+                    JobStatus::Skipped(why) => why.clone(),
+                    _ => "Finished".to_owned(),
+                },
+                name.clone(),
+            ),
+            many => (
+                format!("{} jobs ended", many.len()),
+                if failed > 0 {
+                    format!("{} finished, {failed} failed", many.len() - failed)
+                } else {
+                    "All finished".to_owned()
+                },
+            ),
+        };
+        let remaining = self.jobs.active_count();
+        let body = if remaining > 0 {
+            format!("{body} · {remaining} still in the queue")
+        } else {
+            body
+        };
+        system::notify(title, body);
+    }
+
+    fn run_after_queue(&mut self, ctx: &egui::Context) {
+        match std::mem::take(&mut self.after_queue) {
+            AfterQueue::Nothing => {}
+            AfterQueue::OpenFolder => {
+                let dir = self
+                    .last_output
+                    .clone()
+                    .unwrap_or_else(|| self.settings.download_dir.clone());
+                let _ = open::that_detached(dir);
+            }
+            AfterQueue::Sleep => system::sleep_now(),
+            AfterQueue::ShutDown => {
+                if system::schedule_shutdown().is_ok() {
+                    self.shutdown_at = Some(ctx.input(|i| i.time));
+                }
+            }
+        }
+    }
+
+    /// Countdown with a Cancel button while Windows is about to shut down.
+    fn shutdown_window(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.shutdown_at else { return };
+        let left = system::SHUTDOWN_DELAY_SECS as f64 - (ctx.input(|i| i.time) - at);
+        if left <= 0.0 {
+            self.shutdown_at = None;
+            return;
+        }
+        egui::Window::new("Shutting down")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(theme::strong("The queue is done."));
+                ui.label(theme::muted(format!(
+                    "Windows will shut down in {} seconds.",
+                    left.ceil() as u32
+                )));
+                ui.add_space(8.0);
+                if theme::small_pill_button(ui, "Cancel shutdown", true).clicked() {
+                    system::cancel_shutdown();
+                    self.shutdown_at = None;
+                }
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -96,10 +201,27 @@ impl eframe::App for App {
         }
         self.jobs
             .pump(ctx, &self.tools, self.settings.concurrency);
+        let mut ended = Vec::new();
         for id in self.jobs.take_finished() {
             if let Some(job) = self.jobs.get(id) {
                 self.history.record(job);
+                if matches!(job.status, JobStatus::Done(_) | JobStatus::Skipped(_)) {
+                    self.finished_ok = true;
+                    self.last_output = job.output_dir();
+                }
+                ended.push((job.title.clone(), job.status.clone()));
             }
+        }
+        self.announce(ctx, &ended);
+
+        let active = self.jobs.active_count();
+        if active == 0 && self.finished_ok {
+            self.finished_ok = false;
+            self.run_after_queue(ctx);
+        }
+        if (active > 0) != self.awake {
+            self.awake = active > 0;
+            system::keep_awake(self.awake);
         }
         self.jobs.save_if_dirty();
         self.history.save_if_dirty();
@@ -112,6 +234,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_dropped_files(&ctx);
+        self.shutdown_window(&ctx);
 
         Panel::bottom("now-bar")
             .exact_size(84.0)

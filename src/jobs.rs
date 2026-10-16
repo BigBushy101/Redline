@@ -57,6 +57,9 @@ pub struct Job {
     pub subtitle: String,
     pub spec: JobSpec,
     pub status: JobStatus,
+    /// Don't start before this time (Unix seconds).
+    #[serde(default)]
+    pub not_before: Option<i64>,
     #[serde(skip)]
     cancel: Arc<CancelHandle>,
 }
@@ -274,6 +277,11 @@ impl JobManager {
     }
 
     pub fn push(&mut self, title: String, subtitle: String, spec: JobSpec) {
+        self.push_at(title, subtitle, spec, None);
+    }
+
+    /// Queues a job that waits until `not_before` (Unix seconds) to start.
+    pub fn push_at(&mut self, title: String, subtitle: String, spec: JobSpec, not_before: Option<i64>) {
         let id = self.next_id;
         self.next_id += 1;
         self.jobs.push(Job {
@@ -282,6 +290,7 @@ impl JobManager {
             subtitle,
             spec,
             status: JobStatus::Queued,
+            not_before,
             cancel: Arc::new(CancelHandle::default()),
         });
         self.dirty = true;
@@ -387,10 +396,27 @@ impl JobManager {
             }
         }
 
+        let now = chrono::Utc::now().timestamp();
+        let due = |j: &Job| j.not_before.is_none_or(|t| t <= now);
+        // Wake up when the next scheduled job is due.
+        if let Some(next) = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Queued && !due(j))
+            .filter_map(|j| j.not_before)
+            .min()
+        {
+            ctx.request_repaint_after(std::time::Duration::from_secs((next - now).clamp(1, 60) as u64));
+        }
         while self.running < concurrency.max(1) {
-            let Some(job) = self.jobs.iter_mut().find(|j| j.status == JobStatus::Queued) else {
+            let Some(job) = self
+                .jobs
+                .iter_mut()
+                .find(|j| j.status == JobStatus::Queued && due(j))
+            else {
                 break;
             };
+            job.not_before = None;
             job.status = JobStatus::Running {
                 progress: None,
                 detail: "Starting…".into(),
@@ -424,6 +450,21 @@ impl JobManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_jobs_wait_until_due() {
+        let mut m = JobManager::new();
+        let now = chrono::Utc::now().timestamp();
+        let spec = || JobSpec::Download(DownloadRequest::default());
+        m.push_at("later".into(), String::new(), spec(), Some(now + 3600));
+        m.push_at("due".into(), String::new(), spec(), Some(now - 1));
+        m.pump(&egui::Context::default(), &ToolPaths::default(), 4);
+        assert!(m.jobs[0].status == JobStatus::Queued, "not due yet");
+        assert!(m.jobs[0].not_before.is_some());
+        assert!(m.jobs[1].status != JobStatus::Queued, "due job started");
+        assert_eq!(m.jobs[1].not_before, None);
+        assert_eq!(m.active_count(), 2, "scheduled jobs count as active");
+    }
 
     #[test]
     fn queue_round_trips_and_resumes() {

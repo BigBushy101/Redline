@@ -58,7 +58,11 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             .layout(Layout::top_down(Align::Center)),
     );
     let (text, progress) = match &job.status {
-        JobStatus::Queued => ("Waiting to start…".to_owned(), Some(0.0)),
+        JobStatus::Queued => (
+            job.not_before
+                .map_or("Waiting to start…".to_owned(), super::queue::starts_at),
+            Some(0.0),
+        ),
         JobStatus::Running { progress, detail } => (detail.clone(), *progress),
         JobStatus::Processing(msg) => (msg.clone(), None),
         JobStatus::Done(_) => ("Finished".to_owned(), Some(1.0)),

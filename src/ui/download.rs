@@ -30,6 +30,38 @@ pub struct DownloadPage {
     tags: Tags,
     tags_prefill: Tags,
     presets: PresetBar,
+    schedule: Schedule,
+}
+
+/// "Start later" choice next to the Download button; kept between links.
+struct Schedule {
+    later: bool,
+    hour: u32,
+    minute: u32,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            later: false,
+            hour: 2,
+            minute: 0,
+        }
+    }
+}
+
+impl Schedule {
+    /// Next time the clock shows hour:minute, as Unix seconds.
+    fn next(&self) -> Option<i64> {
+        use chrono::{Duration, Local};
+        let now = Local::now();
+        let today = now.date_naive().and_hms_opt(self.hour, self.minute, 0)?;
+        let mut at = today.and_local_timezone(Local).earliest()?;
+        if at <= now {
+            at += Duration::days(1);
+        }
+        Some(at.timestamp())
+    }
 }
 
 impl DownloadPage {
@@ -286,6 +318,8 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let page = &mut app.download;
     let trim = if is_playlist { Ok(None) } else { page.trim.request(duration) };
     let ready = app.tools.ready_for_download() && !url.is_empty() && trim.is_ok();
+    schedule_row(ui, &mut page.schedule);
+    ui.add_space(12.0);
     ui.horizontal(|ui| {
         if theme::pill_button(ui, &format!("{}  Download", icons::DOWNLOAD_SIMPLE), ready).clicked() {
             let trim = trim.ok().flatten();
@@ -309,7 +343,8 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             }
             let tags = (options.mode == Mode::Audio && !is_playlist && page.tags != page.tags_prefill)
                 .then(|| page.tags.clone());
-            app.jobs.push(
+            let not_before = if page.schedule.later { page.schedule.next() } else { None };
+            app.jobs.push_at(
                 title.clone(),
                 summary,
                 JobSpec::Download(DownloadRequest {
@@ -324,6 +359,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     format,
                     tags,
                 }),
+                not_before,
             );
             page.toast = Some((title, now));
             page.url.clear();
@@ -843,4 +879,28 @@ fn text_input(ui: &mut Ui, text: &mut String, hint: &str, width: f32) {
                     .desired_width(width),
             );
         });
+}
+
+fn schedule_row(ui: &mut Ui, s: &mut Schedule) {
+    ui.horizontal(|ui| {
+        ui.label(theme::muted("Start"));
+        theme::chips(ui, &mut s.later, &[(false, "Now"), (true, "Later")]);
+        if s.later {
+            ui.add_space(8.0);
+            ui.label(theme::muted("at"));
+            ui.add(egui::DragValue::new(&mut s.hour).range(0..=23).custom_formatter(|v, _| format!("{v:02}")));
+            ui.label(theme::muted(":"));
+            ui.add(egui::DragValue::new(&mut s.minute).range(0..=59).custom_formatter(|v, _| format!("{v:02}")));
+            if let Some(t) = s.next() {
+                ui.label(
+                    RichText::new(format!(
+                        "{} · Redline has to stay open",
+                        super::queue::starts_at(t)
+                    ))
+                    .small()
+                    .color(theme::SUBTLE),
+                );
+            }
+        }
+    });
 }

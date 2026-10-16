@@ -86,6 +86,15 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         theme::option_row(ui, "Simultaneous jobs", |ui| {
             ui.add(Slider::new(&mut app.settings.concurrency, 1..=6));
         });
+        ui.horizontal(|ui| {
+            theme::toggle(ui, &mut app.settings.notify, "Notify me when jobs finish");
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Only while Redline is in the background · the PC stays awake while jobs run")
+                    .small()
+                    .color(theme::SUBTLE),
+            );
+        });
     });
     ui.add_space(16.0);
 

@@ -3,6 +3,7 @@ use egui_phosphor::regular as icons;
 
 use crate::app::{App, Page};
 use crate::jobs::{Job, JobId, JobStatus};
+use crate::system::AfterQueue;
 use crate::theme;
 use crate::tools;
 
@@ -35,8 +36,31 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         }
         if theme::ghost_button(ui, "Cancel all", active > 0).clicked() {
             app.jobs.cancel_all();
+            app.after_queue = AfterQueue::Nothing;
         }
+        ui.add_space(16.0);
+        ui.label(theme::muted("When everything's done"));
+        theme::chips(
+            ui,
+            &mut app.after_queue,
+            &[
+                (AfterQueue::Nothing, "Do nothing"),
+                (AfterQueue::OpenFolder, "Open folder"),
+                (AfterQueue::Sleep, "Sleep"),
+                (AfterQueue::ShutDown, "Shut down"),
+            ],
+        );
     });
+    if app.after_queue == AfterQueue::ShutDown {
+        ui.label(
+            RichText::new(format!(
+                "{} Windows will shut down a minute after the last job, with a chance to cancel.",
+                icons::INFO
+            ))
+            .small()
+            .color(theme::MUTED),
+        );
+    }
     ui.add_space(16.0);
 
     let mut actions = Vec::new();
@@ -169,7 +193,11 @@ fn status_cell(ui: &mut Ui, job: &Job, width: f32) {
     match &job.status {
         JobStatus::Queued => {
             ui.add_space(14.0);
-            line(ui, RichText::new("Waiting…").color(theme::MUTED));
+            let text = match job.not_before {
+                Some(t) => format!("{} {}", icons::CLOCK, starts_at(t)),
+                None => "Waiting…".to_owned(),
+            };
+            line(ui, RichText::new(text).color(theme::MUTED));
         }
         JobStatus::Running { progress, detail } => {
             ui.add_space(6.0);
@@ -212,5 +240,22 @@ fn status_cell(ui: &mut Ui, job: &Job, width: f32) {
             ui.add_space(14.0);
             line(ui, RichText::new("Cancelled").color(theme::MUTED));
         }
+    }
+}
+
+/// "Starts at 14:05", "Starts tomorrow at 02:00" or a full date further out.
+pub fn starts_at(ts: i64) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(t) = Local.timestamp_opt(ts, 0).single() else {
+        return "Scheduled".into();
+    };
+    let today = Local::now().date_naive();
+    let day = t.date_naive();
+    if day == today {
+        format!("Starts at {}", t.format("%H:%M"))
+    } else if day == today.succ_opt().unwrap_or(today) {
+        format!("Starts tomorrow at {}", t.format("%H:%M"))
+    } else {
+        format!("Starts {}", t.format("%b %-d at %H:%M"))
     }
 }
