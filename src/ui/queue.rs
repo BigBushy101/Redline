@@ -2,7 +2,11 @@ use eframe::egui::{self, Align, CornerRadius, Layout, RichText, Sense, Ui, UiBui
 use egui_phosphor::regular as icons;
 
 use crate::app::{App, Page};
-use crate::jobs::{Job, JobId, JobStatus};
+use crate::jobs::{Job, JobId, JobSpec, JobStatus};
+use redline_core::library::{PlaylistId, Track};
+use redline_core::player::Source;
+
+use super::library::{AddTarget, add_menu, add_to, playlist_names};
 use crate::format::starts_at;
 use crate::system::AfterQueue;
 use crate::theme;
@@ -15,6 +19,7 @@ enum Action {
     Remove(JobId),
     Reveal(std::path::PathBuf),
     Play(std::path::PathBuf),
+    Add(AddTarget, Track),
 }
 
 pub fn show(ui: &mut Ui, app: &mut App) {
@@ -72,9 +77,10 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     ui.add_space(16.0);
 
     let mut actions = Vec::new();
+    let playlists = playlist_names(&app.library);
     // Newest first, like a recently-played list.
     for job in app.jobs.jobs.iter().rev() {
-        job_row(ui, job, &mut actions);
+        job_row(ui, job, &playlists, &mut actions);
         ui.add_space(4.0);
     }
 
@@ -86,6 +92,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Action::Remove(id) => app.jobs.remove(id),
             Action::Reveal(path) => tools::reveal(&path),
             Action::Play(path) => app.play_file(path),
+            Action::Add(target, track) => add_to(app, target, vec![track]),
         }
     }
 }
@@ -104,7 +111,7 @@ fn empty_state(ui: &mut Ui, app: &mut App) {
     });
 }
 
-fn job_row(ui: &mut Ui, job: &Job, actions: &mut Vec<Action>) {
+fn job_row(ui: &mut Ui, job: &Job, playlists: &[(PlaylistId, String)], actions: &mut Vec<Action>) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 68.0), Sense::hover());
     let hovered = ui.rect_contains_pointer(rect);
@@ -151,10 +158,18 @@ fn job_row(ui: &mut Ui, job: &Job, actions: &mut Vec<Action>) {
                 {
                     actions.push(Action::Reveal(target));
                 }
-                if let Some(p) = path.as_ref().filter(|p| super::playable(p))
-                    && theme::icon_button(ui, icons::PLAY, "Play").clicked()
-                {
-                    actions.push(Action::Play(p.clone()));
+                if let Some(p) = path.as_ref().filter(|p| super::playable(p)) {
+                    if theme::icon_button(ui, icons::PLAY, "Play").clicked() {
+                        actions.push(Action::Play(p.clone()));
+                    }
+                    // A download goes in as its link, which plays this file while it's there.
+                    let track = match &job.spec {
+                        JobSpec::Download(r) => Track::new(Source::Link(r.url.clone()), job.title.clone()),
+                        _ => Track::new(Source::Local(p.clone()), job.title.clone()),
+                    };
+                    if let Some(target) = add_menu(ui, playlists) {
+                        actions.push(Action::Add(target, track));
+                    }
                 }
             }
             JobStatus::Skipped(_) => {

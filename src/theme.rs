@@ -623,3 +623,22 @@ pub fn cover(ui: &mut Ui, size: f32, url: Option<&str>, icon: &str) -> Response 
         .paint_at(ui, rect);
     resp
 }
+
+/// Icon button that stays red with a dot under it while `on`, like Spotify's shuffle.
+pub fn toggle_icon(ui: &mut Ui, icon: &str, on: bool, tooltip: &str) -> Response {
+    let size = 32.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let color = match (on, resp.hovered()) {
+            (true, true) => ACCENT_HOVER,
+            (true, false) => ACCENT,
+            (false, true) => TEXT,
+            (false, false) => MUTED,
+        };
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::proportional(18.0), color);
+        if on {
+            ui.painter().circle_filled(pos2(rect.center().x, rect.bottom() - 2.0), 2.0, ACCENT);
+        }
+    }
+    pointer(resp, true).on_hover_text(tooltip)
+}

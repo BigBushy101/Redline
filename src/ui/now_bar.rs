@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Align, Layout, Rect, RichText, Ui, UiBuilder, vec2};
 use egui_phosphor::regular as icons;
+use redline_core::library::Repeat;
 use redline_core::player::{Command, Status};
 
 use crate::app::{App, Page};
@@ -62,11 +63,16 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
     c.spacing_mut().item_spacing.y = 2.0;
     let playing = st.is_playing();
     c.horizontal(|ui| {
-        let buttons_w = 32.0 * 2.0 + 36.0 + 16.0 * 2.0;
+        let buttons_w = 32.0 * 4.0 + 36.0 + 16.0 * 4.0;
         ui.add_space(((ui.available_width() - buttons_w) / 2.0).max(0.0));
         ui.spacing_mut().item_spacing.x = 16.0;
-        if theme::icon_button(ui, icons::SKIP_BACK, "Back to start").clicked() {
-            app.player.send(Command::Seek(0.0));
+        let shuffle = app.now.shuffle;
+        if theme::toggle_icon(ui, icons::SHUFFLE, shuffle, if shuffle { "Shuffle off" } else { "Shuffle" }).clicked() {
+            app.now.set_shuffle(!shuffle);
+        }
+        let back = if app.now.has_prev() { "Previous" } else { "Back to start" };
+        if theme::icon_button(ui, icons::SKIP_BACK, back).clicked() {
+            app.prev_track();
         }
         let can_play = !matches!(st.status, Status::Idle);
         if theme::play_button(ui, playing, can_play)
@@ -75,7 +81,22 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
         {
             app.player.send(Command::Toggle);
         }
-        ui.add_enabled_ui(false, |ui| theme::icon_button(ui, icons::SKIP_FORWARD, "Next"));
+        let has_next = app.now.has_next();
+        if ui
+            .add_enabled_ui(has_next, |ui| theme::icon_button(ui, icons::SKIP_FORWARD, "Next"))
+            .inner
+            .clicked()
+        {
+            app.next_track();
+        }
+        let (icon, tip) = match app.now.repeat {
+            Repeat::Off => (icons::REPEAT, "Repeat"),
+            Repeat::All => (icons::REPEAT, "Repeat one"),
+            Repeat::One => (icons::REPEAT_ONCE, "Repeat off"),
+        };
+        if theme::toggle_icon(ui, icon, app.now.repeat != Repeat::Off, tip).clicked() {
+            app.now.repeat = app.now.repeat.cycle();
+        }
     });
     c.horizontal(|ui| {
         let time_w = 44.0;

@@ -4,7 +4,8 @@ use eframe::egui::{
 use egui_phosphor::regular as icons;
 
 use redline_core::Wake;
-use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source};
+use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
+use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source, Status};
 use redline_core::queue_watch::{self, AfterQueueStep, QueueWatch};
 
 use crate::history::History;
@@ -22,6 +23,7 @@ use crate::ui;
 pub enum Page {
     Download,
     Convert,
+    Library,
     Queue,
     History,
     Settings,
@@ -42,6 +44,12 @@ pub struct App {
     pub convert: ui::convert::ConvertPage,
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
+    pub library: Library,
+    pub library_page: ui::library::LibraryPage,
+    /// What the player bar works through: a playlist or ad-hoc picks.
+    pub now: NowPlaying,
+    /// The load whose end was last acted on, so a track advances once.
+    ended_load: u64,
     /// Notifications, keep-awake and the after-queue action.
     pub watch: QueueWatch,
     /// Repaints the window; handed to background work.
@@ -87,6 +95,10 @@ impl App {
             convert: Default::default(),
             history_page: Default::default(),
             settings_page: Default::default(),
+            library: Library::load(),
+            library_page: Default::default(),
+            now: NowPlaying::default(),
+            ended_load: 0,
             watch: QueueWatch::default(),
             player: Player::system(tools.clone(), wake.clone()),
             player_state: PlayerState::default(),
@@ -151,7 +163,91 @@ impl App {
 
     /// Plays a file in the player bar.
     pub fn play_file(&mut self, path: std::path::PathBuf) {
-        self.player.send(Command::Load(Source::Local(path), 0.0));
+        let source = Source::Local(path);
+        let title = source.label();
+        self.play_tracks(vec![Track::new(source, title)], 0, None);
+    }
+
+    /// Replaces Now playing with `tracks` and starts at `start`.
+    pub fn play_tracks(&mut self, tracks: Vec<Track>, start: usize, playlist: Option<PlaylistId>) {
+        self.now.start(tracks, start, playlist);
+        self.load_current();
+    }
+
+    pub fn play_playlist(&mut self, id: PlaylistId, start: usize, shuffle: bool) {
+        let Some(p) = self.library.get(id) else { return };
+        let tracks = p.tracks.clone();
+        let start = if shuffle && !tracks.is_empty() {
+            // Shuffle from a random first track, not always the top one.
+            self.now.shuffle = true;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.subsec_nanos());
+            nanos as usize % tracks.len()
+        } else {
+            start
+        };
+        self.play_tracks(tracks, start, Some(id));
+    }
+
+    /// Adds tracks to the end of Now playing, starting it if nothing's queued.
+    pub fn queue_tracks(&mut self, tracks: Vec<Track>) {
+        if self.now.is_empty() {
+            self.play_tracks(tracks, 0, None);
+        } else {
+            self.now.append(tracks);
+        }
+    }
+
+    pub fn jump_to(&mut self, index: usize) {
+        if self.now.jump(index).is_some() {
+            self.load_current();
+        }
+    }
+
+    pub fn next_track(&mut self) {
+        if self.now.next().is_some() {
+            self.load_current();
+        }
+    }
+
+    /// Back to the start of the track, or the one before if it only just started.
+    pub fn prev_track(&mut self) {
+        if self.player_state.position > 3.0 || !self.now.has_prev() {
+            self.player.send(Command::Seek(0.0));
+        } else if self.now.prev().is_some() {
+            self.load_current();
+        }
+    }
+
+    pub fn stop_queue(&mut self) {
+        self.now.clear();
+        self.player.send(Command::Stop);
+    }
+
+    /// The source the player has loaded, if any.
+    pub fn now_playing_source(&self) -> Option<Source> {
+        self.player_state.source.clone()
+    }
+
+    /// Loads the queue's current track, from its downloaded copy when there is one.
+    fn load_current(&mut self) {
+        if let Some(t) = self.now.current() {
+            let source = library::playable_source(t, &self.history);
+            self.player.send(Command::Load(source, 0.0));
+        }
+    }
+
+    /// Moves on when a track plays to its end.
+    fn advance_queue(&mut self) {
+        let st = &self.player_state;
+        if st.status != Status::Ended || st.load_id == self.ended_load {
+            return;
+        }
+        self.ended_load = st.load_id;
+        if self.now.after_end().is_some() {
+            self.load_current();
+        }
     }
 
     fn run_after_queue(&mut self, ctx: &egui::Context, step: AfterQueueStep) {
@@ -203,10 +299,14 @@ impl App {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
-        if !dropped.is_empty() {
-            self.convert.add_paths(dropped);
-            self.page = Page::Convert;
+        if dropped.is_empty() {
+            return;
         }
+        if self.page == Page::Library && ui::library::drop_files(self, dropped.clone()) {
+            return;
+        }
+        self.convert.add_paths(dropped);
+        self.page = Page::Convert;
     }
 }
 
@@ -220,6 +320,8 @@ impl eframe::App for App {
         }
         self.player_state = self.player.state();
         self.sync_player();
+        self.advance_queue();
+        self.library_page.poll(&mut self.library);
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());
             self.player.send(Command::SetNetwork(self.settings.network.clone()));
@@ -248,6 +350,7 @@ impl eframe::App for App {
         }
         self.jobs.save_if_dirty();
         self.history.save_if_dirty();
+        self.library.save_if_dirty();
         if self.settings != self.saved_settings {
             self.settings.save();
             self.saved_settings = self.settings.clone();
@@ -321,6 +424,7 @@ impl eframe::App for App {
                             .show(ui, |ui| match self.page {
                                 Page::Download => ui::download::show(ui, self),
                                 Page::Convert => ui::convert::show(ui, self),
+                                Page::Library => ui::library::show(ui, self),
                                 Page::Queue => ui::queue::show(ui, self),
                                 Page::History => ui::history::show(ui, self),
                                 Page::Settings => ui::settings::show(ui, self),
@@ -352,7 +456,11 @@ impl eframe::App for App {
             painter.text(
                 screen.center() + egui::vec2(0.0, 36.0),
                 egui::Align2::CENTER_CENTER,
-                "Drop to convert",
+                if self.page == Page::Library && matches!(self.library_page.view, Some(ui::library::View::Playlist(_))) {
+                    "Drop to add to the playlist"
+                } else {
+                    "Drop to convert"
+                },
                 FontId::new(22.0, theme::bold()),
                 theme::TEXT,
             );

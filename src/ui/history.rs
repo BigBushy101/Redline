@@ -9,7 +9,10 @@ use crate::format::fmt_timestamp;
 use crate::history::HistoryEntry;
 use crate::jobs::JobSpec;
 use crate::theme;
-use redline_core::player::{Command, Source};
+use redline_core::library::{PlaylistId, Track};
+use redline_core::player::Source;
+
+use super::library::{AddTarget, add_menu, add_to, playlist_names};
 use crate::tools;
 
 #[derive(Default)]
@@ -21,7 +24,8 @@ enum Action {
     Again(usize),
     Remove(usize),
     Open(std::path::PathBuf),
-    Play(Source),
+    Play(Track),
+    Add(AddTarget, Track),
     Reveal(std::path::PathBuf),
 }
 
@@ -72,13 +76,14 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
     let query = app.history_page.search.trim().to_owned();
     let mut actions = Vec::new();
+    let playlists = playlist_names(&app.library);
     let mut shown = 0;
     for (idx, entry) in app.history.entries.iter().enumerate() {
         if !query.is_empty() && !entry.matches(&query) {
             continue;
         }
         shown += 1;
-        entry_row(ui, idx, entry, &mut actions);
+        entry_row(ui, idx, entry, &playlists, &mut actions);
         ui.add_space(4.0);
     }
     if shown == 0 {
@@ -101,13 +106,35 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Action::Open(path) => {
                 let _ = open::that_detached(path);
             }
-            Action::Play(source) => app.player.send(Command::Load(source, 0.0)),
+            Action::Play(track) => app.play_tracks(vec![track], 0, None),
+            Action::Add(target, track) => add_to(app, target, vec![track]),
             Action::Reveal(path) => tools::reveal(&path),
         }
     }
 }
 
-fn entry_row(ui: &mut Ui, idx: usize, entry: &HistoryEntry, actions: &mut Vec<Action>) {
+/// The entry as a playlist track: a download's link (which plays its file while that's
+/// there), or a conversion's output.
+fn as_track(entry: &HistoryEntry, output: Option<&std::path::PathBuf>) -> Option<Track> {
+    let source = match (entry.url(), output) {
+        (Some(url), _) => Source::Link(url.to_owned()),
+        (None, Some(p)) if super::playable(p) => Source::Local(p.clone()),
+        _ => return None,
+    };
+    let title = match &entry.spec {
+        JobSpec::Download(_) => entry.title.clone(),
+        _ => source.label(),
+    };
+    Some(Track::new(source, title))
+}
+
+fn entry_row(
+    ui: &mut Ui,
+    idx: usize,
+    entry: &HistoryEntry,
+    playlists: &[(PlaylistId, String)],
+    actions: &mut Vec<Action>,
+) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(w, 60.0), Sense::hover());
     let hovered = ui.rect_contains_pointer(rect);
@@ -148,16 +175,15 @@ fn entry_row(ui: &mut Ui, idx: usize, entry: &HistoryEntry, actions: &mut Vec<Ac
                 actions.push(Action::Open(path.clone()));
             }
         }
-        // The downloaded file if it's still there, otherwise stream the link.
-        let play = match (&output, entry.url()) {
-            (Some(p), _) if super::playable(p) => Some((Source::Local(p.clone()), "Play")),
-            (_, Some(url)) => Some((Source::Link(url.to_owned()), "Stream")),
-            _ => None,
-        };
-        if let Some((source, tip)) = play
-            && theme::icon_button(ui, icons::PLAY, tip).clicked()
-        {
-            actions.push(Action::Play(source));
+        if let Some(track) = as_track(entry, output.as_ref()) {
+            if let Some(target) = add_menu(ui, playlists) {
+                actions.push(Action::Add(target, track.clone()));
+            }
+            // The downloaded file if it's still there, otherwise stream the link.
+            let tip = if output.as_ref().is_some_and(|p| super::playable(p)) { "Play" } else { "Stream" };
+            if theme::icon_button(ui, icons::PLAY, tip).clicked() {
+                actions.push(Action::Play(track));
+            }
         }
         ui.add_space(12.0);
         ui.add_sized(

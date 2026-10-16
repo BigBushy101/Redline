@@ -235,6 +235,8 @@ pub struct MediaInfo {
     pub thumbnail: Option<String>,
     pub is_playlist: bool,
     pub entries: usize,
+    /// A playlist's entries, as far as the flat listing tells.
+    pub items: Vec<PlaylistItem>,
     pub extractor: Option<String>,
     pub formats: Vec<FormatInfo>,
     /// Languages with uploaded subtitles.
@@ -245,6 +247,43 @@ pub struct MediaInfo {
     pub track: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+}
+
+/// An entry of a playlist lookup.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaylistItem {
+    pub url: String,
+    pub title: String,
+    pub uploader: Option<String>,
+    pub duration: Option<f64>,
+    pub thumbnail: Option<String>,
+}
+
+impl PlaylistItem {
+    /// Reads a `--flat-playlist` entry. `None` if it has no usable link.
+    fn from_flat(e: &serde_json::Value) -> Option<Self> {
+        let s = |k: &str| e[k].as_str().map(str::to_owned).filter(|v| !v.is_empty());
+        let url = s("webpage_url")
+            .or_else(|| s("url"))
+            .filter(|u| u.starts_with("http"))
+            .or_else(|| {
+                // YouTube's flat entries sometimes carry only the video id.
+                (s("ie_key").as_deref() == Some("Youtube"))
+                    .then(|| s("id").map(|id| format!("https://www.youtube.com/watch?v={id}")))
+                    .flatten()
+            })?;
+        Some(Self {
+            title: s("title").unwrap_or_else(|| url.clone()),
+            uploader: s("uploader").or_else(|| s("channel")),
+            duration: e["duration"].as_f64(),
+            thumbnail: e["thumbnails"]
+                .as_array()
+                .and_then(|t| t.last())
+                .and_then(|t| t["url"].as_str())
+                .map(str::to_owned),
+            url,
+        })
+    }
 }
 
 /// One downloadable stream from the lookup.
@@ -537,6 +576,7 @@ fn parse_info(json: &[u8]) -> Result<MediaInfo> {
             .or_else(|| raw.thumbnails.last().map(|t| t.url.clone())),
         is_playlist,
         entries: raw.playlist_count.unwrap_or(raw.entries.len()),
+        items: raw.entries.iter().filter_map(PlaylistItem::from_flat).collect(),
         extractor: raw.extractor_key,
         formats: raw.formats.into_iter().filter_map(RawFormat::into_info).collect(),
         subtitle_langs: raw
@@ -1175,5 +1215,29 @@ mod tests {
         let pl = parse_info(br#"{"_type":"playlist","title":"P","entries":[{},{},{}]}"#).unwrap();
         assert!(pl.is_playlist);
         assert_eq!(pl.entries, 3);
+        assert!(pl.items.is_empty(), "entries without links are skipped");
+    }
+
+    #[test]
+    fn parses_flat_playlist_entries() {
+        let pl = parse_info(
+            br#"{"_type":"playlist","title":"Mix","playlist_count":4,"entries":[
+                {"_type":"url","ie_key":"Youtube","id":"abc","url":"https://www.youtube.com/watch?v=abc",
+                 "title":"One","channel":"Band","duration":201.0,"thumbnails":[{"url":"s"},{"url":"l"}]},
+                {"_type":"url","ie_key":"Youtube","id":"def","url":"def","title":"Two"},
+                {"_type":"url","url":"https://soundcloud.com/a/b","title":"Three","uploader":"A"},
+                {"_type":"url","ie_key":"Other","id":"zzz"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(pl.entries, 4);
+        let urls: Vec<_> = pl.items.iter().map(|i| i.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://www.youtube.com/watch?v=abc", "https://www.youtube.com/watch?v=def", "https://soundcloud.com/a/b"]
+        );
+        assert_eq!(pl.items[0].uploader.as_deref(), Some("Band"));
+        assert_eq!(pl.items[0].duration, Some(201.0));
+        assert_eq!(pl.items[0].thumbnail.as_deref(), Some("l"));
+        assert_eq!(pl.items[2].uploader.as_deref(), Some("A"));
     }
 }

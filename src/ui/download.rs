@@ -14,7 +14,9 @@ use crate::tools::ytdlp::{
     Mode, SubsMode, Tags, Trim, VIDEO_QUALITIES,
 };
 use redline_core::download_plan::{LinkChoices, Schedule};
-use redline_core::player::{Command, Source};
+use redline_core::library::{self, PlaylistId};
+
+use super::library::{AddTarget, add_to, playlist_names};
 
 #[derive(Default)]
 pub struct DownloadPage {
@@ -188,6 +190,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     ui.add_space(16.0);
 
     // Lookup result
+    let mut card = None;
     if page.fetching.is_some() {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -206,14 +209,18 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         ui.add_space(16.0);
     } else if let Some(info) = &page.link.info {
         let seen = app.history.find_url(&url).map(|e| e.finished_at);
-        if media_card(ui, info, seen) {
-            app.player.send(Command::Load(Source::Link(url.clone()), 0.0));
-        }
+        let playlists = playlist_names(&app.library);
+        card = media_card(ui, info, seen, &playlists).map(|a| (a, library::tracks_from_info(&url, info)));
         ui.add_space(16.0);
+    }
+    match card {
+        Some((CardAction::Play, tracks)) => app.play_tracks(tracks, 0, None),
+        Some((CardAction::Add(target), tracks)) => add_to(app, target, tracks),
+        None => {}
     }
 
     // Format options
-    let is_playlist = page.link.is_playlist();
+    let is_playlist = app.download.link.is_playlist();
     format_card(ui, app, is_playlist);
     ui.add_space(16.0);
     let duration = app.download.link.info.as_ref().and_then(|i| i.duration);
@@ -394,9 +401,19 @@ fn time_field(ui: &mut Ui, text: &mut String, hint: &str) -> bool {
 }
 
 /// Album-header style card: thumbnail, kind, big title, meta line.
-/// Returns true when Play is clicked.
-fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) -> bool {
-    let mut play = false;
+enum CardAction {
+    Play,
+    Add(AddTarget),
+}
+
+/// Album-style card for the looked-up link, with Play and Add to playlist.
+fn media_card(
+    ui: &mut Ui,
+    info: &MediaInfo,
+    downloaded_at: Option<i64>,
+    playlists: &[(PlaylistId, String)],
+) -> Option<CardAction> {
+    let mut action = None;
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
             let size = vec2(232.0, 130.0);
@@ -455,16 +472,26 @@ fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) -> bool
                         .color(theme::ACCENT_HOVER),
                     );
                 }
-                if !info.is_playlist {
+                let playable = !info.is_playlist || !info.items.is_empty();
+                if playable {
                     ui.add_space(8.0);
-                    play = theme::small_pill_button(ui, &format!("{}  Play", icons::PLAY), true)
-                        .on_hover_text("Stream it now without downloading")
-                        .clicked();
+                    ui.horizontal(|ui| {
+                        let label = if info.is_playlist { "Play all" } else { "Play" };
+                        if theme::small_pill_button(ui, &format!("{}  {label}", icons::PLAY), true)
+                            .on_hover_text("Stream it now without downloading")
+                            .clicked()
+                        {
+                            action = Some(CardAction::Play);
+                        }
+                        if let Some(target) = super::library::add_menu(ui, playlists) {
+                            action = Some(CardAction::Add(target));
+                        }
+                    });
                 }
             });
         });
     });
-    play
+    action
 }
 
 /// Video/audio choice, quality, exact formats, embeds and subtitles.

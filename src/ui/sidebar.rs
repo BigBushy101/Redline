@@ -26,6 +26,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     for (page, icon, label, badge) in [
         (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
         (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
+        (Page::Library, icons::PLAYLIST, "Library", None),
         (Page::Queue, icons::QUEUE, "Queue", Some(active)),
         (Page::History, icons::CLOCK_COUNTER_CLOCKWISE, "History", None),
         (Page::Settings, icons::GEAR_SIX, "Settings", None),

@@ -6,6 +6,7 @@ pub mod download_plan;
 pub mod format;
 pub mod history;
 pub mod jobs;
+pub mod library;
 pub mod player;
 pub mod presets;
 pub mod queue_watch;
