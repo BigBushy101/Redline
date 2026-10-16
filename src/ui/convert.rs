@@ -397,10 +397,11 @@ fn options_card(ui: &mut Ui, app: &mut App) {
             None => {}
         }
         if customized > 0 {
-            ui.label(theme::muted(format!(
-                "{customized} file{} use their own settings",
-                if customized == 1 { "" } else { "s" }
-            )));
+            ui.label(theme::muted(if customized == 1 {
+                "1 file uses its own settings".to_owned()
+            } else {
+                format!("{customized} files use their own settings")
+            }));
         }
         ui.add_space(4.0);
 

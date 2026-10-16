@@ -18,12 +18,18 @@ enum Action {
 pub fn show(ui: &mut Ui, app: &mut App) {
     let active = app.jobs.active_count();
     let finished = app.jobs.jobs.len() - active;
-    theme::page_header(
-        ui,
-        "Queue",
-        "Your queue",
-        &format!("{active} in progress · {finished} finished"),
-    );
+    let scheduled = app
+        .jobs
+        .jobs
+        .iter()
+        .filter(|j| j.status == JobStatus::Queued && j.not_before.is_some())
+        .count();
+    let mut summary = format!("{} in progress", active - scheduled);
+    if scheduled > 0 {
+        summary.push_str(&format!(" · {scheduled} scheduled"));
+    }
+    summary.push_str(&format!(" · {finished} finished"));
+    theme::page_header(ui, "Queue", "Your queue", &summary);
 
     if app.jobs.jobs.is_empty() {
         empty_state(ui, app);
