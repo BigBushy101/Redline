@@ -525,3 +525,73 @@ pub fn option_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
         add(ui);
     });
 }
+
+/// Spotify-style scrubber over `progress` (0..=1). While dragging it follows the pointer;
+/// returns the fraction to seek to once the press is released.
+pub fn seek_bar(ui: &mut Ui, width: f32, progress: Option<f32>) -> Option<f32> {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click_and_drag());
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
+    let frac_at = |x: f32| ((x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
+    let held = resp.is_pointer_button_down_on() || resp.dragged();
+    let shown = match resp.interact_pointer_pos() {
+        Some(p) if held && progress.is_some() => Some(frac_at(p.x)),
+        _ => progress,
+    };
+    paint_progress(ui, rect, shown, resp.hovered() || held);
+    let released = resp.drag_stopped() || resp.clicked();
+    let pos = resp.interact_pointer_pos().or(resp.hover_pos());
+    pointer(resp, progress.is_some());
+    match (released, pos, progress) {
+        (true, Some(p), Some(_)) => Some(frac_at(p.x)),
+        _ => None,
+    }
+}
+
+/// White round play/pause button, the centre of the player bar.
+pub fn play_button(ui: &mut Ui, playing: bool, enabled: bool) -> Response {
+    let size = 36.0;
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), sense);
+    let r = if enabled && resp.hovered() { size / 2.0 + 1.5 } else { size / 2.0 };
+    let fill = if enabled { TEXT } else { Color32::from_gray(0x7C) };
+    ui.painter().circle_filled(rect.center(), r, fill);
+    // Drawn rather than taken from the icon font, which only has outlined glyphs.
+    let c = rect.center();
+    if playing {
+        for dx in [-4.0, 4.0] {
+            let bar = Rect::from_center_size(c + vec2(dx, 0.0), vec2(4.0, 14.0));
+            ui.painter().rect_filled(bar, CornerRadius::same(1), BLACK);
+        }
+    } else {
+        let pts = vec![c + vec2(-4.5, -7.5), c + vec2(8.0, 0.0), c + vec2(-4.5, 7.5)];
+        ui.painter()
+            .add(egui::Shape::convex_polygon(pts, BLACK, Stroke::NONE));
+    }
+    pointer(resp, enabled)
+}
+
+/// Thin horizontal slider styled like the progress line, for volume. The response is
+/// marked changed while it changes `value` (0..=1).
+pub fn line_slider(ui: &mut Ui, width: f32, value: &mut f32) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click_and_drag());
+    if let Some(p) = resp.interact_pointer_pos()
+        && (resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on())
+    {
+        let v = ((p.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+        if v != *value {
+            *value = v;
+            resp.mark_changed();
+        }
+    }
+    let hot = resp.hovered() || resp.dragged();
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
+    let painter = ui.painter();
+    painter.rect_filled(track, CornerRadius::same(2), TRACK);
+    let mut fill = track;
+    fill.set_width(track.width() * value.clamp(0.0, 1.0));
+    painter.rect_filled(fill, CornerRadius::same(2), if hot { ACCENT } else { TEXT });
+    if hot {
+        painter.circle_filled(pos2(fill.right(), fill.center().y), 6.0, TEXT);
+    }
+    pointer(resp, true)
+}

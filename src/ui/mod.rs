@@ -15,6 +15,12 @@ use crate::theme;
 
 pub use crate::format::{fmt_bytes, fmt_duration, parse_duration};
 
+/// Whether the player can play this file (audio, or video for its sound).
+pub fn playable(path: &std::path::Path) -> bool {
+    use crate::tools::convert::{Category, classify};
+    path.is_file() && matches!(classify(path), Some(Category::Audio | Category::Video))
+}
+
 /// "Finish setting up" card offering to download the missing tools.
 pub fn tools_banner(ui: &mut Ui, app: &mut App, why: &str) {
     let status = app.installer.status();

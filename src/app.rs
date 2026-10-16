@@ -4,6 +4,7 @@ use eframe::egui::{
 use egui_phosphor::regular as icons;
 
 use redline_core::Wake;
+use redline_core::player::{Command, Player, PlayerState, Source};
 use redline_core::queue_watch::{self, AfterQueueStep, QueueWatch};
 
 use crate::history::History;
@@ -45,6 +46,11 @@ pub struct App {
     pub watch: QueueWatch,
     /// Repaints the window; handed to background work.
     pub wake: Wake,
+    pub player: Player,
+    /// This frame's copy of the player's state.
+    pub player_state: PlayerState,
+    /// Volume to go back to when unmuting.
+    pub unmuted_volume: f32,
     /// egui time when a shutdown was scheduled, for the countdown.
     pub shutdown_at: Option<f64>,
 }
@@ -61,9 +67,9 @@ impl App {
         jobs.set_wake(wake.clone());
         Self {
             page: Page::Download,
+            tools: tools.clone(),
             saved_settings: settings.clone(),
             settings,
-            tools,
             encoders: Encoders::default(),
             encoders_task,
             jobs,
@@ -74,6 +80,9 @@ impl App {
             history_page: Default::default(),
             settings_page: Default::default(),
             watch: QueueWatch::default(),
+            player: Player::system(tools.clone(), wake.clone()),
+            player_state: PlayerState::default(),
+            unmuted_volume: 1.0,
             wake,
             shutdown_at: None,
         }
@@ -98,6 +107,11 @@ impl App {
         if self.settings.notify {
             system::notify(a.title, a.body);
         }
+    }
+
+    /// Plays a file in the player bar.
+    pub fn play_file(&mut self, path: std::path::PathBuf) {
+        self.player.send(Command::Load(Source::Local(path), 0.0));
     }
 
     fn run_after_queue(&mut self, ctx: &egui::Context, step: AfterQueueStep) {
@@ -160,9 +174,11 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.installer.take_finished() {
             self.tools = ToolPaths::locate(&self.settings);
+            self.player.send(Command::SetTools(self.tools.clone()));
             self.settings_page.invalidate_version();
             self.encoders_task = Self::detect_encoders(&self.wake, &self.tools);
         }
+        self.player_state = self.player.state();
         if let Some(e) = self.encoders_task.as_ref().and_then(Task::take) {
             self.encoders = e;
             self.encoders_task = None;

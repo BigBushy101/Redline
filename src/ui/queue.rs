@@ -14,6 +14,7 @@ enum Action {
     RetryAnyway(JobId),
     Remove(JobId),
     Reveal(std::path::PathBuf),
+    Play(std::path::PathBuf),
 }
 
 pub fn show(ui: &mut Ui, app: &mut App) {
@@ -84,6 +85,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Action::RetryAnyway(id) => app.jobs.retry_ignoring_archive(id),
             Action::Remove(id) => app.jobs.remove(id),
             Action::Reveal(path) => tools::reveal(&path),
+            Action::Play(path) => app.play_file(path),
         }
     }
 }
@@ -148,6 +150,11 @@ fn job_row(ui: &mut Ui, job: &Job, actions: &mut Vec<Action>) {
                     && theme::icon_button(ui, icons::FOLDER_OPEN, "Show in folder").clicked()
                 {
                     actions.push(Action::Reveal(target));
+                }
+                if let Some(p) = path.as_ref().filter(|p| super::playable(p))
+                    && theme::icon_button(ui, icons::PLAY, "Play").clicked()
+                {
+                    actions.push(Action::Play(p.clone()));
                 }
             }
             JobStatus::Skipped(_) => {

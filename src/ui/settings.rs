@@ -227,6 +227,7 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
     });
     if changed {
         app.tools = ToolPaths::locate(&app.settings);
+        app.player.send(redline_core::player::Command::SetTools(app.tools.clone()));
         app.settings_page.invalidate_version();
     }
 }

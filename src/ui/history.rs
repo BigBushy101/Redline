@@ -20,6 +20,7 @@ enum Action {
     Again(usize),
     Remove(usize),
     Open(std::path::PathBuf),
+    Play(std::path::PathBuf),
     Reveal(std::path::PathBuf),
 }
 
@@ -99,6 +100,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Action::Open(path) => {
                 let _ = open::that_detached(path);
             }
+            Action::Play(path) => app.play_file(path),
             Action::Reveal(path) => tools::reveal(&path),
         }
     }
@@ -141,8 +143,11 @@ fn entry_row(ui: &mut Ui, idx: usize, entry: &HistoryEntry, actions: &mut Vec<Ac
             if theme::icon_button(ui, icons::FOLDER_OPEN, "Show in folder").clicked() {
                 actions.push(Action::Reveal(path.clone()));
             }
-            if path.is_file() && theme::icon_button(ui, icons::PLAY, "Open").clicked() {
+            if path.is_file() && theme::icon_button(ui, icons::ARROW_SQUARE_OUT, "Open in its app").clicked() {
                 actions.push(Action::Open(path.clone()));
+            }
+            if super::playable(path) && theme::icon_button(ui, icons::PLAY, "Play").clicked() {
+                actions.push(Action::Play(path.clone()));
             }
         }
         ui.add_space(12.0);

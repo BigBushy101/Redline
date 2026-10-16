@@ -12,7 +12,7 @@ use super::*;
 use crate::jobs::{CancelHandle, Cancelled, Reporter};
 use crate::settings::Settings;
 
-fn ensure_tools() -> ToolPaths {
+pub(crate) fn ensure_tools() -> ToolPaths {
     let tools = ToolPaths::locate(&Settings::default());
     if tools.missing_any() {
         let installer = Installer::default();
@@ -31,7 +31,7 @@ fn ensure_tools() -> ToolPaths {
     tools
 }
 
-fn scratch(name: &str) -> PathBuf {
+pub(crate) fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("redline-e2e-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

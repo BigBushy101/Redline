@@ -2,7 +2,7 @@
 
 pub mod convert;
 #[cfg(test)]
-mod e2e;
+pub(crate) mod e2e;
 pub mod ffmpeg;
 pub mod filters;
 pub mod hwaccel;
@@ -30,7 +30,7 @@ pub fn exe_name(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ToolPaths {
     pub ytdlp: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
