@@ -255,3 +255,80 @@ fn downloads_with_ytdlp() {
     println!("trimmed -> {} ({d:?}s)", out.display());
     assert!(d.is_some_and(|d| (d - 6.0).abs() < 1.0), "trimmed duration {d:?}");
 }
+
+#[test]
+#[ignore]
+fn downloads_with_formats_tags_subs_and_archive() {
+    let tools = ensure_tools();
+    let dir = scratch("dl-extras");
+    let url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+    let info = ytdlp::fetch_info(&tools, &Default::default(), url).expect("fetch_info");
+    let choices = ytdlp::height_choices(&info.formats, info.duration);
+    println!("heights: {choices:?}");
+    assert!(!choices.is_empty(), "no video heights parsed");
+    let audio = info
+        .formats
+        .iter()
+        .find(|f| f.has_audio() && !f.has_video())
+        .expect("an audio-only format");
+
+    // Exact audio format, custom tags, archive.
+    let archive = dir.join("archive.txt");
+    let req = DownloadRequest {
+        url: url.into(),
+        options: DownloadOptions {
+            mode: Mode::Audio,
+            audio_format: "m4a".into(),
+            square_cover: true,
+            ..Default::default()
+        },
+        out_dir: dir.clone(),
+        archive: Some(archive.clone()),
+        format: Some(audio.id.clone()),
+        tags: Some(ytdlp::Tags {
+            title: "Zoo Test".into(),
+            artist: "Redline".into(),
+            album: "E2E".into(),
+        }),
+        ..Default::default()
+    };
+    let out = ytdlp::download(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("tagged audio: {e:#}"))
+        .expect("no output file");
+    let probe = command(tools.ffprobe.as_ref().unwrap())
+        .args(["-v", "error", "-show_entries", "format_tags=title,artist,album", "-of", "default=nw=1"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let tags = String::from_utf8_lossy(&probe.stdout).to_lowercase();
+    println!("tags: {tags}");
+    assert!(tags.contains("title=zoo test") && tags.contains("artist=redline") && tags.contains("album=e2e"));
+    assert!(std::fs::read_to_string(&archive).unwrap().contains("jNQXAC9IVRw"));
+
+    // Second run is skipped by the archive.
+    let again = ytdlp::download(&tools, &req, &CancelHandle::default(), &Reporter::for_test());
+    assert!(again.as_ref().is_err_and(|e| e.is::<crate::jobs::AlreadyDownloaded>()), "{:?}", again.err());
+
+    // Auto captions saved as .srt.
+    let req = DownloadRequest {
+        url: url.into(),
+        options: DownloadOptions {
+            max_height: 240,
+            embed_subs: true,
+            auto_subs: true,
+            subs_mode: ytdlp::SubsMode::Srt,
+            ..Default::default()
+        },
+        out_dir: dir.join("subs"),
+        ..Default::default()
+    };
+    ytdlp::download(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("subs: {e:#}"));
+    let srts: Vec<_> = std::fs::read_dir(dir.join("subs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "srt"))
+        .collect();
+    println!("srt files: {}", srts.len());
+    assert!(!srts.is_empty(), "no .srt written");
+}

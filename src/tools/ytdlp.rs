@@ -34,6 +34,10 @@ pub const AUDIO_BITRATES: &[(&str, &str)] = &[
     ("128K", "128 kbps"),
 ];
 
+/// English and its regional variants, plus YouTube's original-language auto captions.
+/// (`en.*` would also match dozens of machine translations like `en-de`.)
+pub const DEFAULT_SUB_LANGS: &str = "en,en-US,en-GB,en-orig";
+
 pub fn is_lossless(audio_format: &str) -> bool {
     matches!(audio_format, "flac" | "wav")
 }
@@ -52,6 +56,33 @@ pub struct DownloadOptions {
     pub playlist: bool,
     /// Cut sponsor/self-promo segments using SponsorBlock (YouTube only).
     pub remove_sponsors: bool,
+    /// yt-dlp `--sub-langs` list, comma separated (used when `embed_subs` is on).
+    pub sub_langs: String,
+    /// Fall back to auto-generated captions.
+    pub auto_subs: bool,
+    pub subs_mode: SubsMode,
+    /// Also save each chapter as its own file.
+    pub split_chapters: bool,
+    /// Crop embedded cover art to a square, like album art.
+    pub square_cover: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SubsMode {
+    /// Inside the video file.
+    #[default]
+    Embed,
+    /// Separate .srt files next to the download.
+    Srt,
+}
+
+/// Tags written into a downloaded audio file, replacing what the site provided.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct Tags {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
 }
 
 impl Default for DownloadOptions {
@@ -67,6 +98,11 @@ impl Default for DownloadOptions {
             embed_subs: false,
             playlist: false,
             remove_sponsors: false,
+            sub_langs: DEFAULT_SUB_LANGS.into(),
+            auto_subs: false,
+            subs_mode: SubsMode::Embed,
+            split_chapters: false,
+            square_cover: false,
         }
     }
 }
@@ -186,6 +222,9 @@ pub struct DownloadRequest {
     /// yt-dlp `--download-archive` file; links recorded there are skipped.
     pub archive: Option<PathBuf>,
     pub network: NetworkOptions,
+    /// Exact yt-dlp format selector (e.g. `137+140`) picked from the lookup; overrides quality.
+    pub format: Option<String>,
+    pub tags: Option<Tags>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -197,6 +236,116 @@ pub struct MediaInfo {
     pub is_playlist: bool,
     pub entries: usize,
     pub extractor: Option<String>,
+    pub formats: Vec<FormatInfo>,
+    /// Languages with uploaded subtitles.
+    pub subtitle_langs: Vec<String>,
+    /// Whether auto-generated captions exist.
+    pub has_auto_captions: bool,
+    pub chapters: usize,
+    pub track: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+/// One downloadable stream from the lookup.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FormatInfo {
+    pub id: String,
+    pub ext: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub fps: Option<f32>,
+    /// `None` when the format has no video.
+    pub vcodec: Option<String>,
+    /// `None` when the format has no audio.
+    pub acodec: Option<String>,
+    /// Total bitrate in kbit/s.
+    pub tbr: Option<f64>,
+    /// Exact or approximate size in bytes.
+    pub size: Option<u64>,
+    pub note: Option<String>,
+}
+
+impl FormatInfo {
+    pub fn has_video(&self) -> bool {
+        self.vcodec.is_some()
+    }
+
+    pub fn has_audio(&self) -> bool {
+        self.acodec.is_some()
+    }
+
+    /// Size in bytes, estimated from the bitrate when the site doesn't say.
+    pub fn estimated_size(&self, duration: Option<f64>) -> Option<u64> {
+        self.size
+            .or_else(|| Some((self.tbr? * 1000.0 / 8.0 * duration?) as u64))
+    }
+
+    /// e.g. `1080p60`, or the format note for audio.
+    pub fn quality_label(&self) -> String {
+        match self.height {
+            Some(h) if self.has_video() => match self.fps {
+                Some(f) if f > 30.5 => format!("{h}p{}", f.round()),
+                _ => format!("{h}p"),
+            },
+            _ => match self.tbr {
+                Some(t) => format!("{t:.0} kbps"),
+                None => self.note.clone().unwrap_or_default(),
+            },
+        }
+    }
+}
+
+/// A quality the user can pick: one row per distinct video height.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeightChoice {
+    pub height: u32,
+    pub fps: Option<f32>,
+    /// Best video at this height plus the best audio.
+    pub size: Option<u64>,
+}
+
+/// Distinct video heights, tallest first, with the size yt-dlp's pick would roughly have.
+pub fn height_choices(formats: &[FormatInfo], duration: Option<f64>) -> Vec<HeightChoice> {
+    let audio = best_audio_size(formats, duration);
+    let mut heights: Vec<u32> = formats
+        .iter()
+        .filter(|f| f.has_video())
+        .filter_map(|f| f.height)
+        .filter(|h| *h > 0)
+        .collect();
+    heights.sort_unstable_by(|a, b| b.cmp(a));
+    heights.dedup();
+    heights
+        .into_iter()
+        .map(|h| {
+            let at: Vec<&FormatInfo> = formats
+                .iter()
+                .filter(|f| f.has_video() && f.height == Some(h))
+                .collect();
+            let best = at
+                .iter()
+                .max_by(|a, b| a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0)));
+            let video = best.and_then(|f| f.estimated_size(duration));
+            let needs_audio = best.is_some_and(|f| !f.has_audio());
+            HeightChoice {
+                height: h,
+                fps: at.iter().filter_map(|f| f.fps).reduce(f32::max),
+                size: match (video, needs_audio) {
+                    (Some(v), true) => Some(v + audio.unwrap_or(0)),
+                    (v, _) => v,
+                },
+            }
+        })
+        .collect()
+}
+
+pub fn best_audio_size(formats: &[FormatInfo], duration: Option<f64>) -> Option<u64> {
+    formats
+        .iter()
+        .filter(|f| f.has_audio() && !f.has_video())
+        .max_by(|a, b| a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0)))
+        .and_then(|f| f.estimated_size(duration))
 }
 
 #[derive(Deserialize)]
@@ -214,6 +363,52 @@ struct RawInfo {
     entries: Vec<serde_json::Value>,
     playlist_count: Option<usize>,
     extractor_key: Option<String>,
+    #[serde(default)]
+    formats: Vec<RawFormat>,
+    #[serde(default)]
+    subtitles: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    automatic_captions: std::collections::BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    chapters: Option<Vec<serde_json::Value>>,
+    track: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawFormat {
+    format_id: Option<String>,
+    ext: Option<String>,
+    width: Option<f64>,
+    height: Option<f64>,
+    fps: Option<f64>,
+    vcodec: Option<String>,
+    acodec: Option<String>,
+    tbr: Option<f64>,
+    filesize: Option<f64>,
+    filesize_approx: Option<f64>,
+    format_note: Option<String>,
+}
+
+impl RawFormat {
+    fn into_info(self) -> Option<FormatInfo> {
+        let codec = |c: Option<String>| c.filter(|c| c != "none" && !c.is_empty());
+        let f = FormatInfo {
+            id: self.format_id?,
+            ext: self.ext.unwrap_or_default(),
+            width: self.width.map(|v| v as u32),
+            height: self.height.map(|v| v as u32),
+            fps: self.fps.map(|v| v as f32),
+            vcodec: codec(self.vcodec),
+            acodec: codec(self.acodec),
+            tbr: self.tbr,
+            size: self.filesize.or(self.filesize_approx).map(|v| v as u64),
+            note: self.format_note,
+        };
+        // Storyboards and other image-only "formats".
+        (f.has_video() || f.has_audio()).then_some(f)
+    }
 }
 
 #[derive(Deserialize)]
@@ -273,6 +468,17 @@ fn parse_info(json: &[u8]) -> Result<MediaInfo> {
         is_playlist,
         entries: raw.playlist_count.unwrap_or(raw.entries.len()),
         extractor: raw.extractor_key,
+        formats: raw.formats.into_iter().filter_map(RawFormat::into_info).collect(),
+        subtitle_langs: raw
+            .subtitles
+            .into_keys()
+            .filter(|k| k != "live_chat")
+            .collect(),
+        has_auto_captions: !raw.automatic_captions.is_empty(),
+        chapters: raw.chapters.map_or(0, |c| c.len()),
+        track: raw.track,
+        artist: raw.artist,
+        album: raw.album,
     })
 }
 
@@ -332,27 +538,29 @@ pub fn build_args(req: &DownloadRequest) -> Vec<String> {
     match o.mode {
         Mode::Video => {
             push("-f");
-            push("bv*+ba/b");
-            let mut sort = Vec::new();
-            if o.max_height > 0 {
-                sort.push(format!("res:{}", o.max_height));
-            }
-            match o.container.as_str() {
-                // h264/aac keeps mp4 files playable everywhere.
-                "mp4" => sort.extend(["vcodec:h264".into(), "acodec:m4a".into()]),
-                "webm" => sort.extend(["vcodec:vp9".into(), "acodec:opus".into()]),
-                _ => {}
-            }
-            if !sort.is_empty() {
-                push("-S");
-                push(&sort.join(","));
+            if let Some(f) = &req.format {
+                push(f);
+            } else {
+                push("bv*+ba/b");
+                let mut sort = Vec::new();
+                if o.max_height > 0 {
+                    sort.push(format!("res:{}", o.max_height));
+                }
+                match o.container.as_str() {
+                    // h264/aac keeps mp4 files playable everywhere.
+                    "mp4" => sort.extend(["vcodec:h264".into(), "acodec:m4a".into()]),
+                    "webm" => sort.extend(["vcodec:vp9".into(), "acodec:opus".into()]),
+                    _ => {}
+                }
+                if !sort.is_empty() {
+                    push("-S");
+                    push(&sort.join(","));
+                }
             }
             push("--merge-output-format");
             push(&o.container);
-            if o.embed_subs {
+            if o.embed_subs && o.subs_mode == SubsMode::Embed {
                 push("--embed-subs");
-                push("--sub-langs");
-                push("en.*,en");
             }
             if o.embed_thumbnail && o.container != "webm" {
                 push("--embed-thumbnail");
@@ -360,7 +568,7 @@ pub fn build_args(req: &DownloadRequest) -> Vec<String> {
         }
         Mode::Audio => {
             push("-f");
-            push("ba/b");
+            push(req.format.as_deref().unwrap_or("ba/b"));
             push("-x");
             push("--audio-format");
             push(&o.audio_format);
@@ -373,8 +581,36 @@ pub fn build_args(req: &DownloadRequest) -> Vec<String> {
             }
         }
     }
+    if o.embed_subs {
+        // Audio has nowhere to embed subtitles, so they're always saved alongside.
+        if o.mode == Mode::Audio || o.subs_mode == SubsMode::Srt {
+            push("--write-subs");
+            push("--convert-subs");
+            push("srt");
+        }
+        if o.auto_subs {
+            push("--write-auto-subs");
+        }
+        push("--sub-langs");
+        push(if o.sub_langs.trim().is_empty() { DEFAULT_SUB_LANGS } else { o.sub_langs.trim() });
+    }
+    let embeds_cover = o.embed_thumbnail
+        && match o.mode {
+            Mode::Video => o.container != "webm",
+            Mode::Audio => o.audio_format != "wav",
+        };
+    if embeds_cover && o.square_cover {
+        push("--convert-thumbnails");
+        push("jpg");
+        push("--ppa");
+        push("ThumbnailsConvertor+FFmpeg_o:-c:v mjpeg -vf \"crop='min(iw,ih)':'min(iw,ih)'\"");
+    }
     if o.embed_metadata {
         push("--embed-metadata");
+    }
+    let split = o.split_chapters && req.trim.is_none() && !o.playlist;
+    if split {
+        push("--split-chapters");
     }
     if o.remove_sponsors {
         push("--sponsorblock-remove");
@@ -403,6 +639,13 @@ pub fn build_args(req: &DownloadRequest) -> Vec<String> {
         (Some(t), false) => format!("%(title)s [%(id)s] {}.%(ext)s", t.label()),
         (None, false) => "%(title)s [%(id)s].%(ext)s".into(),
     });
+    if split {
+        a.push("-o".into());
+        a.push(
+            "chapter:%(title)s [%(id)s] - chapters/%(section_number)02d - %(section_title)s.%(ext)s"
+                .into(),
+        );
+    }
     a.push("--".into());
     a.push(req.url.clone());
     a
@@ -459,6 +702,9 @@ fn postprocessor_label(name: &str) -> String {
         "EmbedSubtitle" => "Embedding subtitles…".into(),
         "MoveFiles" => "Finishing…".into(),
         "SponsorBlock" | "ModifyChapters" => "Removing sponsor segments…".into(),
+        "SplitChapters" | "FFmpegSplitChapters" => "Splitting chapters…".into(),
+        "FFmpegSubtitlesConvertor" | "SubtitlesConvertor" => "Converting subtitles…".into(),
+        "ThumbnailsConvertor" | "FFmpegThumbnailsConvertor" => "Preparing cover art…".into(),
         other => format!("Processing ({other})…"),
     }
 }
@@ -511,14 +757,76 @@ pub fn download(
         }
     })?;
 
-    if last_file.is_none() && archived > 0 {
+    // `--print` makes yt-dlp quiet, so the "already recorded" line usually isn't shown; a run
+    // with an archive that started nothing and wrote nothing means everything was skipped.
+    if last_file.is_none() && (archived > 0 || req.archive.is_some() && items == 0) {
         return Err(AlreadyDownloaded.into());
+    }
+    if let (Some(tags), Some(file)) = (&req.tags, &last_file)
+        && !req.options.playlist
+    {
+        rep.processing("Writing tags…");
+        write_tags(tools, file, tags, cancel)?;
     }
     // For playlists, point "open" at the playlist folder rather than the last track.
     Ok(match (req.options.playlist && items > 1, last_file) {
         (true, Some(f)) => f.parent().map(Path::to_path_buf),
         (_, f) => f,
     })
+}
+
+/// ffmpeg arguments that copy `input` to `output` with new title/artist/album tags.
+fn tag_args(input: &Path, output: &Path, tags: &Tags, has_cover: bool) -> Vec<String> {
+    let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    a.push(input.display().to_string());
+    // Audio plus any cover image; data tracks (e.g. timed metadata) can break the muxer.
+    a.extend(["-map", "0:a", "-map", "0:v?", "-map_metadata", "0", "-c", "copy"].map(String::from));
+    let ext = input
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        // Keep the cover as cover art rather than a video track.
+        "m4a" | "mp4" if has_cover => {
+            a.extend(["-disposition:v", "attached_pic"].map(String::from))
+        }
+        "mp3" => a.extend(["-id3v2_version", "3"].map(String::from)),
+        _ => {}
+    }
+    for (key, value) in [("title", &tags.title), ("artist", &tags.artist), ("album", &tags.album)] {
+        if !value.trim().is_empty() {
+            a.push("-metadata".into());
+            a.push(format!("{key}={}", value.trim()));
+        }
+    }
+    a.push(output.display().to_string());
+    a
+}
+
+fn write_tags(tools: &ToolPaths, file: &Path, tags: &Tags, cancel: &CancelHandle) -> Result<()> {
+    let ffmpeg = tools
+        .ffmpeg
+        .as_ref()
+        .ok_or_else(|| anyhow!("ffmpeg is not installed"))?;
+    let ext = file.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = file.with_extension(format!("tagging.{ext}"));
+    let has_cover = tools.ffprobe.as_ref().is_some_and(|p| {
+        command(p)
+            .args(["-v", "error", "-select_streams", "v", "-show_entries", "stream=index", "-of", "csv=p=0"])
+            .arg(file)
+            .output()
+            .is_ok_and(|o| !o.stdout.trim_ascii().is_empty())
+    });
+    let mut cmd = command(ffmpeg);
+    cmd.args(tag_args(file, &tmp, tags, has_cover));
+    if let Err(e) = run_streaming(cmd, cancel, |_| {}) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.context("couldn't write tags"));
+    }
+    std::fs::rename(&tmp, file).context("couldn't replace the file with the tagged copy")
 }
 
 #[cfg(test)]
@@ -563,6 +871,90 @@ mod tests {
             out_dir: PathBuf::from("out"),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn format_subs_chapter_args() {
+        let mut r = req(DownloadOptions::default());
+        r.format = Some("137+140".into());
+        let a = build_args(&r);
+        assert!(has_pair(&a, "-f", "137+140"));
+        assert!(!a.contains(&"-S".to_string()));
+        assert!(!a.contains(&"--sub-langs".to_string()));
+
+        r.options.embed_subs = true;
+        r.options.sub_langs = "de,fr".into();
+        let a = build_args(&r);
+        assert!(a.contains(&"--embed-subs".to_string()));
+        assert!(has_pair(&a, "--sub-langs", "de,fr"));
+        assert!(!a.contains(&"--write-subs".to_string()));
+
+        r.options.subs_mode = SubsMode::Srt;
+        r.options.auto_subs = true;
+        let a = build_args(&r);
+        assert!(!a.contains(&"--embed-subs".to_string()));
+        assert!(has_pair(&a, "--convert-subs", "srt"));
+        assert!(a.contains(&"--write-auto-subs".to_string()));
+
+        r.options.split_chapters = true;
+        let a = build_args(&r);
+        assert!(a.contains(&"--split-chapters".to_string()));
+        assert!(a.iter().any(|s| s.starts_with("chapter:")));
+        r.trim = Some(Trim { start: 1.0, end: None, precise: false });
+        assert!(!build_args(&r).contains(&"--split-chapters".to_string()));
+
+        let mut audio = req(DownloadOptions {
+            mode: Mode::Audio,
+            square_cover: true,
+            ..Default::default()
+        });
+        audio.format = Some("251".into());
+        let a = build_args(&audio);
+        assert!(has_pair(&a, "-f", "251"));
+        assert!(has_pair(&a, "--convert-thumbnails", "jpg"));
+        assert!(a.iter().any(|s| s.contains("crop='min(iw,ih)'")));
+    }
+
+    #[test]
+    fn tag_args_copy_and_set_metadata() {
+        let tags = Tags {
+            title: " New ".into(),
+            artist: "Band".into(),
+            album: String::new(),
+        };
+        let a = tag_args(Path::new("a.m4a"), Path::new("a.tagging.m4a"), &tags, true).join(" ");
+        assert!(a.contains("-map 0:a -map 0:v? -map_metadata 0 -c copy -disposition:v attached_pic"));
+        assert!(a.contains("-metadata title=New -metadata artist=Band"));
+        assert!(!a.contains("album="));
+        assert!(a.ends_with("a.tagging.m4a"));
+        let mp3 = tag_args(Path::new("a.mp3"), Path::new("o.mp3"), &tags, true).join(" ");
+        assert!(mp3.contains("-id3v2_version 3") && !mp3.contains("disposition"));
+    }
+
+    #[test]
+    fn height_choices_estimate_sizes() {
+        let f = |id: &str, h: Option<u32>, v: bool, a: bool, tbr: f64, size: Option<u64>| FormatInfo {
+            id: id.into(),
+            height: h,
+            fps: h.map(|_| 30.0),
+            vcodec: v.then(|| "avc1".into()),
+            acodec: a.then(|| "mp4a".into()),
+            tbr: Some(tbr),
+            size,
+            ..Default::default()
+        };
+        let formats = vec![
+            f("140", None, false, true, 128.0, Some(1_000)),
+            f("137", Some(1080), true, false, 4000.0, Some(50_000)),
+            f("136", Some(720), true, false, 2000.0, None),
+            f("18", Some(360), true, true, 500.0, Some(9_000)),
+        ];
+        let c = height_choices(&formats, Some(10.0));
+        assert_eq!(c.iter().map(|c| c.height).collect::<Vec<_>>(), vec![1080, 720, 360]);
+        assert_eq!(c[0].size, Some(51_000));
+        assert_eq!(c[1].size, Some(2_500_000 + 1_000), "720 estimated from bitrate");
+        assert_eq!(c[2].size, Some(9_000), "combined format needs no extra audio");
+        assert_eq!(formats[1].quality_label(), "1080p");
     }
 
     #[test]
@@ -669,6 +1061,23 @@ mod tests {
         assert_eq!(info.uploader.as_deref(), Some("C"));
         assert_eq!(info.thumbnail.as_deref(), Some("b"));
         assert!(!info.is_playlist);
+
+        let full = parse_info(
+            br#"{"title":"T","formats":[{"format_id":"sb0","vcodec":"none","acodec":"none"},
+                {"format_id":"137","ext":"mp4","height":1080,"fps":60,"vcodec":"avc1","acodec":"none","filesize_approx":5e7},
+                {"format_id":"140","ext":"m4a","vcodec":"none","acodec":"mp4a.40.2","tbr":129.5}],
+                "subtitles":{"de":[],"live_chat":[]},"automatic_captions":{"en":[]},
+                "chapters":[{},{}],"artist":"A"}"#,
+        )
+        .unwrap();
+        assert_eq!(full.formats.len(), 2, "storyboard dropped");
+        assert_eq!(full.formats[0].size, Some(50_000_000));
+        assert_eq!(full.formats[0].quality_label(), "1080p60");
+        assert!(!full.formats[1].has_video() && full.formats[1].has_audio());
+        assert_eq!(full.subtitle_langs, vec!["de".to_string()]);
+        assert!(full.has_auto_captions);
+        assert_eq!(full.chapters, 2);
+        assert_eq!(full.artist.as_deref(), Some("A"));
 
         let pl = parse_info(br#"{"_type":"playlist","title":"P","entries":[{},{},{}]}"#).unwrap();
         assert!(pl.is_playlist);

@@ -8,8 +8,8 @@ use crate::jobs::JobSpec;
 use crate::task::Task;
 use crate::theme;
 use crate::tools::ytdlp::{
-    self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DownloadRequest, MediaInfo, Mode, Trim,
-    VIDEO_QUALITIES,
+    self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DownloadOptions, DownloadRequest,
+    FormatInfo, MediaInfo, Mode, SubsMode, Tags, Trim, VIDEO_QUALITIES,
 };
 
 #[derive(Default)]
@@ -21,6 +21,42 @@ pub struct DownloadPage {
     /// "Added to queue" toast and when it was shown.
     toast: Option<(String, f64)>,
     trim: TrimState,
+    /// Exact formats picked from the lookup's format list.
+    pick_video: Option<String>,
+    pick_audio: Option<String>,
+    /// Audio tags as edited, and as they came from the site.
+    tags: Tags,
+    tags_prefill: Tags,
+}
+
+impl DownloadPage {
+    /// Forgets everything tied to the current link.
+    fn reset_link(&mut self) {
+        self.info = None;
+        self.error = None;
+        self.trim = TrimState::default();
+        self.pick_video = None;
+        self.pick_audio = None;
+        self.tags = Tags::default();
+        self.tags_prefill = Tags::default();
+    }
+
+    /// The `-f` selector for the picked formats, if any apply to `mode`.
+    fn picked_format(&self, mode: Mode) -> Option<String> {
+        let formats = &self.info.as_ref()?.formats;
+        match mode {
+            Mode::Audio => self.pick_audio.clone(),
+            Mode::Video => {
+                let v = self.pick_video.as_ref()?;
+                let has_audio = formats.iter().any(|f| &f.id == v && f.has_audio());
+                Some(match (&self.pick_audio, has_audio) {
+                    (Some(a), _) => format!("{v}+{a}"),
+                    (None, true) => v.clone(),
+                    (None, false) => format!("{v}+ba"),
+                })
+            }
+        }
+    }
 }
 
 /// Per-link trim selection, edited with the range bar or the time fields.
@@ -111,6 +147,16 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Ok(info) => {
                 app.settings.download.playlist = info.is_playlist;
                 page.trim = TrimState::for_duration(info.duration);
+                page.tags_prefill = Tags {
+                    title: info.track.clone().unwrap_or_else(|| info.title.clone()),
+                    artist: info
+                        .artist
+                        .clone()
+                        .or_else(|| info.uploader.clone())
+                        .unwrap_or_default(),
+                    album: info.album.clone().unwrap_or_default(),
+                };
+                page.tags = page.tags_prefill.clone();
                 page.info = Some(info);
             }
             Err(e) => page.error = Some(format!("{e:#}")),
@@ -155,9 +201,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                             .desired_width(f32::INFINITY),
                     );
                     if resp.changed() {
-                        page.info = None;
-                        page.error = None;
-                        page.trim = TrimState::default();
+                        page.reset_link();
                     }
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         lookup = true;
@@ -172,9 +216,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
     let url = page.url.trim().to_owned();
     if lookup && can_fetch && !url.is_empty() {
-        page.info = None;
-        page.error = None;
-        page.trim = TrimState::default();
+        page.reset_link();
         let tools = app.tools.clone();
         let net = app.settings.network.clone();
         let fetch_url = url.clone();
@@ -210,80 +252,15 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
     // Format options
     let is_playlist = page.info.as_ref().is_some_and(|i| i.is_playlist);
-    let o = &mut app.settings.download;
-    theme::card(ui, |ui| {
-        ui.label(theme::heading("Format"));
-        ui.add_space(6.0);
-        theme::chips(ui, &mut o.mode, &[(Mode::Video, "Video"), (Mode::Audio, "Audio only")]);
-        ui.add_space(10.0);
-
-        match o.mode {
-            Mode::Video => {
-                theme::option_row(ui, "Quality", |ui| {
-                    let current = VIDEO_QUALITIES
-                        .iter()
-                        .find(|(h, _)| *h == o.max_height)
-                        .map_or("Custom", |(_, l)| l);
-                    ComboBox::from_id_salt("dl-quality")
-                        .selected_text(current)
-                        .width(180.0)
-                        .show_ui(ui, |ui| {
-                            for (h, label) in VIDEO_QUALITIES {
-                                ui.selectable_value(&mut o.max_height, *h, *label);
-                            }
-                        });
-                });
-                theme::option_row(ui, "Container", |ui| {
-                    let opts: Vec<(String, &str)> =
-                        CONTAINERS.iter().map(|c| (c.to_string(), *c)).collect();
-                    theme::chips(ui, &mut o.container, &opts);
-                });
-            }
-            Mode::Audio => {
-                theme::option_row(ui, "Format", |ui| {
-                    let opts: Vec<(String, &str)> =
-                        AUDIO_FORMATS.iter().map(|c| (c.to_string(), *c)).collect();
-                    theme::chips(ui, &mut o.audio_format, &opts);
-                });
-                if !ytdlp::is_lossless(&o.audio_format) {
-                    theme::option_row(ui, "Bitrate", |ui| {
-                        let current = AUDIO_BITRATES
-                            .iter()
-                            .find(|(v, _)| *v == o.audio_bitrate)
-                            .map_or("Custom", |(_, l)| l);
-                        ComboBox::from_id_salt("dl-bitrate")
-                            .selected_text(current)
-                            .width(180.0)
-                            .show_ui(ui, |ui| {
-                                for (v, label) in AUDIO_BITRATES {
-                                    ui.selectable_value(&mut o.audio_bitrate, v.to_string(), *label);
-                                }
-                            });
-                    });
-                }
-            }
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 28.0;
-            theme::toggle(ui, &mut o.embed_thumbnail, "Embed cover art");
-            theme::toggle(ui, &mut o.embed_metadata, "Embed metadata");
-            if o.mode == Mode::Video {
-                theme::toggle(ui, &mut o.embed_subs, "Embed subtitles");
-            }
-            if is_playlist {
-                theme::toggle(ui, &mut o.playlist, "Download whole playlist");
-            }
-        });
-    });
+    format_card(ui, app, is_playlist);
     ui.add_space(16.0);
-
     let duration = app.download.info.as_ref().and_then(|i| i.duration);
     edit_card(ui, app, is_playlist, duration);
     ui.add_space(16.0);
+    if app.settings.download.mode == Mode::Audio && !is_playlist && app.download.info.is_some() {
+        tags_card(ui, &mut app.download.tags);
+        ui.add_space(16.0);
+    }
 
     // Destination + action
     let dir = app.settings.download_dir.clone();
@@ -318,11 +295,17 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             if !is_playlist {
                 options_for_job.playlist = false;
             }
+            let format = page.picked_format(options.mode);
             let mut summary = options.summary();
+            if let Some(f) = &format {
+                summary = format!("{} · format {f}", summary.split(" · ").take(2).collect::<Vec<_>>().join(" · "));
+            }
             if let Some(t) = &trim {
                 let end = t.end.map_or("end".to_owned(), fmt_time);
                 summary.push_str(&format!(" · Clip {}–{end}", fmt_time(t.start)));
             }
+            let tags = (options.mode == Mode::Audio && !is_playlist && page.tags != page.tags_prefill)
+                .then(|| page.tags.clone());
             app.jobs.push(
                 title.clone(),
                 summary,
@@ -335,12 +318,13 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                         .then(crate::settings::archive_path),
                     network: app.settings.network.clone(),
                     trim,
+                    format,
+                    tags,
                 }),
             );
             page.toast = Some((title, now));
             page.url.clear();
-            page.info = None;
-            page.trim = TrimState::default();
+            page.reset_link();
         }
 
         if let Some((title, at)) = &page.toast {
@@ -367,6 +351,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
 /// Trim and clean-up applied while downloading.
 fn edit_card(ui: &mut Ui, app: &mut App, is_playlist: bool, duration: Option<f64>) {
+    let chapters = app.download.info.as_ref().map(|i| i.chapters);
     let t = &mut app.download.trim;
     let o = &mut app.settings.download;
     theme::card(ui, |ui| {
@@ -444,6 +429,18 @@ fn edit_card(ui: &mut Ui, app: &mut App, is_playlist: bool, duration: Option<f64
                     .color(theme::SUBTLE),
             );
         });
+        if !is_playlist && !t.on {
+            ui.horizontal(|ui| {
+                theme::toggle(ui, &mut o.split_chapters, "Split into chapter files");
+                ui.add_space(8.0);
+                let hint = match chapters {
+                    Some(0) => "This video has no chapters".to_owned(),
+                    Some(n) => format!("{n} chapters · saved in a folder next to the full file"),
+                    None => "Only for videos with chapters".to_owned(),
+                };
+                ui.label(RichText::new(hint).small().color(theme::SUBTLE));
+            });
+        }
     });
 }
 
@@ -528,4 +525,303 @@ fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) {
             });
         });
     });
+}
+
+/// Video/audio choice, quality, exact formats, embeds and subtitles.
+fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
+    let page = &mut app.download;
+    let o = &mut app.settings.download;
+    let duration = page.info.as_ref().and_then(|i| i.duration);
+    let has_formats = page
+        .info
+        .as_ref()
+        .is_some_and(|i| !i.is_playlist && !i.formats.is_empty());
+    theme::card(ui, |ui| {
+        ui.label(theme::heading("Format"));
+        ui.add_space(6.0);
+        theme::chips(ui, &mut o.mode, &[(Mode::Video, "Video"), (Mode::Audio, "Audio only")]);
+        ui.add_space(10.0);
+
+        let picked = match o.mode {
+            Mode::Video => page.pick_video.is_some(),
+            Mode::Audio => page.pick_audio.is_some(),
+        };
+        let formats: &[FormatInfo] = match &page.info {
+            Some(i) if has_formats => &i.formats,
+            _ => &[],
+        };
+        match o.mode {
+            Mode::Video => {
+                theme::option_row(ui, "Quality", |ui| {
+                    if picked {
+                        ui.label(theme::muted("Exact format picked below"));
+                    } else if has_formats {
+                        quality_combo(ui, o, &ytdlp::height_choices(formats, duration));
+                    } else {
+                        let current = VIDEO_QUALITIES
+                            .iter()
+                            .find(|(h, _)| *h == o.max_height)
+                            .map_or("Custom", |(_, l)| l);
+                        ComboBox::from_id_salt("dl-quality")
+                            .selected_text(current)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for (h, label) in VIDEO_QUALITIES {
+                                    ui.selectable_value(&mut o.max_height, *h, *label);
+                                }
+                            });
+                    }
+                });
+                theme::option_row(ui, "Container", |ui| {
+                    let opts: Vec<(String, &str)> =
+                        CONTAINERS.iter().map(|c| (c.to_string(), *c)).collect();
+                    theme::chips(ui, &mut o.container, &opts);
+                });
+            }
+            Mode::Audio => {
+                theme::option_row(ui, "Format", |ui| {
+                    let opts: Vec<(String, &str)> =
+                        AUDIO_FORMATS.iter().map(|c| (c.to_string(), *c)).collect();
+                    theme::chips(ui, &mut o.audio_format, &opts);
+                });
+                if !ytdlp::is_lossless(&o.audio_format) {
+                    theme::option_row(ui, "Bitrate", |ui| {
+                        let current = AUDIO_BITRATES
+                            .iter()
+                            .find(|(v, _)| *v == o.audio_bitrate)
+                            .map_or("Custom", |(_, l)| l);
+                        ComboBox::from_id_salt("dl-bitrate")
+                            .selected_text(current)
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for (v, label) in AUDIO_BITRATES {
+                                    ui.selectable_value(&mut o.audio_bitrate, v.to_string(), *label);
+                                }
+                            });
+                        if let Some(size) = ytdlp::best_audio_size(formats, duration) {
+                            ui.label(
+                                RichText::new(format!("source ≈ {}", super::fmt_bytes(size)))
+                                    .small()
+                                    .color(theme::SUBTLE),
+                            );
+                        }
+                    });
+                }
+            }
+        }
+
+        if has_formats {
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(RichText::new("Pick exact formats").color(theme::MUTED))
+                .id_salt("dl-exact")
+                .show(ui, |ui| {
+                    exact_formats(ui, &mut page.pick_video, &mut page.pick_audio, formats, o.mode, duration)
+                });
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 28.0;
+            theme::toggle(ui, &mut o.embed_thumbnail, "Embed cover art");
+            if o.mode == Mode::Audio && o.embed_thumbnail {
+                theme::toggle(ui, &mut o.square_cover, "Square cover");
+            }
+            theme::toggle(ui, &mut o.embed_metadata, "Embed metadata");
+            theme::toggle(ui, &mut o.embed_subs, "Subtitles");
+            if is_playlist {
+                theme::toggle(ui, &mut o.playlist, "Download whole playlist");
+            }
+        });
+        if o.embed_subs {
+            ui.add_space(6.0);
+            subtitle_options(ui, o, page.info.as_ref());
+        }
+    });
+}
+
+fn quality_combo(ui: &mut Ui, o: &mut DownloadOptions, choices: &[ytdlp::HeightChoice]) {
+    let label = |c: &ytdlp::HeightChoice| {
+        let mut s = format!("{}p", c.height);
+        if let Some(f) = c.fps.filter(|f| *f > 30.5) {
+            s.push_str(&format!("{}", f.round()));
+        }
+        if let Some(size) = c.size {
+            s.push_str(&format!("  ·  ≈ {}", super::fmt_bytes(size)));
+        }
+        s
+    };
+    let current = if o.max_height == 0 {
+        choices
+            .first()
+            .map_or("Best available".to_owned(), |c| format!("Best ({})", label(c)))
+    } else {
+        // yt-dlp picks the tallest at or below the limit.
+        choices
+            .iter()
+            .find(|c| c.height <= o.max_height)
+            .map_or_else(|| format!("Up to {}p", o.max_height), label)
+    };
+    ComboBox::from_id_salt("dl-quality-real")
+        .selected_text(current)
+        .width(240.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut o.max_height, 0, "Best available");
+            for c in choices {
+                ui.selectable_value(&mut o.max_height, c.height, label(c));
+            }
+        });
+}
+
+fn exact_formats(
+    ui: &mut Ui,
+    pick_video: &mut Option<String>,
+    pick_audio: &mut Option<String>,
+    formats: &[FormatInfo],
+    mode: Mode,
+    duration: Option<f64>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Overrides the quality setting for this link only.")
+                .small()
+                .color(theme::SUBTLE),
+        );
+        if (pick_video.is_some() || pick_audio.is_some()) && ui.link("Back to automatic").clicked() {
+            *pick_video = None;
+            *pick_audio = None;
+        }
+    });
+    let row = |f: &FormatInfo| {
+        let codec = match (&f.vcodec, &f.acodec) {
+            (Some(v), Some(a)) => format!("{} + {}", short_codec(v), short_codec(a)),
+            (Some(v), None) => short_codec(v).to_owned(),
+            (None, Some(a)) => short_codec(a).to_owned(),
+            (None, None) => String::new(),
+        };
+        let size = f
+            .estimated_size(duration)
+            .map_or("?".to_owned(), super::fmt_bytes);
+        format!("{:<8}{:<12}{:<6}{:<20}{size}", f.id, f.quality_label(), f.ext, codec)
+    };
+    let list = |ui: &mut Ui, title: &str, pick: &mut Option<String>, keep: &dyn Fn(&FormatInfo) -> bool| {
+        ui.add_space(4.0);
+        ui.label(theme::eyebrow(title));
+        let mut rows: Vec<&FormatInfo> = formats.iter().filter(|f| keep(f)).collect();
+        rows.sort_by(|a, b| {
+            (b.height.unwrap_or(0), b.tbr.unwrap_or(0.0) as u64)
+                .cmp(&(a.height.unwrap_or(0), a.tbr.unwrap_or(0.0) as u64))
+        });
+        for f in rows {
+            let selected = pick.as_deref() == Some(f.id.as_str());
+            if ui
+                .selectable_label(selected, RichText::new(row(f)).monospace().size(12.0))
+                .clicked()
+            {
+                *pick = if selected { None } else { Some(f.id.clone()) };
+            }
+        }
+    };
+    if mode == Mode::Video {
+        list(ui, "Video", pick_video, &|f| f.has_video());
+    }
+    list(ui, "Audio", pick_audio, &|f| f.has_audio() && !f.has_video());
+}
+
+fn short_codec(c: &str) -> &str {
+    c.split('.').next().unwrap_or(c)
+}
+
+fn subtitle_options(ui: &mut Ui, o: &mut DownloadOptions, info: Option<&MediaInfo>) {
+    theme::option_row(ui, "Languages", |ui| {
+        text_input(ui, &mut o.sub_langs, ytdlp::DEFAULT_SUB_LANGS, 200.0);
+        ui.label(
+            RichText::new("Comma separated · \"all\" for every language")
+                .small()
+                .color(theme::SUBTLE),
+        );
+    });
+    let single = info.filter(|i| !i.is_playlist);
+    if let Some(info) = single.filter(|i| !i.subtitle_langs.is_empty()) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(150.0);
+            ui.label(RichText::new("Available:").small().color(theme::SUBTLE));
+            for lang in info.subtitle_langs.iter().take(24) {
+                let mut langs: Vec<String> = o
+                    .sub_langs
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let on = langs.contains(lang);
+                if ui.selectable_label(on, lang).clicked() {
+                    if on {
+                        langs.retain(|l| l != lang);
+                    } else {
+                        langs.push(lang.clone());
+                    }
+                    o.sub_langs = langs.join(",");
+                }
+            }
+        });
+    } else if let Some(info) = single {
+        ui.horizontal(|ui| {
+            ui.add_space(150.0);
+            let msg = if info.has_auto_captions {
+                "No uploaded subtitles; turn on auto-generated captions below."
+            } else {
+                "This video has no subtitles."
+            };
+            ui.label(RichText::new(msg).small().color(theme::SUBTLE));
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(150.0);
+        theme::toggle(ui, &mut o.auto_subs, "Include auto-generated captions");
+    });
+    if o.mode == Mode::Video {
+        theme::option_row(ui, "Save as", |ui| {
+            theme::chips(
+                ui,
+                &mut o.subs_mode,
+                &[(SubsMode::Embed, "Inside the video"), (SubsMode::Srt, ".srt files")],
+            );
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.add_space(150.0);
+            ui.label(
+                RichText::new("Saved as .srt files next to the audio")
+                    .small()
+                    .color(theme::SUBTLE),
+            );
+        });
+    }
+}
+
+fn tags_card(ui: &mut Ui, tags: &mut Tags) {
+    theme::card(ui, |ui| {
+        ui.label(theme::heading("Tags"));
+        ui.label(theme::muted("Written into the audio file. Edit to fix names from the site."));
+        ui.add_space(6.0);
+        theme::option_row(ui, "Title", |ui| text_input(ui, &mut tags.title, "", 360.0));
+        theme::option_row(ui, "Artist", |ui| text_input(ui, &mut tags.artist, "", 360.0));
+        theme::option_row(ui, "Album", |ui| text_input(ui, &mut tags.album, "", 360.0));
+    });
+}
+
+fn text_input(ui: &mut Ui, text: &mut String, hint: &str, width: f32) {
+    Frame::new()
+        .fill(theme::INPUT)
+        .corner_radius(6)
+        .inner_margin(Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.add(
+                TextEdit::singleline(text)
+                    .frame(Frame::NONE)
+                    .hint_text(hint)
+                    .desired_width(width),
+            );
+        });
 }
