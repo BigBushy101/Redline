@@ -7,6 +7,8 @@ pub mod format;
 pub mod history;
 pub mod jobs;
 pub mod library;
+#[cfg(windows)]
+pub mod media_keys;
 pub mod player;
 pub mod presets;
 pub mod queue_watch;

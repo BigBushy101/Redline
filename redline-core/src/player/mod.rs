@@ -88,6 +88,9 @@ pub struct PlayerState {
     pub volume: f32,
     /// Counts loads, so the UI can tell one `Ended` from the next.
     pub load_id: u64,
+    /// How many times a track ended and the player moved on to the `SetNext` source by
+    /// itself, so the app can move its queue along.
+    pub advances: u64,
 }
 
 impl Default for PlayerState {
@@ -101,6 +104,7 @@ impl Default for PlayerState {
             buffering: false,
             volume: 1.0,
             load_id: 0,
+            advances: 0,
         }
     }
 }
@@ -133,6 +137,9 @@ pub enum Command {
     SetTools(ToolPaths),
     /// Cookies, proxy and so on for resolving links.
     SetNetwork(NetworkOptions),
+    /// What to play when the current track ends. The engine moves on by itself, so a
+    /// playlist keeps going however rarely the UI runs (minimized, say).
+    SetNext(Option<Source>),
 }
 
 /// The player's saved controls.
@@ -278,6 +285,7 @@ impl Player {
                     current: None,
                     next_stream: 1,
                     want_play: false,
+                    next: None,
                     last_wake: Instant::now(),
                     lost_at: None,
                 }
@@ -298,6 +306,23 @@ impl Player {
 
     pub fn state(&self) -> PlayerState {
         self.state.lock().unwrap().clone()
+    }
+}
+
+impl Player {
+    /// A handle for sending commands from another thread.
+    pub fn remote(&self) -> PlayerRemote {
+        PlayerRemote(self.tx.clone())
+    }
+}
+
+/// Sends commands to the player from anywhere, e.g. the media-key callback.
+#[derive(Clone)]
+pub struct PlayerRemote(Sender<Msg>);
+
+impl PlayerRemote {
+    pub fn send(&self, cmd: Command) {
+        let _ = self.0.send(Msg::Cmd(cmd));
     }
 }
 
@@ -344,6 +369,8 @@ struct Engine {
     next_stream: u64,
     /// The user wants sound (as opposed to paused).
     want_play: bool,
+    /// Plays after the current track ends.
+    next: Option<Source>,
     last_wake: Instant,
     /// While the output device is gone: when to try opening it again.
     lost_at: Option<Instant>,
@@ -444,7 +471,11 @@ impl Engine {
 
     fn command(&mut self, cmd: Command) {
         match cmd {
-            Command::Load(source, start_at) => self.load(source, start_at.max(0.0)),
+            Command::Load(source, start_at) => {
+                // A new pick; the app says what follows it.
+                self.next = None;
+                self.load(source, start_at.max(0.0))
+            }
             Command::Play => self.play(),
             Command::Pause => self.pause(),
             Command::Toggle => {
@@ -465,6 +496,7 @@ impl Engine {
             Command::Stop => {
                 self.stop_stream();
                 self.current = None;
+                self.next = None;
                 self.want_play = false;
                 self.shared.playing.store(false, Ordering::Relaxed);
                 self.set_state(|s| {
@@ -476,6 +508,7 @@ impl Engine {
                     s.buffering = false;
                 });
             }
+            Command::SetNext(next) => self.next = next,
             Command::SetTools(tools) => self.env.tools = tools,
             Command::SetNetwork(network) => {
                 // Different cookies or proxy can resolve differently.
@@ -737,7 +770,13 @@ impl Engine {
         let changed = before != (st.status.clone(), st.buffering);
         drop(st);
         if changed && self.status() == Status::Ended {
-            self.shared.playing.store(false, Ordering::Relaxed);
+            match self.next.take() {
+                Some(next) => {
+                    self.load(next, 0.0);
+                    self.set_state(|s| s.advances += 1);
+                }
+                None => self.shared.playing.store(false, Ordering::Relaxed),
+            }
         }
         changed
     }

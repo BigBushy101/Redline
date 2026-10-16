@@ -5,7 +5,7 @@ use egui_phosphor::regular as icons;
 
 use redline_core::Wake;
 use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
-use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source, Status};
+use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source};
 use redline_core::queue_watch::{self, AfterQueueStep, QueueWatch};
 
 use crate::history::History;
@@ -48,8 +48,13 @@ pub struct App {
     pub library_page: ui::library::LibraryPage,
     /// What the player bar works through: a playlist or ad-hoc picks.
     pub now: NowPlaying,
-    /// The load whose end was last acted on, so a track advances once.
-    ended_load: u64,
+    /// Auto-advances of the player the queue has caught up with.
+    seen_advances: u64,
+    /// The next track (by its own source) last handed to the player.
+    sent_next: Option<Option<Source>>,
+    /// Windows media keys and overlay.
+    #[cfg(windows)]
+    media_keys: Option<redline_core::media_keys::MediaKeys>,
     /// Notifications, keep-awake and the after-queue action.
     pub watch: QueueWatch,
     /// Repaints the window; handed to background work.
@@ -81,6 +86,9 @@ impl App {
         let encoders_task = Self::detect_encoders(&wake, &tools);
         let mut jobs = JobManager::load();
         jobs.set_wake(wake.clone());
+        let player = Player::system(tools.clone(), wake.clone());
+        #[cfg(windows)]
+        let media_keys = Self::media_keys(cc, &player, &wake);
         Self {
             page: Page::Download,
             tools: tools.clone(),
@@ -98,9 +106,12 @@ impl App {
             library: Library::load(),
             library_page: Default::default(),
             now: NowPlaying::default(),
-            ended_load: 0,
+            seen_advances: 0,
+            sent_next: None,
+            #[cfg(windows)]
+            media_keys,
             watch: QueueWatch::default(),
-            player: Player::system(tools.clone(), wake.clone()),
+            player,
             player_state: PlayerState::default(),
             unmuted_volume: 1.0,
             player_network: None,
@@ -109,6 +120,37 @@ impl App {
             player_panel: None,
             wake,
             shutdown_at: None,
+        }
+    }
+
+    /// Hooks up the media keys to the window. They're a nicety, so failing is fine.
+    #[cfg(windows)]
+    fn media_keys(cc: &eframe::CreationContext<'_>, player: &Player, wake: &Wake) -> Option<redline_core::media_keys::MediaKeys> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let RawWindowHandle::Win32(w) = cc.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        redline_core::media_keys::MediaKeys::new(w.hwnd.get() as *mut std::ffi::c_void, player.remote(), wake.clone()).ok()
+    }
+
+    /// Acts on media keys that need the queue, and keeps the Windows overlay current.
+    #[cfg(windows)]
+    fn media_keys_frame(&mut self, ctx: &egui::Context) {
+        use redline_core::media_keys::MediaKey;
+        let Some(mk) = self.media_keys.as_mut() else { return };
+        mk.update(&self.player_state);
+        for key in mk.take_keys() {
+            match key {
+                MediaKey::Next => self.next_track(),
+                MediaKey::Previous => self.prev_track(),
+                MediaKey::SeekBy(secs) => {
+                    self.player.send(Command::Seek((self.player_state.position + secs).max(0.0)));
+                }
+                MediaKey::Raise => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
         }
     }
 
@@ -235,18 +277,28 @@ impl App {
         if let Some(t) = self.now.current() {
             let source = library::playable_source(t, &self.history);
             self.player.send(Command::Load(source, 0.0));
+            // A load clears the player's next track; hand it over again.
+            self.sent_next = None;
         }
     }
 
-    /// Moves on when a track plays to its end.
-    fn advance_queue(&mut self) {
-        let st = &self.player_state;
-        if st.status != Status::Ended || st.load_id == self.ended_load {
-            return;
+    /// Keeps the player told what follows the current track, and catches the queue up when
+    /// the player has moved on by itself.
+    fn follow_queue(&mut self) {
+        let advances = self.player_state.advances;
+        if advances != self.seen_advances {
+            for _ in self.seen_advances..advances {
+                self.now.after_end();
+            }
+            self.seen_advances = advances;
+            self.sent_next = None;
         }
-        self.ended_load = st.load_id;
-        if self.now.after_end().is_some() {
-            self.load_current();
+        // Compared by the track's own source, so History is only searched on a change.
+        let next = self.now.peek_after_end().map(|t| t.source.clone());
+        if self.sent_next.as_ref() != Some(&next) {
+            let playable = self.now.peek_after_end().map(|t| library::playable_source(t, &self.history));
+            self.player.send(Command::SetNext(playable));
+            self.sent_next = Some(next);
         }
     }
 
@@ -320,7 +372,9 @@ impl eframe::App for App {
         }
         self.player_state = self.player.state();
         self.sync_player();
-        self.advance_queue();
+        self.follow_queue();
+        #[cfg(windows)]
+        self.media_keys_frame(ctx);
         self.library_page.poll(&mut self.library);
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());

@@ -16,6 +16,8 @@ egui-phosphor = "0.14"
 rfd = "0.17"
 open = "5"
 anyhow = "1"
+# The window handle for Windows media keys; the version eframe uses
+raw-window-handle = "0.6"
 
 [profile.release]
 opt-level = 3

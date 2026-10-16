@@ -20,4 +20,6 @@ cpal = "0.18.2"
 rtrb = "0.4.0"
 
 [target.'cfg(windows)'.dependencies]
+# Windows media keys and the media overlay (SMTC)
+souvlaki = "0.8.3"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power"] }

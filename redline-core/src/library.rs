@@ -393,6 +393,17 @@ impl NowPlaying {
         self.current()
     }
 
+    /// What [`after_end`](Self::after_end) would move to, without moving.
+    pub fn peek_after_end(&self) -> Option<&Track> {
+        let pos = match self.repeat {
+            Repeat::One => self.pos,
+            _ if self.pos + 1 < self.order.len() => self.pos + 1,
+            Repeat::All => 0,
+            Repeat::Off => return None,
+        };
+        self.order.get(pos).map(|i| &self.tracks[*i])
+    }
+
     /// What to play once the current track ends on its own, if anything.
     pub fn after_end(&mut self) -> Option<&Track> {
         if self.repeat == Repeat::One {
@@ -583,10 +594,13 @@ mod tests {
         assert!(!q.has_next());
         assert_eq!(q.after_end(), None, "repeat off stops at the end");
 
+        assert_eq!(q.peek_after_end(), None);
         q.repeat = Repeat::One;
+        assert_eq!(q.peek_after_end().unwrap().title, "T3");
         assert_eq!(q.after_end().unwrap().title, "T3", "repeat one plays it again");
         assert_eq!(q.next(), None, "Next still moves on, and there's nothing after");
         q.repeat = Repeat::All;
+        assert_eq!(q.peek_after_end().unwrap().title, "T1");
         assert_eq!(q.after_end().unwrap().title, "T1", "repeat all wraps");
         assert_eq!(q.prev().unwrap().title, "T3");
 

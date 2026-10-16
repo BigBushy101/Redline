@@ -288,3 +288,18 @@ fn double_speed_plays_in_half_the_time_in_source_time() {
     p.send(Command::Load(track(), 0.0));
     wait_for(&p, "end again", |s| s.status == Status::Ended && s.load_id == 2);
 }
+
+#[test]
+fn moves_on_to_the_next_source_by_itself() {
+    let capture = Capture::new(RATE, 8.0);
+    let p = player(Tone::new(0.5), &capture);
+    p.send(Command::Load(Source::Local("a.mp3".into()), 0.0));
+    p.send(Command::SetNext(Some(Source::Local("b.mp3".into()))));
+    let s = wait_for(&p, "advanced", |s| s.advances == 1);
+    assert_eq!(s.source, Some(Source::Local("b.mp3".into())));
+    assert_ne!(s.status, Status::Ended, "the next track started instead of ending");
+    // The next one is used up: b plays to its end and stops there.
+    let s = wait_for(&p, "end of b", |s| s.status == Status::Ended);
+    assert_eq!(s.advances, 1);
+    assert_eq!(s.track.unwrap().title, "Tone b");
+}
