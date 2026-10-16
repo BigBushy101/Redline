@@ -2,10 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use super::hwaccel::{Hardware, VideoCodec};
+use super::ffmpeg::{Encode, is_audio_target};
+use super::filters::{Filters, SubSource};
+use super::hwaccel::{self, Hardware, Rate, VideoCodec};
 use super::{ToolPaths, command, ffmpeg, image_conv, run_streaming, unique_path};
 use crate::jobs::{CancelHandle, Cancelled, Reporter};
 
@@ -168,6 +170,9 @@ pub struct ConvertOptions {
     pub resize_width: u32,
     pub resize_height: u32,
     pub gif: GifOptions,
+    /// Aim for this output size in MB (video only); 0 uses the quality setting.
+    pub target_size_mb: f32,
+    pub filters: Filters,
 }
 
 impl Default for ConvertOptions {
@@ -183,6 +188,8 @@ impl Default for ConvertOptions {
             resize_width: 0,
             resize_height: 0,
             gif: GifOptions::default(),
+            target_size_mb: 0.0,
+            filters: Filters::default(),
         }
     }
 }
@@ -196,6 +203,47 @@ pub struct ConvertRequest {
     pub options: ConvertOptions,
     /// `None` writes next to the input.
     pub out_dir: Option<PathBuf>,
+    pub burn_subs: Option<SubSource>,
+    /// Output file name without extension; `None` keeps the input's name.
+    pub output_stem: Option<String>,
+    /// Move the original to the Recycle Bin once the conversion succeeds.
+    pub recycle_source: bool,
+}
+
+/// Several files joined end to end into one.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConcatRequest {
+    pub inputs: Vec<PathBuf>,
+    pub target: String,
+    pub options: ConvertOptions,
+    pub out_dir: Option<PathBuf>,
+    pub output_stem: String,
+    pub recycle_sources: bool,
+}
+
+/// Fills a file name template: `{name}` (original name), `{n}` (position in the list),
+/// `{date}` (today) and `{target}` (new extension). The result is safe as a file name.
+pub fn render_stem(template: &str, name: &str, n: usize, target: &str) -> String {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let t = if template.trim().is_empty() { "{name}" } else { template };
+    let raw = t
+        .replace("{name}", name)
+        .replace("{n}", &n.to_string())
+        .replace("{date}", &date)
+        .replace("{target}", target);
+    let clean: String = raw
+        .chars()
+        .map(|c| if "<>:\"/\\|?*".contains(c) || c.is_control() { '_' } else { c })
+        .collect();
+    let clean = clean.trim().trim_end_matches('.').trim().to_owned();
+    if clean.is_empty() { name.to_owned() } else { clean }
+}
+
+/// Sends a finished job's source to the Recycle Bin; failures are ignored (the output is
+/// already safe, and the original simply stays).
+fn recycle(path: &Path) {
+    let _ = trash::delete(path);
 }
 
 pub fn run(
@@ -213,11 +261,12 @@ pub fn run(
             .unwrap_or_default(),
     };
     std::fs::create_dir_all(&dir).with_context(|| format!("can't create {}", dir.display()))?;
-    let stem = req
-        .input
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "output".into());
+    let stem = req.output_stem.clone().unwrap_or_else(|| {
+        req.input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "output".into())
+    });
     let output = unique_path(&dir, &stem, &req.target);
 
     let result = match req.category {
@@ -229,7 +278,12 @@ pub fn run(
     };
 
     match result {
-        Ok(()) => Ok(Some(output)),
+        Ok(()) => {
+            if req.recycle_source && std::fs::metadata(&output).is_ok_and(|m| m.len() > 0) {
+                recycle(&req.input);
+            }
+            Ok(Some(output))
+        }
         Err(e) => {
             // Don't leave half-written files behind.
             let _ = std::fs::remove_file(&output);
@@ -249,43 +303,286 @@ fn run_ffmpeg(
         .ffmpeg
         .as_ref()
         .ok_or_else(|| anyhow!("ffmpeg is not installed"))?;
+    let o = &req.options;
     let duration = tools
         .ffprobe
         .as_ref()
         .and_then(|p| ffmpeg::probe_duration(p, &req.input))
         .map(|d| match req.target.as_str() {
-            "gif" => req.options.gif.output_duration(d),
-            _ => d,
+            "gif" => o.gif.output_duration(d),
+            _ => d / o.filters.speed.max(0.01) as f64,
         })
         .filter(|d| *d > 0.0);
     if cancel.is_cancelled() {
         return Err(Cancelled.into());
     }
 
-    let mut cmd = command(ffmpeg);
-    cmd.args(ffmpeg::build_args(&req.input, output, &req.target, &req.options));
-    rep.progress(Some(0.0), "Starting…");
-    run_streaming(cmd, cancel, |line| {
-        if let Some(secs) = ffmpeg::parse_progress(line) {
-            match duration {
-                Some(total) => {
-                    let frac = (secs / total).clamp(0.0, 1.0) as f32;
-                    rep.progress(
-                        Some(frac),
-                        format!(
-                            "{:.0}% · {} / {}",
-                            frac * 100.0,
-                            crate::ui::fmt_duration(secs),
-                            crate::ui::fmt_duration(total)
-                        ),
-                    );
-                }
-                None => rep.progress(None, crate::ui::fmt_duration(secs)),
-            }
-        } else if line == "progress=end" {
-            rep.processing("Finishing…");
+    let sized = o.target_size_mb > 0.0
+        && !hwaccel::codecs_for(&req.target).is_empty()
+        && req.category == Category::Video;
+    let video_kbps = if sized {
+        let d = duration.ok_or_else(|| {
+            anyhow!("Can't aim for a file size: couldn't read how long this video is")
+        })?;
+        Some(ffmpeg::target_video_kbps(o.target_size_mb, d, o.audio_bitrate))
+    } else {
+        None
+    };
+    let two_pass = sized && ffmpeg::supports_two_pass(&req.target, o);
+    let log_dir = std::env::temp_dir().join(format!(
+        "redline-2pass-{}-{}",
+        std::process::id(),
+        output.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+    ));
+    if two_pass {
+        std::fs::create_dir_all(&log_dir)?;
+    }
+    let log = log_dir.join("pass");
+
+    let passes: &[Option<u8>] = if two_pass { &[Some(1), Some(2)] } else { &[None] };
+    let mut result = Ok(());
+    for (i, pass) in passes.iter().enumerate() {
+        let enc = Encode {
+            video_kbps,
+            pass: pass.map(|n| (n, log.as_path())),
+            subs: req.burn_subs.as_ref(),
+        };
+        let mut cmd = command(ffmpeg);
+        cmd.args(ffmpeg::build_args(&req.input, output, &req.target, o, &enc));
+        // Each pass gets an equal share of the bar.
+        let (base, share) = (i as f32 / passes.len() as f32, 1.0 / passes.len() as f32);
+        let label = match pass {
+            Some(1) => "Pass 1 of 2 · ",
+            Some(_) => "Pass 2 of 2 · ",
+            None => "",
+        };
+        rep.progress(Some(base), format!("{label}Starting…"));
+        result = run_streaming(cmd, cancel, |line| report_progress(rep, line, duration, base, share, label));
+        if result.is_err() {
+            break;
         }
-    })
+    }
+    if two_pass {
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+    result
+}
+
+fn report_progress(rep: &Reporter, line: &str, total: Option<f64>, base: f32, share: f32, label: &str) {
+    if let Some(secs) = ffmpeg::parse_progress(line) {
+        match total {
+            Some(total) => {
+                let frac = (secs / total).clamp(0.0, 1.0) as f32;
+                let overall = base + frac * share;
+                rep.progress(
+                    Some(overall),
+                    format!(
+                        "{label}{:.0}% · {} / {}",
+                        overall * 100.0,
+                        crate::ui::fmt_duration(secs),
+                        crate::ui::fmt_duration(total)
+                    ),
+                );
+            }
+            None => rep.progress(None, format!("{label}{}", crate::ui::fmt_duration(secs))),
+        }
+    } else if line == "progress=end" && base + share >= 0.999 {
+        rep.processing("Finishing…");
+    }
+}
+
+/// What the joiner needs to know about each input.
+#[derive(Debug, Default, Clone)]
+struct Probe {
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<String>,
+    has_video: bool,
+    has_audio: bool,
+    duration: f64,
+}
+
+fn probe(ffprobe: &Path, path: &Path) -> Result<Probe> {
+    let out = command(ffprobe)
+        .args(["-v", "error", "-show_entries"])
+        .arg("stream=codec_type,width,height,r_frame_rate:stream_disposition=attached_pic:format=duration")
+        .args(["-of", "json"])
+        .arg(path)
+        .output()
+        .context("failed to run ffprobe")?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("couldn't read {}", path.display()))?;
+    let mut p = Probe {
+        duration: v["format"]["duration"]
+            .as_str()
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(0.0),
+        ..Default::default()
+    };
+    for s in v["streams"].as_array().into_iter().flatten() {
+        match s["codec_type"].as_str() {
+            Some("video") if s["disposition"]["attached_pic"].as_i64() != Some(1) && !p.has_video => {
+                p.has_video = true;
+                p.width = s["width"].as_u64().map(|w| w as u32);
+                p.height = s["height"].as_u64().map(|h| h as u32);
+                p.fps = s["r_frame_rate"].as_str().filter(|f| *f != "0/0").map(str::to_owned);
+            }
+            Some("audio") => p.has_audio = true,
+            _ => {}
+        }
+    }
+    if p.duration <= 0.0 {
+        bail!("{} has no readable duration", path.display());
+    }
+    Ok(p)
+}
+
+/// ffmpeg arguments that join `inputs` (with their probes) into `output`. Video is scaled
+/// and padded to the first input's size and frame rate; silent inputs get generated silence.
+fn concat_args(inputs: &[(PathBuf, Probe)], target: &str, o: &ConvertOptions, output: &Path) -> Vec<String> {
+    let video = !is_audio_target(target);
+    let mut a: Vec<String> = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    for (path, _) in inputs {
+        a.push("-i".into());
+        a.push(path.display().to_string());
+    }
+    let mut silence = Vec::new();
+    for (i, (_, p)) in inputs.iter().enumerate() {
+        if p.has_audio {
+            silence.push(None);
+        } else {
+            silence.push(Some(inputs.len() + silence.iter().flatten().count()));
+            a.extend(["-f", "lavfi", "-t"].map(String::from));
+            a.push(format!("{}", p.duration));
+            a.push("-i".into());
+            a.push("anullsrc=r=48000:cl=stereo".into());
+        }
+        let _ = i;
+    }
+
+    let first = inputs.iter().map(|(_, p)| p).find(|p| p.has_video);
+    let even = |v: u32| (v / 2 * 2).max(2);
+    let (w, h) = first
+        .and_then(|p| Some((even(p.width?), even(p.height?))))
+        .unwrap_or((1280, 720));
+    let fps = first.and_then(|p| p.fps.clone()).unwrap_or_else(|| "30".into());
+
+    let mut graph = Vec::new();
+    let mut joined = String::new();
+    for (i, _) in inputs.iter().enumerate() {
+        if video {
+            graph.push(format!(
+                "[{i}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p[v{i}]"
+            ));
+            joined.push_str(&format!("[v{i}]"));
+        }
+        let src = silence[i].map_or(format!("{i}:a"), |s| format!("{s}:a"));
+        graph.push(format!(
+            "[{src}]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
+        ));
+        joined.push_str(&format!("[a{i}]"));
+    }
+    let n = inputs.len();
+    let (vlabel, alabel) = ("vc", "ac");
+    if video {
+        graph.push(format!("{joined}concat=n={n}:v=1:a=1[{vlabel}][{alabel}]"));
+    } else {
+        graph.push(format!("{joined}concat=n={n}:v=0:a=1[{alabel}]"));
+    }
+    let mut vout = format!("[{vlabel}]");
+    let mut vchain = o.filters.video_chain(None);
+    if o.max_height > 0 {
+        vchain.push(format!("scale=-2:'min({},ih)'", o.max_height));
+    }
+    if video && !vchain.is_empty() {
+        graph.push(format!("[{vlabel}]{}[vout]", vchain.join(",")));
+        vout = "[vout]".into();
+    }
+    let mut aout = format!("[{alabel}]");
+    let achain = o.filters.audio_chain();
+    if !achain.is_empty() {
+        graph.push(format!("[{alabel}]{}[aout]", achain.join(",")));
+        aout = "[aout]".into();
+    }
+    a.push("-filter_complex".into());
+    a.push(graph.join(";"));
+    if video {
+        a.extend(["-map".into(), vout]);
+    }
+    a.extend(["-map".into(), aout]);
+
+    if video {
+        let codec = hwaccel::effective_codec(target, o.codec);
+        a.extend(hwaccel::video_encoder_args(codec, o.hardware, Rate::Crf(o.crf), &o.preset));
+        if codec == VideoCodec::H265 && target != "mkv" {
+            a.extend(["-tag:v", "hvc1"].map(String::from));
+        }
+        let audio = if target == "webm" { "libopus" } else { "aac" };
+        a.extend(["-c:a".into(), audio.into(), "-b:a".into(), format!("{}k", o.audio_bitrate)]);
+        if target == "mp4" || target == "mov" {
+            a.extend(["-movflags", "+faststart"].map(String::from));
+        }
+    } else {
+        a.extend(ffmpeg::audio_codec_args(target, o.audio_bitrate));
+    }
+    a.extend(["-progress", "pipe:1", "-nostats"].map(String::from));
+    a.push(output.display().to_string());
+    a
+}
+
+pub fn run_concat(
+    tools: &ToolPaths,
+    req: &ConcatRequest,
+    cancel: &CancelHandle,
+    rep: &Reporter,
+) -> Result<Option<PathBuf>> {
+    let ffmpeg = tools.ffmpeg.as_ref().ok_or_else(|| anyhow!("ffmpeg is not installed"))?;
+    let ffprobe = tools.ffprobe.as_ref().ok_or_else(|| anyhow!("ffprobe is not installed"))?;
+    if req.inputs.len() < 2 {
+        bail!("Joining needs at least two files");
+    }
+    if !is_audio_target(&req.target) && hwaccel::codecs_for(&req.target).is_empty() {
+        bail!("Can't join into {}", req.target.to_uppercase());
+    }
+    rep.progress(None, "Reading files…");
+    let mut probed = Vec::new();
+    for path in &req.inputs {
+        probed.push((path.clone(), probe(ffprobe, path)?));
+    }
+    if !is_audio_target(&req.target) && !probed.iter().any(|(_, p)| p.has_video) {
+        bail!("None of these files has video; join them into an audio format instead");
+    }
+    let total = probed.iter().map(|(_, p)| p.duration).sum::<f64>()
+        / req.options.filters.speed.max(0.01) as f64;
+
+    let dir = match &req.out_dir {
+        Some(d) => d.clone(),
+        None => req.inputs[0].parent().map(Path::to_path_buf).unwrap_or_default(),
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("can't create {}", dir.display()))?;
+    let output = unique_path(&dir, &req.output_stem, &req.target);
+
+    let mut cmd = command(ffmpeg);
+    cmd.args(concat_args(&probed, &req.target, &req.options, &output));
+    rep.progress(Some(0.0), "Starting…");
+    let result = run_streaming(cmd, cancel, |line| report_progress(rep, line, Some(total), 0.0, 1.0, ""));
+    match result {
+        Ok(()) => {
+            if req.recycle_sources && std::fs::metadata(&output).is_ok_and(|m| m.len() > 0) {
+                for input in &req.inputs {
+                    recycle(input);
+                }
+            }
+            Ok(Some(output))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&output);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +612,44 @@ mod tests {
         assert_eq!(g.output_duration(10.0), 2.0);
         g.start = 20.0;
         assert_eq!(g.output_duration(10.0), 0.0);
+    }
+
+    #[test]
+    fn renders_file_name_templates() {
+        assert_eq!(render_stem("{name}", "clip", 1, "mp4"), "clip");
+        assert_eq!(render_stem("", "clip", 1, "mp4"), "clip");
+        assert_eq!(render_stem("{n} - {name} ({target})", "a", 3, "webm"), "3 - a (webm)");
+        assert_eq!(render_stem("x: y/z?.", "a", 1, "mp4"), "x_ y_z_");
+        assert_eq!(render_stem("...", "a", 1, "mp4"), "a");
+        assert!(render_stem("{date}", "a", 1, "mp4").starts_with("20"));
+    }
+
+    #[test]
+    fn builds_concat_graph() {
+        let v = |w, h, audio| Probe {
+            width: Some(w),
+            height: Some(h),
+            fps: Some("30/1".into()),
+            has_video: true,
+            has_audio: audio,
+            duration: 5.0,
+        };
+        let inputs = vec![
+            (PathBuf::from("a.mp4"), v(1921, 1080, true)),
+            (PathBuf::from("b.mp4"), v(640, 480, false)),
+        ];
+        let o = ConvertOptions::default();
+        let s = concat_args(&inputs, "mp4", &o, Path::new("out.mp4")).join(" ");
+        assert!(s.contains("-i a.mp4 -i b.mp4 -f lavfi -t 5 -i anullsrc=r=48000:cl=stereo"));
+        assert!(s.contains("[1:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080"));
+        assert!(s.contains("[2:a]aresample=48000"), "silence stands in for b's audio");
+        assert!(s.contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1[vc][ac]"));
+        assert!(s.contains("-map [vc] -map [ac] -c:v libx264"));
+        assert!(s.ends_with("out.mp4"));
+
+        let audio = concat_args(&inputs, "mp3", &o, Path::new("o.mp3")).join(" ");
+        assert!(audio.contains("[a0][a1]concat=n=2:v=0:a=1[ac]") && !audio.contains("[0:v]"));
+        assert!(audio.contains("-c:a libmp3lame"));
     }
 
     #[test]

@@ -35,7 +35,11 @@ impl HistoryEntry {
             || self.url().is_some_and(|u| u.to_lowercase().contains(&q))
             || match &self.spec {
                 JobSpec::Convert(r) => r.input.to_string_lossy().to_lowercase().contains(&q),
-                _ => false,
+                JobSpec::Concat(r) => r
+                    .inputs
+                    .iter()
+                    .any(|i| i.to_string_lossy().to_lowercase().contains(&q)),
+                JobSpec::Download(_) => false,
             }
     }
 }

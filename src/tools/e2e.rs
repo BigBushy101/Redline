@@ -389,3 +389,135 @@ fn encodes_with_every_working_encoder() {
     }
     assert!(tried >= 5);
 }
+
+fn probe_streams(tools: &ToolPaths, path: &std::path::Path) -> String {
+    let out = command(tools.ffprobe.as_ref().unwrap())
+        .args(["-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration", "-of", "compact"])
+        .arg(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+#[ignore]
+fn converts_to_size_with_filters_subs_and_joins() {
+    use super::convert::{ConcatRequest, render_stem};
+    use super::filters::{CropAspect, Filters, Rotation, SubSource};
+    use super::hwaccel::Hardware;
+    let tools = ensure_tools();
+    let dir = scratch("p5 it's [odd],dir");
+    let clip = make_clip(&tools, &dir, 8);
+
+    // Target size: CPU two-pass and NVENC single pass (if present) both land under 1 MB.
+    let enc = super::hwaccel::detect(tools.ffmpeg.as_ref().unwrap());
+    for hw in [Hardware::Cpu, Hardware::Nvidia] {
+        if hw != Hardware::Cpu && !enc.gpus().contains(&hw) {
+            continue;
+        }
+        let req = ConvertRequest {
+            input: clip.clone(),
+            category: Category::Video,
+            target: "mp4".into(),
+            options: ConvertOptions {
+                target_size_mb: 1.0,
+                hardware: hw,
+                ..Default::default()
+            },
+            out_dir: Some(dir.join(format!("sized-{hw:?}"))),
+            ..Default::default()
+        };
+        let out = convert::run(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+            .unwrap_or_else(|e| panic!("sized {hw:?}: {e:#}"))
+            .unwrap();
+        let len = std::fs::metadata(&out).unwrap().len();
+        println!("sized {hw:?}: {len} bytes");
+        assert!(len < 1_000_000, "{hw:?} size {len}");
+    }
+
+    // Burn an .srt from a path with spaces, quotes and brackets; rotate, crop, 2x speed.
+    let srt = dir.join("subs it's [1].srt");
+    std::fs::write(&srt, "1\n00:00:00,500 --> 00:00:06,000\nHello from Redline\n").unwrap();
+    let req = ConvertRequest {
+        input: clip.clone(),
+        category: Category::Video,
+        target: "mp4".into(),
+        options: ConvertOptions {
+            filters: Filters {
+                rotate: Rotation::Right,
+                crop: CropAspect::Square,
+                speed: 2.0,
+                normalize: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        burn_subs: Some(SubSource::File(srt)),
+        out_dir: Some(dir.join("filtered")),
+        output_stem: Some(render_stem("{n} - {name}", "clip", 7, "mp4")),
+        ..Default::default()
+    };
+    let out = convert::run(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("filtered: {e:#}"))
+        .unwrap();
+    let info = probe_streams(&tools, &out);
+    println!("filtered {} -> {info}", out.display());
+    assert_eq!(out.file_name().unwrap(), "7 - clip.mp4");
+    assert!(info.contains("width=360|height=360"), "square crop of 640x360");
+    let d = ffmpeg::probe_duration(tools.ffprobe.as_ref().unwrap(), &out).unwrap();
+    assert!((d - 4.0).abs() < 0.3, "2x speed of 8 s -> {d}");
+
+    // Join a 640x360 clip with a 320x240 one that has no audio.
+    let small = dir.join("small.mp4");
+    let status = command(tools.ffmpeg.as_ref().unwrap())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=25"])
+        .args(["-c:v", "libx264"])
+        .arg(&small)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let copy = dir.join("to-recycle.mp4");
+    std::fs::copy(&clip, &copy).unwrap();
+    let req = ConcatRequest {
+        inputs: vec![copy.clone(), small.clone()],
+        target: "mp4".into(),
+        options: ConvertOptions::default(),
+        out_dir: Some(dir.join("joined")),
+        output_stem: "joined".into(),
+        recycle_sources: false,
+    };
+    let out = convert::run_concat(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("join: {e:#}"))
+        .unwrap();
+    let info = probe_streams(&tools, &out);
+    println!("joined -> {info}");
+    assert!(info.contains("width=640|height=360") && info.contains("codec_type=audio"));
+    let d = ffmpeg::probe_duration(tools.ffprobe.as_ref().unwrap(), &out).unwrap();
+    assert!((d - 10.0).abs() < 0.3, "8 s + 2 s -> {d}");
+
+    // Audio join, then recycle the source copy.
+    let req = ConcatRequest {
+        inputs: vec![copy.clone(), clip.clone()],
+        target: "mp3".into(),
+        options: ConvertOptions::default(),
+        out_dir: Some(dir.join("joined")),
+        output_stem: "joined".into(),
+        recycle_sources: false,
+    };
+    let out = convert::run_concat(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("audio join: {e:#}"))
+        .unwrap();
+    assert!(probe_streams(&tools, &out).contains("codec_type=audio"));
+
+    let req = ConvertRequest {
+        input: copy.clone(),
+        category: Category::Video,
+        target: "m4a".into(),
+        recycle_source: true,
+        out_dir: Some(dir.join("recycled")),
+        ..Default::default()
+    };
+    convert::run(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("recycle: {e:#}"));
+    assert!(!copy.exists(), "source should be in the Recycle Bin");
+}

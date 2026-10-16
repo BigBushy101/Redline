@@ -41,6 +41,10 @@ pub struct Settings {
     pub network: NetworkOptions,
     pub download: DownloadOptions,
     pub convert: ConvertOptions,
+    /// Converted file name template; see `convert::render_stem`.
+    pub rename_template: String,
+    /// Send originals to the Recycle Bin after a successful conversion.
+    pub recycle_originals: bool,
 }
 
 impl Default for Settings {
@@ -57,6 +61,8 @@ impl Default for Settings {
             network: NetworkOptions::default(),
             download: DownloadOptions::default(),
             convert: ConvertOptions::default(),
+            rename_template: "{name}".into(),
+            recycle_originals: false,
         }
     }
 }

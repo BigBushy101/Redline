@@ -21,6 +21,7 @@ pub fn convert(input: &Path, output: &Path, target: &str, o: &ConvertOptions) ->
         .decode()
         .context("couldn't decode image")?;
 
+    let img = o.filters.apply_to_image(img);
     let mut img = resize(img, o.resize_width, o.resize_height);
     if target == "ico" && (img.width() > 256 || img.height() > 256) {
         img = img.resize(256, 256, FilterType::Lanczos3);

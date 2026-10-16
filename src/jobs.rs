@@ -12,7 +12,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::settings;
-use crate::tools::convert::ConvertRequest;
+use crate::tools::convert::{ConcatRequest, ConvertRequest};
 use crate::tools::ytdlp::DownloadRequest;
 use crate::tools::{self, ToolPaths};
 
@@ -22,6 +22,7 @@ pub type JobId = u64;
 pub enum JobSpec {
     Download(DownloadRequest),
     Convert(ConvertRequest),
+    Concat(ConcatRequest),
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +75,10 @@ impl Job {
                     .out_dir
                     .clone()
                     .or_else(|| r.input.parent().map(|p| p.to_path_buf())),
+                JobSpec::Concat(r) => r
+                    .out_dir
+                    .clone()
+                    .or_else(|| r.inputs.first()?.parent().map(|p| p.to_path_buf())),
             },
         }
     }
@@ -404,6 +409,7 @@ impl JobManager {
                 let result = match &spec {
                     JobSpec::Download(req) => tools::ytdlp::download(&tools, req, &cancel, &reporter),
                     JobSpec::Convert(req) => tools::convert::run(&tools, req, &cancel, &reporter),
+                    JobSpec::Concat(req) => tools::convert::run_concat(&tools, req, &cancel, &reporter),
                 };
                 reporter.send(JobEvent::Finished(reporter.id, result));
             });
