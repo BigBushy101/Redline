@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::download_plan::{LinkChoices, PlannedDownload};
 use crate::history::History;
+use crate::platform::{self, Platform};
 use crate::player::{Source, decode};
 use crate::settings;
 use crate::tools::ToolPaths;
@@ -42,6 +43,22 @@ impl Track {
 
     pub fn is_link(&self) -> bool {
         matches!(self.source, Source::Link(_))
+    }
+
+    /// The site a link track is from; `None` for files on this PC.
+    pub fn platform(&self) -> Option<Platform> {
+        match &self.source {
+            Source::Link(url) => Some(Platform::of(url)),
+            Source::Local(_) => None,
+        }
+    }
+
+    /// What makes two tracks the same song: the canonical link, or the file path.
+    pub fn key(&self) -> String {
+        match &self.source {
+            Source::Link(url) => platform::canonical(url),
+            Source::Local(p) => p.display().to_string(),
+        }
     }
 
     /// Text the playlist search matches against.
@@ -246,7 +263,8 @@ pub fn offline_download(track: &Track, settings: &settings::Settings) -> Option<
     Some(job)
 }
 
-/// What to actually play for a track: a link that's been downloaded plays from the file.
+/// What to actually play for a track: a link that's been downloaded plays from the file,
+/// matched by canonical link so URL variants of the same song find it.
 pub fn playable_source(track: &Track, history: &History) -> Source {
     if let Source::Link(url) = &track.source
         && let Some(file) = history
@@ -488,6 +506,17 @@ mod tests {
     }
 
     #[test]
+    fn tracks_know_their_platform_and_key() {
+        let a = Track::new(Source::Link("https://youtu.be/abc?t=3".into()), "a".into());
+        let b = Track::new(Source::Link("https://music.youtube.com/watch?v=abc".into()), "b".into());
+        assert_eq!(a.platform(), Some(Platform::YouTube));
+        assert_eq!(a.key(), b.key());
+        let local = Track::new(Source::Local("C:/m/a.flac".into()), "a".into());
+        assert_eq!(local.platform(), None);
+        assert_eq!(local.key(), "C:/m/a.flac");
+    }
+
+    #[test]
     fn expands_playlists_into_tracks() {
         let info = MediaInfo {
             title: "Mix".into(),
@@ -548,6 +577,8 @@ mod tests {
         jobs.jobs[0].status = JobStatus::Done(Some(file.clone()));
         history.record(&jobs.jobs[0]);
         assert_eq!(playable_source(&track, &history), Source::Local(file.clone()));
+        let variant = Track::new(Source::Link("https://x/1/?utm=y".into()), "T1".into());
+        assert_eq!(playable_source(&variant, &history), Source::Local(file.clone()), "URL variant");
 
         std::fs::remove_file(&file).unwrap();
         assert_eq!(playable_source(&track, &history), track.source, "file gone: stream again");

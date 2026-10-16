@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod library;
 #[cfg(windows)]
 pub mod media_keys;
+pub mod platform;
 pub mod player;
 pub mod presets;
 pub mod queue_watch;

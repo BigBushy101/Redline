@@ -1,10 +1,13 @@
 //! Finished jobs, kept across sessions so they can be found, opened or run again.
 
+use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::jobs::{Job, JobSpec, JobStatus};
+use crate::platform;
 use crate::settings;
 
 const MAX_ENTRIES: usize = 2000;
@@ -49,6 +52,9 @@ pub struct History {
     /// Newest first.
     pub entries: Vec<HistoryEntry>,
     dirty: bool,
+    /// Canonical download link to its newest entry, built on first lookup. Playback looks
+    /// up every visible row each frame, so this keeps it from scanning the whole history.
+    by_url: OnceCell<HashMap<String, usize>>,
 }
 
 fn history_path() -> PathBuf {
@@ -68,6 +74,7 @@ impl History {
         Self {
             entries,
             dirty: false,
+            by_url: OnceCell::new(),
         }
     }
 
@@ -102,25 +109,39 @@ impl History {
             },
         );
         self.entries.truncate(MAX_ENTRIES);
-        self.dirty = true;
+        self.changed();
     }
 
     pub fn remove(&mut self, index: usize) {
         if index < self.entries.len() {
             self.entries.remove(index);
-            self.dirty = true;
+            self.changed();
         }
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.dirty = true;
+        self.changed();
     }
 
-    /// The most recent download of `url`, if any.
+    fn changed(&mut self) {
+        self.dirty = true;
+        self.by_url.take();
+    }
+
+    /// The most recent download of `url`, if any. Links are compared by
+    /// [`platform::canonical`], so `youtu.be/ID` finds a download of `watch?v=ID&t=5`.
     pub fn find_url(&self, url: &str) -> Option<&HistoryEntry> {
-        let url = url.trim();
-        self.entries.iter().find(|e| e.url() == Some(url))
+        let index = self.by_url.get_or_init(|| {
+            let mut m = HashMap::new();
+            for (i, e) in self.entries.iter().enumerate() {
+                if let Some(u) = e.url() {
+                    m.entry(platform::canonical(u)).or_insert(i);
+                }
+            }
+            m
+        });
+        index.get(&platform::canonical(url)).map(|i| &self.entries[*i])
     }
 }
 
@@ -148,6 +169,10 @@ mod tests {
         h.record(&jobs.jobs[0]);
         assert_eq!(h.entries.len(), 1);
         assert!(h.find_url(" https://example.com/a ").is_some());
+        assert!(h.find_url("https://www.example.com/a/?ref=x").is_some(), "canonical form matches");
+        h.clear();
+        assert!(h.find_url("https://example.com/a").is_none(), "the index follows changes");
+        h.record(&jobs.jobs[0]);
         assert!(h.entries[0].matches("song"));
         assert!(h.entries[0].matches("EXAMPLE.com"));
         assert!(!h.entries[0].matches("nope"));
