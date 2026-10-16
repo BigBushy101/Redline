@@ -81,7 +81,7 @@ pub fn start_save(app: &mut App, url: &str) {
     app.saved_page.lookups.push(Lookup {
         url,
         task: Task::spawn(&app.wake, move || {
-            ytdlp::fetch_info(&tools, &net, &fetch).map_err(|e| format!("{e:#}"))
+            ytdlp::fetch_titled(&tools, &net, &fetch, &|_| false).map_err(|e| format!("{e:#}"))
         }),
     });
 }
@@ -153,9 +153,12 @@ pub fn start_sync(app: &mut App, id: CollectionId) {
     }
     let Some(c) = app.saved.get(id) else { return };
     let (tools, net, url) = (app.tools.clone(), app.settings.network.clone(), c.source_url.clone());
+    let titled = c.titled_links();
     app.saved_page.syncs.push(Sync {
         id,
-        task: Task::spawn(&app.wake, move || saved::sync(&tools, &net, &url).map_err(|e| format!("{e:#}"))),
+        task: Task::spawn(&app.wake, move || {
+            saved::sync(&tools, &net, &url, &titled).map_err(|e| format!("{e:#}"))
+        }),
     });
 }
 

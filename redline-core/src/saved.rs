@@ -62,6 +62,17 @@ impl Collection {
         }
     }
 
+    /// Links of the tracks that already have a name besides their link.
+    pub fn titled_links(&self) -> HashSet<String> {
+        self.tracks
+            .iter()
+            .filter_map(|t| match &t.track.source {
+                Source::Link(u) if *u != t.track.title => Some(u.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// What plays when the collection is started: everything still on the platform.
     pub fn playable(&self) -> Vec<Track> {
         self.tracks
@@ -457,8 +468,11 @@ pub fn sync_plan(collection: &Collection, fresh: &[Track]) -> Result<SyncResult>
                 restored += prev.removed_upstream as usize;
                 let mut t = prev.track.clone();
                 // Flat listings (SoundCloud's, for one) can carry no title, which yt-dlp's
-                // entry then fills with the link; keep the name we already have.
-                if !matches!(&f.source, Source::Link(u) if *u == f.title) {
+                // entry then fills with the link or a name guessed from it; keep the name we
+                // already have, unless that is only the link.
+                let guessed = matches!(&f.source, Source::Link(u)
+                    if *u == f.title || ytdlp::title_from_link(u).as_ref() == Some(&f.title));
+                if !guessed || matches!(&t.source, Source::Link(u) if *u == t.title) {
                     t.title = f.title.clone();
                 }
                 t.artist = f.artist.clone().or(t.artist);
@@ -486,9 +500,10 @@ pub fn sync_plan(collection: &Collection, fresh: &[Track]) -> Result<SyncResult>
 }
 
 /// The collection's link listed fresh from its platform. Private playlists and likes work
-/// through the cookie settings in `net`; errors come back readable.
-pub fn sync(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<Vec<Track>> {
-    let info = ytdlp::fetch_info(tools, net, url)?;
+/// through the cookie settings in `net`; errors come back readable. Untitled tracks are looked
+/// up unless `titled` (from [`Collection::titled_links`]) already names them.
+pub fn sync(tools: &ToolPaths, net: &NetworkOptions, url: &str, titled: &HashSet<String>) -> Result<Vec<Track>> {
+    let info = ytdlp::fetch_titled(tools, net, url, &|u| titled.contains(u))?;
     Ok(library::tracks_from_info(url, &info))
 }
 
@@ -589,6 +604,24 @@ mod tests {
         untitled[0].title = "https://youtu.be/a?si=x".into();
         let r = sync_plan(&c, &untitled).unwrap();
         assert_eq!(r.order[0].track.title, "A");
+    }
+
+    #[test]
+    fn sync_prefers_known_titles_over_guessed_ones() {
+        let link = "https://soundcloud.com/forss/funk-for-nerds";
+        let sc = |title: &str| Track::new(Source::Link(link.into()), title.to_string());
+        let mut c = collection(&[]);
+        c.tracks.push(SavedTrack {
+            track: sc("Funk for Nerds"),
+            removed_upstream: false,
+        });
+        // A name guessed from the link doesn't replace the real one...
+        let r = sync_plan(&c, &[sc("Funk For Nerds")]).unwrap();
+        assert_eq!(r.order[0].track.title, "Funk for Nerds");
+        // ...but does replace a bare link saved before titles were guessed.
+        c.tracks[0].track.title = link.into();
+        let r = sync_plan(&c, &[sc("Funk For Nerds")]).unwrap();
+        assert_eq!(r.order[0].track.title, "Funk For Nerds");
     }
 
     #[test]
@@ -808,7 +841,7 @@ mod tests {
         assert!(songs > 1, "{songs}");
         assert_eq!(s.get(id).unwrap().platform(), Platform::YouTube);
         for round in 0..2 {
-            let fresh = sync(&tools, &net, url).unwrap();
+            let fresh = sync(&tools, &net, url, &s.get(id).unwrap().titled_links()).unwrap();
             let r = sync_plan(s.get(id).unwrap(), &fresh).unwrap();
             assert!(r.is_unchanged(), "round {round}: {} added, {} removed", r.added.len(), r.removed.len());
             s.apply_sync(id, r);

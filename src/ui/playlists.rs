@@ -364,7 +364,7 @@ fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             playlist: id,
             what: url,
             task: Task::spawn(&app.wake, move || {
-                ytdlp::fetch_info(&tools, &net, &fetch)
+                ytdlp::fetch_titled(&tools, &net, &fetch, &|_| false)
                     .map(|info| library::tracks_from_info(&fetch, &info))
                     .map_err(|e| format!("{e:#}"))
             }),

@@ -1,5 +1,6 @@
 //! Driving yt-dlp: metadata lookup, argument building and progress parsing.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -273,8 +274,11 @@ impl PlaylistItem {
                     .flatten()
             })?;
         Some(Self {
-            title: s("title").unwrap_or_else(|| url.clone()),
-            uploader: s("uploader").or_else(|| s("channel")),
+            title: s("title")
+                .or_else(|| title_from_link(&url))
+                .unwrap_or_else(|| url.clone()),
+            // SoundCloud's set entries name the artist only as the album's.
+            uploader: s("uploader").or_else(|| s("channel")).or_else(|| s("album_artist")),
             duration: e["duration"].as_f64(),
             thumbnail: e["thumbnails"]
                 .as_array()
@@ -284,6 +288,118 @@ impl PlaylistItem {
             url,
         })
     }
+}
+
+/// A readable stand-in title for a SoundCloud link whose listing gave none, made from its
+/// slug: `…/forss/city-ports` → "City Ports". Resolving real titles would take a lookup per
+/// track (about a second each), too slow for big sets and likes.
+pub fn title_from_link(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next()?.split("://").nth(1)?;
+    let mut segments = path.trim_end_matches('/').split('/');
+    // Not `api-v2.soundcloud.com/tracks/ID`, the stubs that follow a set's first few tracks.
+    if !matches!(segments.next()?, "soundcloud.com" | "www.soundcloud.com" | "m.soundcloud.com") {
+        return None;
+    }
+    // Only `artist/track` links: sets, likes and short links don't name a track.
+    let (Some(_artist), Some(slug), None) = (segments.next(), segments.next(), segments.next()) else {
+        return None;
+    };
+    let words: Vec<String> = slug
+        .split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+/// Most untitled items one lookup names. SoundCloud resolves about a track a second per
+/// process, so this is roughly half a minute; the rest keep their links until a later sync.
+pub const TITLE_LOOKUP_LIMIT: usize = 100;
+
+/// [`fetch_info`], then looks up the titles of items the listing left untitled (SoundCloud
+/// sets past their first few tracks), skipping links `known` already has names for.
+pub fn fetch_titled(
+    tools: &ToolPaths,
+    net: &NetworkOptions,
+    url: &str,
+    known: &(dyn Fn(&str) -> bool + Sync),
+) -> Result<MediaInfo> {
+    let mut info = fetch_info(tools, net, url)?;
+    fill_titles(tools, net, &mut info.items, known, TITLE_LOOKUP_LIMIT);
+    Ok(info)
+}
+
+/// Names up to `limit` items whose title is still their link, in a few parallel yt-dlp
+/// runs. Tracks that fail to resolve keep their link.
+pub fn fill_titles(
+    tools: &ToolPaths,
+    net: &NetworkOptions,
+    items: &mut [PlaylistItem],
+    known: &(dyn Fn(&str) -> bool + Sync),
+    limit: usize,
+) {
+    let urls: Vec<String> = items
+        .iter()
+        .filter(|i| i.title == i.url && !known(&i.url))
+        .map(|i| i.url.clone())
+        .take(limit)
+        .collect();
+    if urls.is_empty() {
+        return;
+    }
+    let found: HashMap<String, Resolved> = std::thread::scope(|s| {
+        let runs: Vec<_> = urls
+            .chunks(urls.len().div_ceil(4))
+            .map(|chunk| {
+                s.spawn(move || {
+                    let mut cmd = base_command(tools, net).ok()?;
+                    cmd.args(["-i", "--print", RESOLVE_TEMPLATE, "--"]).args(chunk);
+                    // A failed track fails the run but still prints the others.
+                    let out = cmd.output().ok()?;
+                    Some(parse_resolved(&String::from_utf8_lossy(&out.stdout)))
+                })
+            })
+            .collect();
+        runs.into_iter().filter_map(|r| r.join().ok().flatten()).flatten().collect()
+    });
+    for item in items {
+        if let Some(r) = found.get(&item.url) {
+            item.title = r.title.clone();
+            item.uploader = item.uploader.take().or_else(|| r.uploader.clone());
+            item.duration = item.duration.or(r.duration);
+        }
+    }
+}
+
+const RESOLVE_TEMPLATE: &str = "%(original_url)s\t%(uploader)s\t%(duration)s\t%(title)s";
+
+#[derive(Debug, PartialEq)]
+struct Resolved {
+    title: String,
+    uploader: Option<String>,
+    duration: Option<f64>,
+}
+
+/// Reads [`RESOLVE_TEMPLATE`] lines, keyed by the link that was asked about.
+fn parse_resolved(out: &str) -> HashMap<String, Resolved> {
+    let field = |v: &str| (!v.is_empty() && v != "NA").then(|| v.to_owned());
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.trim_end_matches('\r').splitn(4, '\t');
+            let (url, uploader, duration, title) = (f.next()?, f.next()?, f.next()?, field(f.next()?)?);
+            Some((
+                url.to_owned(),
+                Resolved {
+                    title,
+                    uploader: field(uploader),
+                    duration: duration.parse().ok(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// One downloadable stream from the lookup.
@@ -1239,5 +1355,53 @@ mod tests {
         assert_eq!(pl.items[0].duration, Some(201.0));
         assert_eq!(pl.items[0].thumbnail.as_deref(), Some("l"));
         assert_eq!(pl.items[2].uploader.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn untitled_soundcloud_entries_get_titles_from_their_links() {
+        let pl = parse_info(
+            br#"{"_type":"playlist","title":"Soulhack","entries":[
+                {"ie_key":"Soundcloud","url":"https://soundcloud.com/forss/city-ports","id":"290"},
+                {"ie_key":"Soundcloud","url":"https://soundcloud.com/forss/funk-for-nerds?in=forss/sets/soulhack",
+                 "id":"292","album_artist":"Forss"},
+                {"ie_key":"Soundcloud","url":"https://on.soundcloud.com/AbCdE","id":"293"}]}"#,
+        )
+        .unwrap();
+        let titles: Vec<_> = pl.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["City Ports", "Funk For Nerds", "https://on.soundcloud.com/AbCdE"]);
+        assert_eq!(pl.items[0].uploader, None);
+        assert_eq!(pl.items[1].uploader.as_deref(), Some("Forss"));
+    }
+
+    #[test]
+    fn titles_from_links() {
+        let t = |u: &str| title_from_link(u);
+        assert_eq!(t("https://soundcloud.com/forss/city-ports/").as_deref(), Some("City Ports"));
+        assert_eq!(t("https://m.soundcloud.com/a/über_track-2#t=1").as_deref(), Some("Über Track 2"));
+        assert_eq!(t("https://soundcloud.com/forss/sets/soulhack"), None);
+        assert_eq!(t("https://soundcloud.com/forss"), None);
+        assert_eq!(t("https://www.youtube.com/watch?v=abc"), None);
+        assert_eq!(t("https://api-v2.soundcloud.com/tracks/295"), None);
+    }
+
+    #[test]
+    fn parses_resolved_titles() {
+        let r = parse_resolved(
+            "https://api-v2.soundcloud.com/tracks/295\tForss\t409.033\tJourneyman\r\n\
+             https://x/1\tNA\tNA\tTab\there\n\
+             https://x/2\tA\t1\tNA\n\
+             garbage\n",
+        );
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            r["https://api-v2.soundcloud.com/tracks/295"],
+            Resolved {
+                title: "Journeyman".into(),
+                uploader: Some("Forss".into()),
+                duration: Some(409.033),
+            }
+        );
+        assert_eq!(r["https://x/1"].title, "Tab\there");
+        assert_eq!(r["https://x/1"].uploader, None);
     }
 }

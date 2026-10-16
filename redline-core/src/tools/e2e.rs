@@ -560,3 +560,25 @@ fn discord_preset_fits_under_10_mb() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(len < 10_000_000 && len > 7_000_000, "{len}");
 }
+
+/// SoundCloud's flat set listing has no titles, and past the first five tracks only API
+/// links; the tracks still come out named.
+#[test]
+#[ignore]
+fn soundcloud_set_tracks_get_readable_titles() {
+    let tools = ensure_tools();
+    let net = ytdlp::NetworkOptions::default();
+    let url = "https://soundcloud.com/forss/sets/soulhack";
+    let start = Instant::now();
+    let info = ytdlp::fetch_titled(&tools, &net, url, &|_| false).unwrap();
+    let titles: Vec<_> = info.items.iter().map(|i| i.title.as_str()).collect();
+    println!("{titles:?} in {:?}", start.elapsed());
+    assert_eq!(titles.len(), 11, "{titles:?}");
+    assert!(titles.iter().all(|t| !t.starts_with("http")), "{titles:?}");
+    assert!(titles.contains(&"City Ports") && titles.contains(&"Paradigm Shift"), "{titles:?}");
+    assert!(info.items.iter().all(|i| i.uploader.as_deref() == Some("Forss")));
+
+    // Links a sync already has names for aren't looked up again.
+    let known = ytdlp::fetch_titled(&tools, &net, url, &|_| true).unwrap();
+    assert!(known.items.iter().filter(|i| i.title == i.url).count() > 0);
+}
