@@ -1,6 +1,6 @@
 //! Engine tests with a fake decoder and the capture output, so no ffmpeg or sound card.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 use super::output::Capture;
 use super::*;
@@ -23,7 +23,7 @@ impl Tone {
 }
 
 impl Media for Tone {
-    fn resolve(&self, _: &ToolPaths, source: &Source) -> Result<Resolved> {
+    fn resolve(&self, _: &Env, source: &Source) -> Result<Resolved> {
         Ok(Resolved {
             input: Input {
                 location: "tone".into(),
@@ -37,7 +37,7 @@ impl Media for Tone {
         })
     }
 
-    fn decode(&self, _: &ToolPaths, _: &Input, start: f64, rate: u32) -> Result<Pcm> {
+    fn decode(&self, _: &Env, _: &Input, start: f64, rate: u32) -> Result<Pcm> {
         if self.fail_decode {
             return Err(anyhow!("can't decode"));
         }
@@ -182,7 +182,90 @@ fn decode_failure_is_an_error_state() {
 #[test]
 fn missing_local_file_fails_to_resolve() {
     let err = Ffmpeg
-        .resolve(&ToolPaths::default(), &Source::Local("Z:/nope/gone.mp3".into()))
+        .resolve(&Env::default(), &Source::Local("Z:/nope/gone.mp3".into()))
         .unwrap_err();
     assert!(err.to_string().contains("moved or deleted"), "{err}");
+}
+
+/// Holds back the end of a stream for a moment, like a connection that stalls then fails.
+struct SlowEnd(Cursor<Vec<u8>>);
+
+impl Read for SlowEnd {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.0.read(out)?;
+        if n == 0 {
+            thread::sleep(Duration::from_millis(300));
+        }
+        Ok(n)
+    }
+}
+
+/// A link whose first stream URL dies with a 403 partway through.
+struct ExpiringLink {
+    resolves: Mutex<u32>,
+    starts: Mutex<Vec<(String, f64)>>,
+}
+
+impl Media for ExpiringLink {
+    fn resolve(&self, _: &Env, _: &Source) -> Result<Resolved> {
+        let mut n = self.resolves.lock().unwrap();
+        *n += 1;
+        Ok(Resolved {
+            input: Input {
+                location: format!("https://cdn/{n}"),
+                headers: Some("User-Agent: x\r\n".into()),
+            },
+            info: TrackInfo {
+                title: "Link".into(),
+                duration: Some(2.0),
+                ..Default::default()
+            },
+        })
+    }
+
+    fn decode(&self, env: &Env, input: &Input, start: f64, rate: u32) -> Result<Pcm> {
+        self.starts.lock().unwrap().push((input.location.clone(), start));
+        let mut pcm = Tone::new(2.0).decode(env, input, start, rate)?;
+        if input.location.ends_with("/1") {
+            // Half a second of audio, then the server says no.
+            let bytes = (rate as usize / 2) * 8;
+            let mut half = vec![0u8; bytes];
+            let _ = pcm.reader.read_exact(&mut half);
+            pcm.reader = Box::new(SlowEnd(Cursor::new(half)));
+            pcm.finish = Box::new(|| Err(anyhow!("Server returned 403 Forbidden (access denied)")));
+        }
+        Ok(pcm)
+    }
+}
+
+#[test]
+fn expired_stream_url_is_resolved_again_and_resumes() {
+    let capture = Capture::new(RATE, 4.0);
+    let media = Arc::new(ExpiringLink {
+        resolves: Mutex::default(),
+        starts: Mutex::default(),
+    });
+    let p = player(media.clone(), &capture);
+    p.send(Command::Load(Source::Link("https://youtu.be/x".into()), 0.0));
+    let s = wait_for(&p, "end", |s| s.status == Status::Ended || matches!(s.status, Status::Error(_)));
+    assert_eq!(s.status, Status::Ended);
+    assert_eq!(*media.resolves.lock().unwrap(), 2);
+    let starts = media.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2, "{starts:?}");
+    assert_eq!(starts[1].0, "https://cdn/2");
+    assert!((0.4..=0.55).contains(&starts[1].1), "resumed where it died: {starts:?}");
+
+    // Playing it again uses the cached URL.
+    p.send(Command::Load(Source::Link("https://youtu.be/x".into()), 1.5));
+    wait_for(&p, "replay", |s| s.status == Status::Ended && s.load_id == 2);
+    assert_eq!(*media.resolves.lock().unwrap(), 2);
+}
+
+#[test]
+fn recognises_expired_urls() {
+    assert!(is_expired("[https @ 0x1] HTTP error 403 Forbidden"));
+    assert!(is_expired("Server returned 403 Forbidden (access denied)"));
+    assert!(is_expired("https://x: Server returned 410 Gone"));
+    assert!(!is_expired("Invalid data found when processing input"));
+    assert!(!is_expired("C:/music/403.mp3: No such file"));
 }

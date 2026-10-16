@@ -595,3 +595,31 @@ pub fn line_slider(ui: &mut Ui, width: f32, value: &mut f32) -> Response {
     }
     pointer(resp, true)
 }
+
+/// Square cover art cropped from the middle of `url` (a thumbnail URL or file), or the
+/// `icon` tile while it loads or if it can't.
+pub fn cover(ui: &mut Ui, size: f32, url: Option<&str>, icon: &str) -> Response {
+    let Some(url) = url else {
+        return art_tile(ui, size, icon, MUTED);
+    };
+    let image = egui::Image::new(url.to_owned());
+    let loaded = image.load_for_size(ui.ctx(), Vec2::splat(size * 4.0));
+    let Ok(egui::load::TexturePoll::Ready { texture }) = loaded else {
+        return art_tile(ui, size, icon, MUTED);
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    // Video thumbnails are wide; keep the centre square rather than squashing them.
+    let (w, h) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
+    let uv = if w > h {
+        let margin = (1.0 - h / w) / 2.0;
+        Rect::from_min_max(pos2(margin, 0.0), pos2(1.0 - margin, 1.0))
+    } else {
+        let margin = (1.0 - w / h) / 2.0;
+        Rect::from_min_max(pos2(0.0, margin), pos2(1.0, 1.0 - margin))
+    };
+    egui::Image::from_texture(texture)
+        .uv(uv)
+        .corner_radius(4)
+        .paint_at(ui, rect);
+    resp
+}

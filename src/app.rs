@@ -51,6 +51,8 @@ pub struct App {
     pub player_state: PlayerState,
     /// Volume to go back to when unmuting.
     pub unmuted_volume: f32,
+    /// Network settings the player was last given.
+    player_network: Option<crate::tools::ytdlp::NetworkOptions>,
     /// egui time when a shutdown was scheduled, for the countdown.
     pub shutdown_at: Option<f64>,
 }
@@ -83,6 +85,7 @@ impl App {
             player: Player::system(tools.clone(), wake.clone()),
             player_state: PlayerState::default(),
             unmuted_volume: 1.0,
+            player_network: None,
             wake,
             shutdown_at: None,
         }
@@ -179,6 +182,10 @@ impl eframe::App for App {
             self.encoders_task = Self::detect_encoders(&self.wake, &self.tools);
         }
         self.player_state = self.player.state();
+        if self.player_network.as_ref() != Some(&self.settings.network) {
+            self.player_network = Some(self.settings.network.clone());
+            self.player.send(Command::SetNetwork(self.settings.network.clone()));
+        }
         if let Some(e) = self.encoders_task.as_ref().and_then(Task::take) {
             self.encoders = e;
             self.encoders_task = None;

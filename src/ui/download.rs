@@ -14,6 +14,7 @@ use crate::tools::ytdlp::{
     Mode, SubsMode, Tags, Trim, VIDEO_QUALITIES,
 };
 use redline_core::download_plan::{LinkChoices, Schedule};
+use redline_core::player::{Command, Source};
 
 #[derive(Default)]
 pub struct DownloadPage {
@@ -205,7 +206,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         ui.add_space(16.0);
     } else if let Some(info) = &page.link.info {
         let seen = app.history.find_url(&url).map(|e| e.finished_at);
-        media_card(ui, info, seen);
+        if media_card(ui, info, seen) {
+            app.player.send(Command::Load(Source::Link(url.clone()), 0.0));
+        }
         ui.add_space(16.0);
     }
 
@@ -391,7 +394,9 @@ fn time_field(ui: &mut Ui, text: &mut String, hint: &str) -> bool {
 }
 
 /// Album-header style card: thumbnail, kind, big title, meta line.
-fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) {
+/// Returns true when Play is clicked.
+fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) -> bool {
+    let mut play = false;
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
             let size = vec2(232.0, 130.0);
@@ -450,9 +455,16 @@ fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) {
                         .color(theme::ACCENT_HOVER),
                     );
                 }
+                if !info.is_playlist {
+                    ui.add_space(8.0);
+                    play = theme::small_pill_button(ui, &format!("{}  Play", icons::PLAY), true)
+                        .on_hover_text("Stream it now without downloading")
+                        .clicked();
+                }
             });
         });
     });
+    play
 }
 
 /// Video/audio choice, quality, exact formats, embeds and subtitles.

@@ -58,3 +58,34 @@ fn plays_a_local_tone_to_the_end() {
     println!("{secs:.3} s of sound");
     assert!((2.85..=3.1).contains(&secs), "{secs:.3} s of sound");
 }
+
+#[test]
+#[ignore]
+fn streams_a_youtube_link_and_seeks() {
+    let tools = ensure_tools();
+    let capture = Capture::new(RATE, 1.0);
+    let p = Player::spawn(tools.clone(), Arc::new(Ffmpeg), capture.opener(), crate::no_wake());
+    p.send(Command::Load(Source::Link("https://www.youtube.com/watch?v=jNQXAC9IVRw".into()), 0.0));
+    let s = wait_for(&p, "playing", 60, |s| s.status == Status::Playing && !s.buffering);
+    let track = s.track.clone().unwrap();
+    println!("{track:?}");
+    assert_eq!(track.title, "Me at the zoo");
+    assert!(track.thumbnail.is_some());
+    assert!((s.duration.unwrap() - 19.0).abs() < 1.5, "{:?}", s.duration);
+
+    let started = capture.frames();
+    wait_for(&p, "2 s in", 20, |s| s.position >= 2.0);
+    let played = (capture.frames() - started) as f64 / RATE as f64;
+    println!("2 s took {played:.2} s of output");
+    assert!(loud_frames(&capture) > RATE as usize, "sound came out");
+
+    p.send(Command::Seek(10.0));
+    let s = wait_for(&p, "seeked", 20, |s| s.position >= 10.0 && !s.buffering);
+    assert!(s.position < 10.6, "{}", s.position);
+    let before = loud_frames(&capture);
+    let s = wait_for(&p, "1 s more", 20, |s| s.position >= 11.0);
+    assert_eq!(s.status, Status::Playing);
+    let after = loud_frames(&capture);
+    println!("{} loud frames after the seek", after - before);
+    assert!(after - before > RATE as usize / 2, "sound after the seek");
+}

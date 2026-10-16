@@ -9,6 +9,7 @@ use crate::format::fmt_timestamp;
 use crate::history::HistoryEntry;
 use crate::jobs::JobSpec;
 use crate::theme;
+use redline_core::player::{Command, Source};
 use crate::tools;
 
 #[derive(Default)]
@@ -20,7 +21,7 @@ enum Action {
     Again(usize),
     Remove(usize),
     Open(std::path::PathBuf),
-    Play(std::path::PathBuf),
+    Play(Source),
     Reveal(std::path::PathBuf),
 }
 
@@ -100,7 +101,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Action::Open(path) => {
                 let _ = open::that_detached(path);
             }
-            Action::Play(path) => app.play_file(path),
+            Action::Play(source) => app.player.send(Command::Load(source, 0.0)),
             Action::Reveal(path) => tools::reveal(&path),
         }
     }
@@ -146,9 +147,17 @@ fn entry_row(ui: &mut Ui, idx: usize, entry: &HistoryEntry, actions: &mut Vec<Ac
             if path.is_file() && theme::icon_button(ui, icons::ARROW_SQUARE_OUT, "Open in its app").clicked() {
                 actions.push(Action::Open(path.clone()));
             }
-            if super::playable(path) && theme::icon_button(ui, icons::PLAY, "Play").clicked() {
-                actions.push(Action::Play(path.clone()));
-            }
+        }
+        // The downloaded file if it's still there, otherwise stream the link.
+        let play = match (&output, entry.url()) {
+            (Some(p), _) if super::playable(p) => Some((Source::Local(p.clone()), "Play")),
+            (_, Some(url)) => Some((Source::Link(url.to_owned()), "Stream")),
+            _ => None,
+        };
+        if let Some((source, tip)) = play
+            && theme::icon_button(ui, icons::PLAY, tip).clicked()
+        {
+            actions.push(Action::Play(source));
         }
         ui.add_space(12.0);
         ui.add_sized(

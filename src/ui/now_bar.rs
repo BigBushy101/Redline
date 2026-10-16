@@ -34,14 +34,7 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
     // Left: art + title + artist (or what's going on)
     let mut l = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)));
     let track = st.track.clone().unwrap_or_default();
-    match &track.thumbnail {
-        Some(url) => {
-            l.add(egui::Image::new(url.as_str()).fit_to_exact_size(vec2(56.0, 56.0)).corner_radius(4));
-        }
-        None => {
-            theme::art_tile(&mut l, 56.0, icons::MUSIC_NOTES, theme::MUTED);
-        }
-    }
+    theme::cover(&mut l, 56.0, track.thumbnail.as_deref(), icons::MUSIC_NOTES);
     l.add_space(8.0);
     l.vertical(|ui| {
         ui.add_space(12.0);

@@ -416,7 +416,7 @@ struct RawThumb {
     url: String,
 }
 
-fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process::Command> {
+pub(crate) fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process::Command> {
     let ytdlp = tools
         .ytdlp
         .as_ref()
@@ -439,6 +439,11 @@ fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process:
 pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<MediaInfo> {
     let mut cmd = base_command(tools, net)?;
     cmd.args(["-J", "--flat-playlist", "--", url]);
+    parse_info(&run_json(cmd)?)
+}
+
+/// Runs a yt-dlp `-J` command and returns its JSON, or its error made readable.
+fn run_json(mut cmd: std::process::Command) -> Result<Vec<u8>> {
     let out = cmd.output().context("failed to run yt-dlp")?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -452,7 +457,72 @@ pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<
             .trim();
         bail!("{}", friendly_error(line));
     }
-    parse_info(&out.stdout)
+    Ok(out.stdout)
+}
+
+/// A direct audio stream for a page URL, valid for a few hours at most.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StreamInfo {
+    pub url: String,
+    /// Headers the stream's server expects, as `Name: value\r\n` lines for ffmpeg.
+    pub headers: Option<String>,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub duration: Option<f64>,
+    pub thumbnail: Option<String>,
+}
+
+/// `yt-dlp -J -f bestaudio/best --no-playlist URL`: the stream to play `url` from.
+pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
+    let mut cmd = base_command(tools, net)?;
+    cmd.args(["-J", "-f", "bestaudio/best", "--no-playlist", "--", url]);
+    parse_stream(&run_json(cmd)?)
+}
+
+#[derive(Deserialize)]
+struct RawStream {
+    url: Option<String>,
+    #[serde(default)]
+    http_headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    requested_formats: Vec<RawStream>,
+    title: Option<String>,
+    track: Option<String>,
+    artist: Option<String>,
+    uploader: Option<String>,
+    channel: Option<String>,
+    album: Option<String>,
+    duration: Option<f64>,
+    thumbnail: Option<String>,
+    #[serde(default)]
+    thumbnails: Vec<RawThumb>,
+}
+
+fn parse_stream(json: &[u8]) -> Result<StreamInfo> {
+    let mut raw: RawStream = serde_json::from_slice(json).context("unexpected yt-dlp output")?;
+    // A merged pick lists its parts; the audio one is last.
+    if raw.url.is_none()
+        && let Some(part) = raw.requested_formats.pop()
+    {
+        raw.url = part.url;
+        raw.http_headers = part.http_headers;
+    }
+    let url = raw.url.ok_or_else(|| anyhow!("This link has no playable stream."))?;
+    let headers: String = raw
+        .http_headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
+    Ok(StreamInfo {
+        url,
+        headers: (!headers.is_empty()).then_some(headers),
+        title: raw.track.or(raw.title).unwrap_or_else(|| "Untitled".into()),
+        artist: raw.artist.or(raw.uploader).or(raw.channel),
+        album: raw.album,
+        duration: raw.duration,
+        thumbnail: raw.thumbnail.or_else(|| raw.thumbnails.last().map(|t| t.url.clone())),
+    })
 }
 
 fn parse_info(json: &[u8]) -> Result<MediaInfo> {
@@ -1049,6 +1119,29 @@ mod tests {
         assert!(has_pair(&args, "-o", "%(title)s [%(id)s] 1h01m40s-end.%(ext)s"));
 
         assert!(!build_args(&req(DownloadOptions::default())).contains(&"--download-sections".to_string()));
+    }
+
+    #[test]
+    fn parses_stream_json() {
+        let s = parse_stream(
+            br#"{"title":"Me at the zoo","uploader":"jawed","duration":19,"url":"https://cdn/a",
+                "http_headers":{"User-Agent":"UA","Accept":"*/*"},"thumbnails":[{"url":"t1"},{"url":"t2"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(s.url, "https://cdn/a");
+        assert_eq!(s.headers.as_deref(), Some("Accept: */*\r\nUser-Agent: UA\r\n"));
+        assert_eq!(s.artist.as_deref(), Some("jawed"));
+        assert_eq!(s.duration, Some(19.0));
+        assert_eq!(s.thumbnail.as_deref(), Some("t2"));
+
+        let merged = parse_stream(
+            br#"{"title":"T","track":"Song","requested_formats":[{"url":"v"},{"url":"a","http_headers":{"X":"1"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(merged.url, "a");
+        assert_eq!(merged.title, "Song");
+        assert_eq!(merged.headers.as_deref(), Some("X: 1\r\n"));
+        assert!(parse_stream(br#"{"title":"T"}"#).is_err());
     }
 
     #[test]
