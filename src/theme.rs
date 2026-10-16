@@ -1,0 +1,527 @@
+//! Spotify-style dark theme with a red accent, plus the custom widgets the pages share.
+
+use eframe::egui::{
+    self, Color32, CornerRadius, CursorIcon, FontData, FontDefinitions, FontFamily, FontId, Frame,
+    Margin, Mesh, Pos2, Rect, Response, RichText, Sense, Shadow, Stroke, StrokeKind, TextStyle, Ui,
+    Vec2, pos2, vec2,
+};
+use std::sync::Arc;
+
+pub const BLACK: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
+pub const BG: Color32 = Color32::from_rgb(0x12, 0x12, 0x12);
+pub const CARD: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
+pub const CARD_HOVER: Color32 = Color32::from_rgb(0x28, 0x28, 0x28);
+pub const INPUT: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
+pub const ELEVATED: Color32 = Color32::from_rgb(0x28, 0x28, 0x28);
+pub const TEXT: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+pub const MUTED: Color32 = Color32::from_rgb(0xB3, 0xB3, 0xB3);
+pub const SUBTLE: Color32 = Color32::from_rgb(0x6A, 0x6A, 0x6A);
+pub const TRACK: Color32 = Color32::from_rgb(0x4D, 0x4D, 0x4D);
+pub const ACCENT: Color32 = Color32::from_rgb(0xE8, 0x26, 0x3A);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x4E);
+pub const ACCENT_PRESSED: Color32 = Color32::from_rgb(0xC4, 0x1A, 0x2D);
+pub const HEADER_TINT: Color32 = Color32::from_rgb(0x6E, 0x12, 0x1D);
+
+pub const BOLD: &str = "bold";
+
+pub fn bold() -> FontFamily {
+    FontFamily::Name(BOLD.into())
+}
+
+pub fn install(ctx: &egui::Context) {
+    install_fonts(ctx);
+
+    ctx.all_styles_mut(|style| {
+        style.text_styles = [
+            (TextStyle::Heading, FontId::new(32.0, bold())),
+            (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+            (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+            (TextStyle::Small, FontId::new(12.0, FontFamily::Proportional)),
+            (TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace)),
+        ]
+        .into();
+
+        let s = &mut style.spacing;
+        s.item_spacing = vec2(8.0, 8.0);
+        s.button_padding = vec2(14.0, 7.0);
+        s.interact_size.y = 30.0;
+        s.combo_width = 150.0;
+        s.slider_width = 200.0;
+        s.menu_margin = Margin::same(6);
+        s.scroll = egui::style::ScrollStyle::floating();
+
+        let v = &mut style.visuals;
+        *v = egui::Visuals::dark();
+        v.panel_fill = BG;
+        v.window_fill = ELEVATED;
+        v.window_stroke = Stroke::NONE;
+        v.window_corner_radius = CornerRadius::same(8);
+        v.menu_corner_radius = CornerRadius::same(6);
+        v.window_shadow = Shadow {
+            offset: [0, 8],
+            blur: 24,
+            spread: 0,
+            color: Color32::from_black_alpha(160),
+        };
+        v.popup_shadow = v.window_shadow;
+        v.extreme_bg_color = INPUT;
+        v.faint_bg_color = CARD;
+        v.hyperlink_color = ACCENT_HOVER;
+        v.error_fg_color = ACCENT_HOVER;
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.55);
+        v.selection.stroke = Stroke::new(1.0, TEXT);
+        v.slider_trailing_fill = true;
+        v.override_text_color = None;
+
+        let w = &mut v.widgets;
+        w.noninteractive.fg_stroke = Stroke::new(1.0, MUTED);
+        w.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_gray(0x2A));
+        for (wv, fill) in [
+            (&mut w.inactive, Color32::from_gray(0x2A)),
+            (&mut w.hovered, Color32::from_gray(0x33)),
+            (&mut w.active, Color32::from_gray(0x3E)),
+            (&mut w.open, Color32::from_gray(0x33)),
+        ] {
+            wv.bg_fill = fill;
+            wv.weak_bg_fill = fill;
+            wv.bg_stroke = Stroke::NONE;
+            wv.corner_radius = CornerRadius::same(6);
+            wv.fg_stroke = Stroke::new(1.0, TEXT);
+            wv.expansion = 0.0;
+        }
+        w.inactive.fg_stroke = Stroke::new(1.0, Color32::from_gray(0xE0));
+        // Slider handles and checkbox ticks read the "active" accent via selection.
+        w.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(0x55));
+    });
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "Inter".into(),
+        Arc::new(FontData::from_static(include_bytes!("../assets/Inter-Regular.ttf"))),
+    );
+    fonts.font_data.insert(
+        "InterBold".into(),
+        Arc::new(FontData::from_static(include_bytes!("../assets/Inter-Bold.ttf"))),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "Inter".into());
+
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+
+    // Bold falls back to the full proportional stack (Inter, phosphor icons, emoji).
+    let mut bold_stack = vec!["InterBold".to_owned()];
+    bold_stack.extend(fonts.families[&FontFamily::Proportional].iter().cloned());
+    fonts.families.insert(bold(), bold_stack);
+
+    ctx.set_fonts(fonts);
+}
+
+// ---------------------------------------------------------------------------
+// Text helpers
+
+pub fn heading(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(bold()).size(20.0).color(TEXT)
+}
+
+pub fn strong(text: impl Into<String>) -> RichText {
+    RichText::new(text).family(bold()).color(TEXT)
+}
+
+pub fn muted(text: impl Into<String>) -> RichText {
+    RichText::new(text).color(MUTED)
+}
+
+pub fn eyebrow(text: &str) -> RichText {
+    RichText::new(text.to_uppercase())
+        .family(bold())
+        .size(11.0)
+        .color(MUTED)
+}
+
+// ---------------------------------------------------------------------------
+// Containers
+
+/// A rounded content card in the main panel.
+pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::new()
+        .fill(CARD)
+        .corner_radius(8)
+        .inner_margin(Margin::same(20))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// Page title block shown above every page's content.
+pub fn page_header(ui: &mut Ui, eyebrow_text: &str, title_text: &str, subtitle: &str) {
+    ui.add_space(12.0);
+    ui.label(eyebrow(eyebrow_text));
+    ui.label(RichText::new(title_text).family(bold()).size(56.0).color(TEXT));
+    ui.label(muted(subtitle).size(15.0));
+    ui.add_space(20.0);
+}
+
+/// Paints the red-to-background gradient at the top of the rounded main panel.
+pub fn paint_header_gradient(painter: &egui::Painter, panel: Rect) {
+    let r = 8u8;
+    let top = Rect::from_min_size(panel.min, vec2(panel.width(), r as f32 * 2.0));
+    painter.rect_filled(
+        top,
+        CornerRadius {
+            nw: r,
+            ne: r,
+            sw: 0,
+            se: 0,
+        },
+        HEADER_TINT,
+    );
+    let grad = Rect::from_min_max(
+        pos2(panel.min.x, panel.min.y + r as f32),
+        pos2(panel.max.x, (panel.min.y + 340.0).min(panel.max.y)),
+    );
+    vertical_gradient(painter, grad, HEADER_TINT, BG);
+}
+
+fn vertical_gradient(painter: &egui::Painter, rect: Rect, top: Color32, bottom: Color32) {
+    let mut mesh = Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 2, 3);
+    painter.add(mesh);
+}
+
+// ---------------------------------------------------------------------------
+// Widgets
+
+fn pointer(resp: Response, enabled: bool) -> Response {
+    if enabled {
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    } else {
+        resp
+    }
+}
+
+/// Big filled red pill, the primary call to action.
+pub fn pill_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    pill(ui, label, enabled, 46.0, 16.0)
+}
+
+pub fn small_pill_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    pill(ui, label, enabled, 34.0, 14.0)
+}
+
+fn pill(ui: &mut Ui, label: &str, enabled: bool, height: f32, size: f32) -> Response {
+    let text_color = if enabled { TEXT } else { Color32::from_gray(0xC8) };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::new(size, bold()), text_color);
+    let desired = vec2(galley.size().x + height, height);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(desired, sense);
+    if ui.is_rect_visible(rect) {
+        let fill = if !enabled {
+            ACCENT.gamma_multiply(0.35)
+        } else if resp.is_pointer_button_down_on() {
+            ACCENT_PRESSED
+        } else if resp.hovered() {
+            ACCENT_HOVER
+        } else {
+            ACCENT
+        };
+        let draw = if enabled && resp.hovered() && !resp.is_pointer_button_down_on() {
+            rect.expand(1.5)
+        } else {
+            rect
+        };
+        ui.painter().rect_filled(draw, CornerRadius::same(255), fill);
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, text_color);
+    }
+    pointer(resp, enabled)
+}
+
+/// Outlined pill, for secondary actions.
+pub fn ghost_button(ui: &mut Ui, label: &str, enabled: bool) -> Response {
+    let text_color = if enabled { TEXT } else { SUBTLE };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), FontId::new(14.0, bold()), text_color);
+    let desired = vec2(galley.size().x + 32.0, 34.0);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(desired, sense);
+    if ui.is_rect_visible(rect) {
+        let stroke_color = if enabled && resp.hovered() {
+            TEXT
+        } else {
+            Color32::from_gray(0x7C)
+        };
+        let draw = if enabled && resp.hovered() {
+            rect.expand(1.0)
+        } else {
+            rect
+        };
+        ui.painter().rect_stroke(
+            draw,
+            CornerRadius::same(255),
+            Stroke::new(1.0, stroke_color),
+            StrokeKind::Inside,
+        );
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, text_color);
+    }
+    pointer(resp, enabled)
+}
+
+/// Round icon-only button that lights up on hover.
+pub fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str) -> Response {
+    let size = 32.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if resp.hovered() {
+            ui.painter()
+                .circle_filled(rect.center(), size / 2.0, Color32::from_gray(0x33));
+        }
+        let color = if resp.hovered() { TEXT } else { MUTED };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            FontId::proportional(18.0),
+            color,
+        );
+    }
+    pointer(resp, true).on_hover_text(tooltip)
+}
+
+/// Row of pill "chips"; the selected one is white like Spotify's filter chips.
+pub fn chips<T: PartialEq + Clone>(ui: &mut Ui, value: &mut T, options: &[(T, &str)]) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (opt, label) in options {
+            let selected = *value == *opt;
+            let (fg, bg) = if selected {
+                (BLACK, TEXT)
+            } else {
+                (TEXT, Color32::from_gray(0x2A))
+            };
+            let galley = ui
+                .painter()
+                .layout_no_wrap((*label).to_owned(), FontId::new(13.5, bold()), fg);
+            let (rect, resp) =
+                ui.allocate_exact_size(vec2(galley.size().x + 28.0, 32.0), Sense::click());
+            let bg = if !selected && resp.hovered() {
+                Color32::from_gray(0x36)
+            } else {
+                bg
+            };
+            ui.painter().rect_filled(rect, CornerRadius::same(255), bg);
+            ui.painter()
+                .galley(rect.center() - galley.size() / 2.0, galley, fg);
+            if pointer(resp, true).clicked() && !selected {
+                *value = opt.clone();
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// iOS/Spotify-style switch with the accent color when on.
+pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    ui.horizontal(|ui| {
+        let size = vec2(40.0, 22.0);
+        let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+        if resp.clicked() {
+            *on = !*on;
+            resp.mark_changed();
+        }
+        let t = ui.ctx().animate_bool_responsive(resp.id, *on);
+        let off_color = if resp.hovered() {
+            Color32::from_gray(0x5A)
+        } else {
+            Color32::from_gray(0x4D)
+        };
+        let fill = lerp_color(off_color, ACCENT, t);
+        ui.painter().rect_filled(rect, CornerRadius::same(255), fill);
+        let r = rect.height() / 2.0 - 3.0;
+        let x = egui::lerp(rect.left() + r + 3.0..=rect.right() - r - 3.0, t);
+        ui.painter()
+            .circle_filled(pos2(x, rect.center().y), r, Color32::WHITE);
+        let label_resp = ui.add(egui::Label::new(RichText::new(label).color(TEXT)).sense(Sense::click()));
+        if label_resp.clicked() {
+            *on = !*on;
+            resp.mark_changed();
+        }
+        pointer(resp, true)
+    })
+    .inner
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+/// Thin progress line: grey track, red fill (white while hovered, like Spotify's scrubber).
+pub fn progress_line(ui: &mut Ui, width: f32, frac: Option<f32>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 12.0), Sense::hover());
+    paint_progress(ui, rect, frac, resp.hovered());
+    resp
+}
+
+pub fn paint_progress(ui: &Ui, rect: Rect, frac: Option<f32>, hovered: bool) {
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
+    let painter = ui.painter();
+    painter.rect_filled(track, CornerRadius::same(2), TRACK);
+    match frac {
+        Some(f) => {
+            let f = f.clamp(0.0, 1.0);
+            let mut fill = track;
+            fill.set_width(track.width() * f);
+            painter.rect_filled(fill, CornerRadius::same(2), ACCENT);
+            if hovered && f > 0.0 {
+                painter.circle_filled(pos2(fill.right(), fill.center().y), 6.0, TEXT);
+            }
+        }
+        None => {
+            // Indeterminate: a sliding segment.
+            let t = ui.input(|i| i.time) as f32;
+            let seg = track.width() * 0.25;
+            let x = (t * 0.6).fract() * (track.width() + seg) - seg;
+            let start = (track.left() + x).max(track.left());
+            let end = (track.left() + x + seg).min(track.right());
+            if end > start {
+                painter.rect_filled(
+                    Rect::from_min_max(pos2(start, track.top()), pos2(end, track.bottom())),
+                    CornerRadius::same(2),
+                    ACCENT,
+                );
+            }
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+/// Scrubber-style bar with two handles selecting `start..=end` out of `0..=total` seconds.
+/// Drags snap to whole seconds. Returns true when either end moved.
+pub fn range_bar(ui: &mut Ui, start: &mut f64, end: &mut f64, total: f64) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click_and_drag());
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 16.0, 4.0));
+    let to_x = |t: f64| track.left() + track.width() * (t / total.max(1e-6)).clamp(0.0, 1.0) as f32;
+    let to_t = |x: f32| (((x - track.left()) / track.width()).clamp(0.0, 1.0) as f64 * total).round();
+
+    // Grab whichever handle is nearer the press and remember it for the rest of the drag.
+    let id = resp.id.with("handle");
+    let mut changed = false;
+    if let Some(pos) = resp.interact_pointer_pos() {
+        let grabbing_end = if resp.drag_started() || resp.clicked() {
+            let near_end = (pos.x - to_x(*end)).abs() < (pos.x - to_x(*start)).abs()
+                || (to_x(*start) - to_x(*end)).abs() < 1.0 && pos.x > to_x(*end);
+            ui.data_mut(|d| d.insert_temp(id, near_end));
+            near_end
+        } else {
+            ui.data(|d| d.get_temp(id)).unwrap_or(false)
+        };
+        let t = to_t(pos.x);
+        if grabbing_end {
+            let v = t.max(*start + 1.0).min(total);
+            changed |= v != *end;
+            *end = v;
+        } else {
+            let v = t.min(*end - 1.0).max(0.0);
+            changed |= v != *start;
+            *start = v;
+        }
+    }
+
+    let painter = ui.painter();
+    painter.rect_filled(track, CornerRadius::same(2), TRACK);
+    let sel = Rect::from_min_max(pos2(to_x(*start), track.top()), pos2(to_x(*end), track.bottom()));
+    painter.rect_filled(sel, CornerRadius::same(2), ACCENT);
+    let hot = resp.hovered() || resp.dragged();
+    for x in [sel.left(), sel.right()] {
+        painter.circle_filled(pos2(x, track.center().y), if hot { 8.0 } else { 7.0 }, TEXT);
+    }
+    pointer(resp, true);
+    changed
+}
+
+/// Sidebar navigation entry.
+pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, badge: Option<usize>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x24));
+        let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 10.0), vec2(3.0, 24.0));
+        painter.rect_filled(bar, CornerRadius::same(2), ACCENT);
+    } else if resp.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x1C));
+    }
+    let color = if selected || resp.hovered() { TEXT } else { MUTED };
+    painter.text(
+        pos2(rect.left() + 18.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        FontId::proportional(22.0),
+        if selected { ACCENT } else { color },
+    );
+    painter.text(
+        pos2(rect.left() + 52.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::new(15.0, bold()),
+        color,
+    );
+    if let Some(n) = badge.filter(|n| *n > 0) {
+        let text = n.to_string();
+        let galley = painter.layout_no_wrap(text, FontId::new(11.0, bold()), TEXT);
+        let w = galley.size().x.max(10.0) + 10.0;
+        let pill = Rect::from_center_size(pos2(rect.right() - 12.0 - w / 2.0, rect.center().y), vec2(w, 18.0));
+        painter.rect_filled(pill, CornerRadius::same(255), ACCENT);
+        painter.galley(pill.center() - galley.size() / 2.0, galley, TEXT);
+    }
+    pointer(resp, true)
+}
+
+/// Square "album art" tile with an icon, used for jobs without a thumbnail.
+pub fn art_tile(ui: &mut Ui, size: f32, icon: &str, tint: Color32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(4), Color32::from_gray(0x28));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        FontId::proportional(size * 0.45),
+        tint,
+    );
+    resp
+}
+
+/// A label/control row used in the option cards.
+pub fn option_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(34.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(150.0, 20.0), Sense::hover());
+        ui.painter().text(
+            Pos2::new(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(14.0),
+            MUTED,
+        );
+        add(ui);
+    });
+}
