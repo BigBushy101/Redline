@@ -9,25 +9,29 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
+use crate::settings;
 use crate::tools::convert::ConvertRequest;
 use crate::tools::ytdlp::DownloadRequest;
 use crate::tools::{self, ToolPaths};
 
 pub type JobId = u64;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum JobSpec {
     Download(DownloadRequest),
     Convert(ConvertRequest),
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum JobStatus {
     Queued,
     Running { progress: Option<f32>, detail: String },
     Processing(String),
     Done(Option<PathBuf>),
+    /// Finished without doing anything, e.g. the link is in the download archive.
+    Skipped(String),
     Failed(String),
     Cancelled,
 }
@@ -45,12 +49,14 @@ impl JobStatus {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Job {
     pub id: JobId,
     pub title: String,
     pub subtitle: String,
     pub spec: JobSpec,
     pub status: JobStatus,
+    #[serde(skip)]
     cancel: Arc<CancelHandle>,
 }
 
@@ -128,6 +134,18 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// Error returned by a download whose link is already in the download archive.
+#[derive(Debug)]
+pub struct AlreadyDownloaded;
+
+impl std::fmt::Display for AlreadyDownloaded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("already downloaded")
+    }
+}
+
+impl std::error::Error for AlreadyDownloaded {}
+
 enum JobEvent {
     Status(JobId, JobStatus),
     Title(JobId, String),
@@ -176,12 +194,20 @@ impl Reporter {
     }
 }
 
+fn queue_path() -> PathBuf {
+    settings::data_dir().join("queue.json")
+}
+
 pub struct JobManager {
     pub jobs: Vec<Job>,
     next_id: JobId,
     running: usize,
     tx: Sender<JobEvent>,
     rx: Receiver<JobEvent>,
+    /// The job list changed in a way worth saving (not progress ticks).
+    dirty: bool,
+    /// Jobs that finished since the last `take_finished`.
+    finished: Vec<JobId>,
 }
 
 impl JobManager {
@@ -193,7 +219,53 @@ impl JobManager {
             running: 0,
             tx,
             rx,
+            dirty: false,
+            finished: Vec::new(),
         }
+    }
+
+    /// Restores the queue saved by the last session. Jobs that were mid-run start over.
+    pub fn load() -> Self {
+        let mut m = Self::new();
+        let jobs: Vec<Job> = std::fs::read_to_string(queue_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        m.set_jobs(jobs);
+        m
+    }
+
+    fn set_jobs(&mut self, mut jobs: Vec<Job>) {
+        for job in &mut jobs {
+            if matches!(job.status, JobStatus::Running { .. } | JobStatus::Processing(_)) {
+                job.status = JobStatus::Queued;
+            }
+        }
+        self.next_id = jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
+        self.jobs = jobs;
+    }
+
+    /// Writes the queue to disk if it changed since the last save.
+    pub fn save_if_dirty(&mut self) {
+        if !std::mem::take(&mut self.dirty) {
+            return;
+        }
+        let path = queue_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string(&self.jobs) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Ids of jobs that finished (any outcome) since the last call.
+    pub fn take_finished(&mut self) -> Vec<JobId> {
+        std::mem::take(&mut self.finished)
+    }
+
+    pub fn get(&self, id: JobId) -> Option<&Job> {
+        self.jobs.iter().find(|j| j.id == id)
     }
 
     pub fn push(&mut self, title: String, subtitle: String, spec: JobSpec) {
@@ -207,6 +279,7 @@ impl JobManager {
             status: JobStatus::Queued,
             cancel: Arc::new(CancelHandle::default()),
         });
+        self.dirty = true;
     }
 
     pub fn active_count(&self) -> usize {
@@ -225,7 +298,10 @@ impl JobManager {
     pub fn cancel(&mut self, id: JobId) {
         if let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) {
             match job.status {
-                JobStatus::Queued => job.status = JobStatus::Cancelled,
+                JobStatus::Queued => {
+                    job.status = JobStatus::Cancelled;
+                    self.dirty = true;
+                }
                 JobStatus::Running { .. } | JobStatus::Processing(_) => job.cancel.cancel(),
                 _ => {}
             }
@@ -238,16 +314,29 @@ impl JobManager {
         {
             job.status = JobStatus::Queued;
             job.cancel = Arc::new(CancelHandle::default());
+            self.dirty = true;
         }
+    }
+
+    /// Retries a download without the archive check ("Download anyway").
+    pub fn retry_ignoring_archive(&mut self, id: JobId) {
+        if let Some(job) = self.find(id)
+            && let JobSpec::Download(req) = &mut job.spec
+        {
+            req.archive = None;
+        }
+        self.retry(id);
     }
 
     pub fn remove(&mut self, id: JobId) {
         self.jobs
             .retain(|j| j.id != id || j.status.is_active());
+        self.dirty = true;
     }
 
     pub fn clear_finished(&mut self) {
         self.jobs.retain(|j| j.status.is_active());
+        self.dirty = true;
     }
 
     pub fn cancel_all(&mut self) {
@@ -281,8 +370,13 @@ impl JobManager {
                             Err(e) if e.is::<Cancelled>() || job.cancel.is_cancelled() => {
                                 JobStatus::Cancelled
                             }
+                            Err(e) if e.is::<AlreadyDownloaded>() => {
+                                JobStatus::Skipped("Already downloaded".into())
+                            }
                             Err(e) => JobStatus::Failed(format!("{e:#}")),
                         };
+                        self.finished.push(id);
+                        self.dirty = true;
                     }
                 }
             }
@@ -318,5 +412,38 @@ impl JobManager {
 
     fn find(&mut self, id: JobId) -> Option<&mut Job> {
         self.jobs.iter_mut().find(|j| j.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_round_trips_and_resumes() {
+        let mut m = JobManager::new();
+        m.push(
+            "a".into(),
+            "sub".into(),
+            JobSpec::Download(DownloadRequest {
+                url: "https://example.com/v".into(),
+                ..Default::default()
+            }),
+        );
+        m.jobs[0].status = JobStatus::Running {
+            progress: Some(0.5),
+            detail: String::new(),
+        };
+        let json = serde_json::to_string(&m.jobs).unwrap();
+
+        let mut back = JobManager::new();
+        back.set_jobs(serde_json::from_str(&json).unwrap());
+        assert_eq!(back.jobs.len(), 1);
+        assert!(back.jobs[0].status == JobStatus::Queued);
+        assert_eq!(back.next_id, 2);
+        let JobSpec::Download(r) = &back.jobs[0].spec else {
+            panic!("wrong spec")
+        };
+        assert_eq!(r.url, "https://example.com/v");
     }
 }

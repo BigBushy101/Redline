@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use super::{ToolPaths, command, ffmpeg, image_conv, run_streaming, unique_path};
 use crate::jobs::{CancelHandle, Cancelled, Reporter};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Default, Serialize, Deserialize)]
 pub enum Category {
+    #[default]
     Image,
     Video,
     Audio,
@@ -181,7 +182,8 @@ impl Default for ConvertOptions {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConvertRequest {
     pub input: PathBuf,
     pub category: Category,

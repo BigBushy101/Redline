@@ -62,6 +62,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         JobStatus::Running { progress, detail } => (detail.clone(), *progress),
         JobStatus::Processing(msg) => (msg.clone(), None),
         JobStatus::Done(_) => ("Finished".to_owned(), Some(1.0)),
+        JobStatus::Skipped(why) => (why.clone(), Some(1.0)),
         JobStatus::Failed(e) => (
             format!("Failed: {}", e.lines().next().unwrap_or("")),
             Some(0.0),

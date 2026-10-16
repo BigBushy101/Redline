@@ -202,7 +202,8 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         });
         ui.add_space(16.0);
     } else if let Some(info) = &page.info {
-        media_card(ui, info);
+        let seen = app.history.find_url(&url).map(|e| e.finished_at);
+        media_card(ui, info, seen);
         ui.add_space(16.0);
     }
 
@@ -328,6 +329,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     url: url.clone(),
                     options: options_for_job,
                     out_dir: app.settings.download_dir.clone(),
+                    // Clips of something already downloaded are still wanted.
+                    archive: (app.settings.skip_downloaded && trim.is_none())
+                        .then(crate::settings::archive_path),
                     trim,
                 }),
             );
@@ -460,7 +464,7 @@ fn time_field(ui: &mut Ui, text: &mut String, hint: &str) -> bool {
 }
 
 /// Album-header style card: thumbnail, kind, big title, meta line.
-fn media_card(ui: &mut Ui, info: &MediaInfo) {
+fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) {
     theme::card(ui, |ui| {
         ui.horizontal(|ui| {
             let size = vec2(232.0, 130.0);
@@ -507,6 +511,18 @@ fn media_card(ui: &mut Ui, info: &MediaInfo) {
                     meta.push(super::fmt_duration(d));
                 }
                 ui.label(theme::muted(meta.join(" • ")));
+                if let Some(at) = downloaded_at {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} You downloaded this on {}",
+                            icons::CLOCK_COUNTER_CLOCKWISE,
+                            crate::history::fmt_timestamp(at)
+                        ))
+                        .small()
+                        .color(theme::ACCENT_HOVER),
+                    );
+                }
             });
         });
     });

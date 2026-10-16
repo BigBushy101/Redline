@@ -36,6 +36,8 @@ pub struct Settings {
     pub ffprobe_path: Option<PathBuf>,
     pub deno_path: Option<PathBuf>,
     pub concurrency: usize,
+    /// Skip links that were downloaded before (yt-dlp's download archive).
+    pub skip_downloaded: bool,
     pub download: DownloadOptions,
     pub convert: ConvertOptions,
 }
@@ -50,10 +52,16 @@ impl Default for Settings {
             ffprobe_path: None,
             deno_path: None,
             concurrency: 2,
+            skip_downloaded: true,
             download: DownloadOptions::default(),
             convert: ConvertOptions::default(),
         }
     }
+}
+
+/// yt-dlp download archive shared by every download.
+pub fn archive_path() -> PathBuf {
+    data_dir().join("archive.txt")
 }
 
 impl Settings {

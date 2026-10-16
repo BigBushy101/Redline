@@ -27,6 +27,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
         (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
         (Page::Queue, icons::QUEUE, "Queue", Some(active)),
+        (Page::History, icons::CLOCK_COUNTER_CLOCKWISE, "History", None),
         (Page::Settings, icons::GEAR_SIX, "Settings", None),
     ] {
         if theme::nav_item(ui, icon, label, app.page == page, badge).clicked() {

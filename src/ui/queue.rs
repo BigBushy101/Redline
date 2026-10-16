@@ -9,6 +9,7 @@ use crate::tools;
 enum Action {
     Cancel(JobId),
     Retry(JobId),
+    RetryAnyway(JobId),
     Remove(JobId),
     Reveal(std::path::PathBuf),
 }
@@ -49,6 +50,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         match action {
             Action::Cancel(id) => app.jobs.cancel(id),
             Action::Retry(id) => app.jobs.retry(id),
+            Action::RetryAnyway(id) => app.jobs.retry_ignoring_archive(id),
             Action::Remove(id) => app.jobs.remove(id),
             Action::Reveal(path) => tools::reveal(&path),
         }
@@ -115,6 +117,14 @@ fn job_row(ui: &mut Ui, job: &Job, actions: &mut Vec<Action>) {
                     && theme::icon_button(ui, icons::FOLDER_OPEN, "Show in folder").clicked()
                 {
                     actions.push(Action::Reveal(target));
+                }
+            }
+            JobStatus::Skipped(_) => {
+                if theme::icon_button(ui, icons::TRASH, "Remove from list").clicked() {
+                    actions.push(Action::Remove(job.id));
+                }
+                if theme::icon_button(ui, icons::ARROW_CLOCKWISE, "Download anyway").clicked() {
+                    actions.push(Action::RetryAnyway(job.id));
                 }
             }
             JobStatus::Failed(_) | JobStatus::Cancelled => {
@@ -190,6 +200,13 @@ fn status_cell(ui: &mut Ui, job: &Job, width: f32) {
             let first = err.lines().next().unwrap_or("");
             ui.add(egui::Label::new(RichText::new(first).small().color(theme::MUTED)).truncate())
                 .on_hover_text(err);
+        }
+        JobStatus::Skipped(why) => {
+            ui.add_space(14.0);
+            line(
+                ui,
+                RichText::new(format!("{} {why}", icons::CHECK_CIRCLE)).color(theme::MUTED),
+            );
         }
         JobStatus::Cancelled => {
             ui.add_space(14.0);

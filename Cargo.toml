@@ -18,6 +18,7 @@ directories = "6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "tga", "qoi", "avif"] }
 open = "5"
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [profile.release]
 opt-level = 3

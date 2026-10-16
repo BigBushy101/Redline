@@ -89,6 +89,21 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     });
     ui.add_space(16.0);
 
+    theme::card(ui, |ui| {
+        ui.label(theme::heading("Downloading"));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            theme::toggle(ui, &mut app.settings.skip_downloaded, "Skip links already downloaded");
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Great for playlists: only new items are fetched")
+                    .small()
+                    .color(theme::SUBTLE),
+            );
+        });
+    });
+    ui.add_space(16.0);
+
     ui.label(
         RichText::new(format!(
             "Redline {} · yt-dlp {}",

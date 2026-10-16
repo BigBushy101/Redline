@@ -3,6 +3,7 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icons;
 
+use crate::history::History;
 use crate::jobs::JobManager;
 use crate::settings::Settings;
 use crate::theme;
@@ -15,6 +16,7 @@ pub enum Page {
     Download,
     Convert,
     Queue,
+    History,
     Settings,
 }
 
@@ -24,9 +26,11 @@ pub struct App {
     saved_settings: Settings,
     pub tools: ToolPaths,
     pub jobs: JobManager,
+    pub history: History,
     pub installer: Installer,
     pub download: ui::download::DownloadPage,
     pub convert: ui::convert::ConvertPage,
+    pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
 }
 
@@ -41,10 +45,12 @@ impl App {
             saved_settings: settings.clone(),
             settings,
             tools,
-            jobs: JobManager::new(),
+            jobs: JobManager::load(),
+            history: History::load(),
             installer: Installer::default(),
             download: Default::default(),
             convert: Default::default(),
+            history_page: Default::default(),
             settings_page: Default::default(),
         }
     }
@@ -72,6 +78,13 @@ impl eframe::App for App {
         }
         self.jobs
             .pump(ctx, &self.tools, self.settings.concurrency);
+        for id in self.jobs.take_finished() {
+            if let Some(job) = self.jobs.get(id) {
+                self.history.record(job);
+            }
+        }
+        self.jobs.save_if_dirty();
+        self.history.save_if_dirty();
         if self.settings != self.saved_settings {
             self.settings.save();
             self.saved_settings = self.settings.clone();
@@ -144,6 +157,7 @@ impl eframe::App for App {
                                 Page::Download => ui::download::show(ui, self),
                                 Page::Convert => ui::convert::show(ui, self),
                                 Page::Queue => ui::queue::show(ui, self),
+                                Page::History => ui::history::show(ui, self),
                                 Page::Settings => ui::settings::show(ui, self),
                             });
                     });

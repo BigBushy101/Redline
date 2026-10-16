@@ -6,7 +6,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use super::{ToolPaths, command, run_streaming};
-use crate::jobs::{CancelHandle, Reporter};
+use crate::jobs::{AlreadyDownloaded, CancelHandle, Reporter};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -99,7 +99,7 @@ impl DownloadOptions {
 }
 
 /// Only download part of the media. Times are in seconds; `end: None` runs to the end.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Trim {
     pub start: f64,
     pub end: Option<f64>,
@@ -128,12 +128,15 @@ impl Trim {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DownloadRequest {
     pub url: String,
     pub options: DownloadOptions,
     pub out_dir: PathBuf,
     pub trim: Option<Trim>,
+    /// yt-dlp `--download-archive` file; links recorded there are skipped.
+    pub archive: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -306,6 +309,11 @@ pub fn build_args(req: &DownloadRequest) -> Vec<String> {
         push("--sponsorblock-remove");
         push("sponsor,selfpromo,interaction");
     }
+    if let Some(archive) = &req.archive {
+        a.push("--download-archive".into());
+        a.push(archive.display().to_string());
+    }
+    let mut push = |s: &str| a.push(s.to_owned());
     if let Some(t) = &req.trim {
         push("--download-sections");
         push(&t.section());
@@ -335,6 +343,8 @@ pub enum Line {
     PostProcess(String),
     Title(String),
     File(PathBuf),
+    /// An item was skipped because it's in the download archive.
+    Archived,
     Other,
 }
 
@@ -362,6 +372,8 @@ pub fn parse_line(line: &str) -> Line {
         Line::Title(rest.trim().to_owned())
     } else if let Some(rest) = line.strip_prefix("RLFILE|") {
         Line::File(PathBuf::from(rest.trim()))
+    } else if line.contains("has already been recorded in the archive") {
+        Line::Archived
     } else {
         Line::Other
     }
@@ -393,6 +405,7 @@ pub fn download(
 
     let mut last_file: Option<PathBuf> = None;
     let mut items = 0usize;
+    let mut archived = 0usize;
     run_streaming(cmd, cancel, |line| match parse_line(line) {
         Line::Progress { percent, speed, eta } => {
             let mut detail = Vec::new();
@@ -416,6 +429,7 @@ pub fn download(
             rep.title(t);
         }
         Line::File(p) => last_file = Some(p),
+        Line::Archived => archived += 1,
         Line::Other => {}
     })
     .map_err(|e| {
@@ -426,6 +440,9 @@ pub fn download(
         }
     })?;
 
+    if last_file.is_none() && archived > 0 {
+        return Err(AlreadyDownloaded.into());
+    }
     // For playlists, point "open" at the playlist folder rather than the last track.
     Ok(match (req.options.playlist && items > 1, last_file) {
         (true, Some(f)) => f.parent().map(Path::to_path_buf),
@@ -462,6 +479,10 @@ mod tests {
             Line::File(PathBuf::from("C:\\out\\a [x].mp4"))
         );
         assert_eq!(parse_line("[youtube] abc: Downloading webpage"), Line::Other);
+        assert_eq!(
+            parse_line("[download] Song has already been recorded in the archive"),
+            Line::Archived
+        );
     }
 
     fn req(options: DownloadOptions) -> DownloadRequest {
@@ -469,8 +490,16 @@ mod tests {
             url: "https://example.com/v".into(),
             options,
             out_dir: PathBuf::from("out"),
-            trim: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn archive_args() {
+        let mut r = req(DownloadOptions::default());
+        assert!(!build_args(&r).contains(&"--download-archive".to_string()));
+        r.archive = Some(PathBuf::from("arch.txt"));
+        assert!(has_pair(&build_args(&r), "--download-archive", "arch.txt"));
     }
 
     fn has_pair(args: &[String], a: &str, b: &str) -> bool {

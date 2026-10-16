@@ -79,6 +79,7 @@ fn converts_video_and_audio_with_ffmpeg() {
                 ..Default::default()
             },
             out_dir: Some(dir.clone()),
+            ..Default::default()
         };
         let out = convert::run(&tools, &req, &CancelHandle::default(), &rep)
             .unwrap_or_else(|e| panic!("{target}: {e:#}"))
@@ -97,6 +98,7 @@ fn converts_video_and_audio_with_ffmpeg() {
         target: "flac".into(),
         options: ConvertOptions::default(),
         out_dir: None,
+        ..Default::default()
     };
     let out = convert::run(&tools, &req, &CancelHandle::default(), &rep).unwrap().unwrap();
     assert!(out.is_file());
@@ -149,6 +151,7 @@ fn converts_video_to_custom_gifs() {
             target: "gif".into(),
             options: ConvertOptions { gif, ..Default::default() },
             out_dir: Some(dir.join(i.to_string())),
+            ..Default::default()
         };
         let out = convert::run(&tools, &req, &CancelHandle::default(), &rep)
             .unwrap_or_else(|e| panic!("case {i}: {e:#}"))
@@ -181,6 +184,7 @@ fn cancelling_kills_ffmpeg() {
             ..Default::default()
         },
         out_dir: Some(dir.clone()),
+        ..Default::default()
     };
     let start = Instant::now();
     let err = convert::run(&tools, &req, &cancel, &Reporter::for_test()).unwrap_err();
@@ -220,6 +224,7 @@ fn downloads_with_ytdlp() {
             options: options.clone(),
             out_dir: dir.clone(),
             trim: None,
+            ..Default::default()
         };
         let out = ytdlp::download(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
             .unwrap_or_else(|e| panic!("{}: {e:#}", options.summary()));
@@ -241,6 +246,7 @@ fn downloads_with_ytdlp() {
             end: Some(9.0),
             precise: true,
         }),
+        ..Default::default()
     };
     let out = ytdlp::download(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
         .unwrap_or_else(|e| panic!("trimmed: {e:#}"))
