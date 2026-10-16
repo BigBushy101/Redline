@@ -90,6 +90,30 @@ fn streams_a_youtube_link_and_seeks() {
     assert!(after - before > RATE as usize / 2, "sound after the seek");
 }
 
+/// With browser cookies, YouTube hands out stream URLs that refuse the first few seconds
+/// of requests. Set `REDLINE_COOKIES_BROWSER` (e.g. `firefox`) to run it.
+#[test]
+#[ignore]
+fn streams_a_youtube_link_with_browser_cookies() {
+    let Ok(browser) = std::env::var("REDLINE_COOKIES_BROWSER") else {
+        println!("REDLINE_COOKIES_BROWSER not set; skipped");
+        return;
+    };
+    let tools = ensure_tools();
+    let capture = Capture::new(RATE, 1.0);
+    let p = Player::spawn(tools.clone(), Arc::new(Ffmpeg), capture.opener(), crate::no_wake());
+    p.send(Command::SetNetwork(ytdlp::NetworkOptions {
+        cookies_browser: Some(browser),
+        ..Default::default()
+    }));
+    p.send(Command::Load(Source::Link("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()), 0.0));
+    wait_for(&p, "playing", 90, |s| {
+        assert!(!matches!(s.status, Status::Error(_)), "{:?}", s.status);
+        s.status == Status::Playing && !s.buffering && s.position >= 1.0
+    });
+    assert!(loud_frames(&capture) > RATE as usize / 2, "sound came out");
+}
+
 #[test]
 #[ignore]
 fn double_speed_and_eq_on_a_real_track() {

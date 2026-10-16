@@ -261,6 +261,70 @@ fn expired_stream_url_is_resolved_again_and_resumes() {
     assert_eq!(*media.resolves.lock().unwrap(), 2);
 }
 
+/// A link whose fresh stream URLs refuse the first few opens, like YouTube's do.
+struct ColdLink {
+    resolves: Mutex<u32>,
+    opens: Mutex<Vec<(String, f64)>>,
+    refusals: usize,
+}
+
+impl Media for ColdLink {
+    fn resolve(&self, env: &Env, source: &Source) -> Result<Resolved> {
+        *self.resolves.lock().unwrap() += 1;
+        Tone::new(1.0).resolve(env, source)
+    }
+
+    fn decode(&self, env: &Env, input: &Input, start: f64, rate: u32) -> Result<Pcm> {
+        let mut opens = self.opens.lock().unwrap();
+        opens.push((input.location.clone(), start));
+        let mut pcm = Tone::new(1.0).decode(env, input, start, rate)?;
+        if opens.len() <= self.refusals {
+            pcm.reader = Box::new(Cursor::new(Vec::new()));
+            pcm.finish = Box::new(|| Err(anyhow!("Error opening input: Server returned 403 Forbidden (access denied)")));
+        }
+        Ok(pcm)
+    }
+}
+
+#[test]
+fn refused_fresh_stream_url_is_tried_again_without_a_new_lookup() {
+    let capture = Capture::new(RATE, 4.0);
+    let media = Arc::new(ColdLink {
+        resolves: Mutex::default(),
+        opens: Mutex::default(),
+        refusals: 2,
+    });
+    let p = player(media.clone(), &capture);
+    p.send(Command::Load(Source::Link("https://youtu.be/x".into()), 0.25));
+    let s = wait_for(&p, "end", |s| s.status == Status::Ended || matches!(s.status, Status::Error(_)));
+    assert_eq!(s.status, Status::Ended);
+    assert_eq!(*media.resolves.lock().unwrap(), 1);
+    let opens = media.opens.lock().unwrap().clone();
+    assert_eq!(opens, vec![("tone".to_string(), 0.25); 3]);
+}
+
+#[test]
+fn stream_url_that_keeps_refusing_fails() {
+    let capture = Capture::new(RATE, 4.0);
+    let media = Arc::new(ColdLink {
+        resolves: Mutex::default(),
+        opens: Mutex::default(),
+        refusals: usize::MAX,
+    });
+    let p = player(media.clone(), &capture);
+    p.send(Command::Load(Source::Link("https://youtu.be/x".into()), 0.0));
+    let start = Instant::now();
+    loop {
+        if matches!(p.state().status, Status::Error(_)) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(30), "never gave up");
+        thread::sleep(Duration::from_millis(20));
+    }
+    // Waits out the refusals once, then looks it up again once more.
+    assert_eq!(*media.resolves.lock().unwrap(), 2);
+}
+
 #[test]
 fn recognises_expired_urls() {
     assert!(is_expired("[https @ 0x1] HTTP error 403 Forbidden"));

@@ -337,6 +337,10 @@ struct Current {
     load_id: u64,
     /// A stream URL already failed with 403/410 and was looked up again.
     refreshed: bool,
+    /// Times the current stream URL was refused before any audio came.
+    refusals: u32,
+    /// When to open the refused stream URL again, from `start_at`.
+    retry_at: Option<Instant>,
     resolved: Option<Resolved>,
     /// Where to start once resolved.
     start_at: f64,
@@ -382,6 +386,12 @@ const WAKE_EVERY: Duration = Duration::from_millis(100);
 /// How long a resolved stream URL is reused. YouTube's last about six hours; stay well
 /// inside that, since a stale one costs a failed request before the refresh.
 const LINK_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A fresh YouTube stream URL often answers 403 for its first few seconds, then works
+/// (seen with browser cookies). Looking it up again just gets another cold URL, so a
+/// refusal before any audio waits and tries the same URL again, this many times.
+const MAX_REFUSALS: u32 = 8;
+const REFUSAL_WAIT: Duration = Duration::from_secs(1);
 
 /// Whether a decoder error means the stream URL went stale.
 fn is_expired(err: &str) -> bool {
@@ -460,6 +470,7 @@ impl Engine {
                     .and_then(|c| c.stream.as_ref())
                     .is_some_and(|s| s.id == id);
                 if let (true, Err(e)) = (current, result)
+                    && !self.retry_refused(id, &e)
                     && !self.refresh_link(&e)
                 {
                     self.fail(e);
@@ -542,6 +553,8 @@ impl Engine {
             source: source.clone(),
             load_id,
             refreshed: false,
+            refusals: 0,
+            retry_at: None,
             resolved: None,
             start_at,
             stream: None,
@@ -571,6 +584,22 @@ impl Engine {
         });
     }
 
+    /// When a link's stream URL is refused before giving any audio, opens it again shortly
+    /// from the same spot. Returns false if this isn't that case or it was refused too often.
+    fn retry_refused(&mut self, id: u64, err: &str) -> bool {
+        let got_audio = self.shared.ready_id.load(Ordering::Relaxed) >= id;
+        let Some(cur) = self.current.as_mut() else { return false };
+        if !matches!(cur.source, Source::Link(_)) || got_audio || !is_expired(err) || cur.refusals >= MAX_REFUSALS {
+            return false;
+        }
+        cur.refusals += 1;
+        cur.start_at = cur.stream.as_ref().map_or(cur.start_at, |s| s.start);
+        cur.retry_at = Some(Instant::now() + REFUSAL_WAIT);
+        self.stop_stream();
+        self.set_state(|s| s.buffering = true);
+        true
+    }
+
     /// After a link's stream URL expires mid-play, looks it up again once and carries on
     /// from the same spot. Returns false if this isn't that case.
     fn refresh_link(&mut self, err: &str) -> bool {
@@ -582,6 +611,7 @@ impl Engine {
         }
         self.links.remove(url);
         cur.refreshed = true;
+        cur.refusals = 0;
         cur.resolved = None;
         cur.start_at = pos;
         let (source, load_id) = (cur.source.clone(), cur.load_id);
@@ -670,6 +700,9 @@ impl Engine {
     /// Starts decoding the current track from `pos` seconds.
     fn start_stream(&mut self, pos: f64) {
         self.stop_stream();
+        if let Some(cur) = self.current.as_mut() {
+            cur.retry_at = None;
+        }
         if let Err(e) = self.ensure_output() {
             self.fail(format!("{e:#}"));
             return;
@@ -739,6 +772,11 @@ impl Engine {
     /// or buffering changed.
     fn poll(&mut self) -> bool {
         self.check_output();
+        if let Some(cur) = &self.current
+            && cur.retry_at.is_some_and(|at| Instant::now() >= at)
+        {
+            self.start_stream(cur.start_at);
+        }
         let Some(stream) = self.current.as_ref().and_then(|c| c.stream.as_ref()) else {
             return false;
         };
