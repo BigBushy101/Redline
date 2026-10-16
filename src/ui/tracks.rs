@@ -4,6 +4,7 @@
 use eframe::egui::{self, Align, CornerRadius, Frame, Layout, Margin, RichText, Sense, TextEdit, Ui, UiBuilder, vec2};
 use egui_phosphor::regular as icons;
 use redline_core::library::Track;
+use redline_core::platform::Platform;
 use redline_core::player::Source;
 
 use crate::format::fmt_duration;
@@ -15,7 +16,14 @@ pub enum RowAction {
     Down(usize),
     Remove(usize),
     Offline(usize),
+    Save(usize),
+    /// The platform glyph in the source column was clicked.
+    OpenPlatform(Platform),
 }
+
+/// Width of the per-row buttons, so the columns line up whatever buttons a row has.
+const ACTIONS_W: f32 = 196.0;
+const SOURCE_W: f32 = 110.0;
 
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str) {
     Frame::new()
@@ -44,9 +52,9 @@ pub fn list_header(ui: &mut Ui) {
         ui.add_space(52.0);
         ui.label(theme::eyebrow("Title"));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(170.0);
+            ui.add_space(ACTIONS_W + 10.0);
             ui.add_sized([60.0, 16.0], egui::Label::new(theme::eyebrow("Time")));
-            ui.add_sized([96.0, 16.0], egui::Label::new(theme::eyebrow("Source")));
+            ui.add_sized([SOURCE_W, 16.0], egui::Label::new(theme::eyebrow("Source")));
         });
     });
     let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
@@ -62,6 +70,8 @@ pub struct RowState<'a> {
     pub offline: bool,
     /// Muted tag after the artist, like "Removed from YouTube".
     pub tag: Option<&'a str>,
+    /// Show the link's platform glyph, which opens its Saved page.
+    pub platform_link: bool,
 }
 
 /// A playlist-style row. Double-click asks to play it; `actions` draws the buttons on the
@@ -73,7 +83,12 @@ pub fn track_row(
     state: RowState,
     actions: impl FnOnce(&mut Ui) -> Option<RowAction>,
 ) -> Option<RowAction> {
-    let RowState { playing, offline, tag } = state;
+    let RowState {
+        playing,
+        offline,
+        tag,
+        platform_link,
+    } = state;
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 56.0), Sense::click());
     let hovered = ui.rect_contains_pointer(rect);
@@ -101,9 +116,8 @@ pub fn track_row(
     theme::cover(&mut row, 40.0, t.thumbnail.as_deref(), icon);
     row.add_space(8.0);
     row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.allocate_ui_with_layout(vec2(160.0, 40.0), Layout::right_to_left(Align::Center), |ui| {
-            // Fixed width, so the columns line up whatever buttons a row has.
-            ui.set_min_width(160.0);
+        ui.allocate_ui_with_layout(vec2(ACTIONS_W, 40.0), Layout::right_to_left(Align::Center), |ui| {
+            ui.set_min_width(ACTIONS_W);
             if let Some(a) = actions(ui) {
                 action = Some(a);
             }
@@ -120,11 +134,22 @@ pub fn track_row(
             Source::Link(u) => u.clone(),
             Source::Local(p) => p.display().to_string(),
         };
-        ui.add_sized(
-            [96.0, 20.0],
-            egui::Label::new(RichText::new(format!("{src_icon} {src}")).small().color(theme::MUTED)),
-        )
-        .on_hover_text(hover);
+        ui.allocate_ui_with_layout(vec2(SOURCE_W, 20.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_width(SOURCE_W);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if platform_link && let Some(p) = t.platform() {
+                let glyph = RichText::new(theme::platform_glyph(p)).size(14.0).color(theme::accent_for(p).base);
+                let r = ui
+                    .add(egui::Label::new(glyph).sense(Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(format!("Saved from {}", p.label()));
+                if r.clicked() {
+                    action = Some(RowAction::OpenPlatform(p));
+                }
+            }
+            ui.add(egui::Label::new(RichText::new(format!("{src_icon} {src}")).small().color(theme::MUTED)))
+                .on_hover_text(hover);
+        });
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ui.vertical(|ui| {
                 ui.add_space(2.0);

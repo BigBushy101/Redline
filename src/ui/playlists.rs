@@ -264,10 +264,21 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
         let local = library::playable_source(t, &app.history);
         let playing = current.as_ref().is_some_and(|c| *c == t.source || *c == local);
         let offline = t.is_link() && matches!(local, Source::Local(_));
-        let row = track_row(ui, idx, t, RowState { playing, offline, ..Default::default() }, |ui| {
+        let state = RowState {
+            playing,
+            offline,
+            platform_link: true,
+            ..Default::default()
+        };
+        let saved = t.is_link() && app.saved.contains(&t.key());
+        let row = track_row(ui, idx, t, state, |ui| {
             let mut a = None;
             if theme::icon_button(ui, icons::X, "Remove from playlist").clicked() {
                 a = Some(RowAction::Remove(idx));
+            }
+            let tip = if saved { "In Saved" } else { "Save" };
+            if t.is_link() && theme::toggle_icon(ui, icons::BOOKMARK_SIMPLE, saved, tip).clicked() && !saved {
+                a = Some(RowAction::Save(idx));
             }
             if t.is_link()
                 && !offline
@@ -295,6 +306,8 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
                 app.jobs.push(job.title, job.subtitle, job.spec);
             }
         }
+        Some(RowAction::Save(i)) => super::saved::save_track(app, &tracks[i]),
+        Some(RowAction::OpenPlatform(p)) => app.page = crate::app::Page::Saved(Some(p)),
         None => {}
     }
 }

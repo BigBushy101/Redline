@@ -2,6 +2,7 @@
 //! with the original (one way, pulling from the platform), and single links saved on their
 //! own. Kept in `saved.json`, apart from the user's own playlists.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -10,8 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::download_plan::PlannedDownload;
 use crate::history::History;
+use crate::jobs::{JobManager, JobSpec};
 use crate::library::{self, Track};
 use crate::platform::{self, Platform};
+use crate::player::Source;
 use crate::settings::{self, Settings};
 use crate::tools::ToolPaths;
 use crate::tools::ytdlp::{self, MediaInfo, NetworkOptions};
@@ -141,6 +144,8 @@ pub struct Saved {
     /// Single links saved on their own.
     pub songs: Vec<Track>,
     dirty: bool,
+    /// Every saved track's key, built on first use. Rows ask "is this saved?" every frame.
+    keys: OnceCell<HashSet<String>>,
 }
 
 fn saved_path() -> PathBuf {
@@ -161,6 +166,7 @@ impl Saved {
             collections: file.collections,
             songs: file.songs,
             dirty: false,
+            keys: OnceCell::new(),
         }
     }
 
@@ -183,15 +189,21 @@ impl Saved {
         }
     }
 
+    /// Marks the store as changed: needs a save, and the key index is out of date.
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.keys.take();
+    }
+
     pub fn get(&self, id: CollectionId) -> Option<&Collection> {
         self.collections.iter().find(|c| c.id == id)
     }
 
     /// The collection, for changing; marks the store as needing a save.
     pub fn get_mut(&mut self, id: CollectionId) -> Option<&mut Collection> {
-        let c = self.collections.iter_mut().find(|c| c.id == id)?;
-        self.dirty = true;
-        Some(c)
+        let i = self.collections.iter().position(|c| c.id == id)?;
+        self.touch();
+        Some(&mut self.collections[i])
     }
 
     /// Platforms with at least one saved collection or song, and how many, in sidebar order.
@@ -245,8 +257,12 @@ impl Saved {
 
     /// Whether a track with this key is saved anywhere, as a song or in a collection.
     pub fn contains(&self, key: &str) -> bool {
-        self.songs.iter().any(|t| t.key() == key)
-            || self.collections.iter().any(|c| c.tracks.iter().any(|t| t.track.key() == key))
+        self.keys
+            .get_or_init(|| {
+                let in_collections = self.collections.iter().flat_map(|c| c.tracks.iter().map(|t| t.track.key()));
+                self.songs.iter().map(Track::key).chain(in_collections).collect()
+            })
+            .contains(key)
     }
 
     /// The saved collection for a playlist link, matched by canonical link.
@@ -267,7 +283,7 @@ impl Saved {
             }
             let title = track.title.clone();
             self.songs.insert(0, track);
-            self.dirty = true;
+            self.touch();
             return Ok(SaveOutcome::Song { title });
         }
         if let Some(id) = self.find_collection(url).map(|c| c.id) {
@@ -302,7 +318,7 @@ impl Saved {
             sync_error: None,
             extractor_platform,
         });
-        self.dirty = true;
+        self.touch();
         Ok(SaveOutcome::Collection {
             id,
             name: info.title.clone(),
@@ -335,7 +351,7 @@ impl Saved {
 
     pub fn remove(&mut self, id: CollectionId) {
         self.collections.retain(|c| c.id != id);
-        self.dirty = true;
+        self.touch();
     }
 
     /// Forgets the tracks flagged as removed from the platform.
@@ -351,13 +367,30 @@ impl Saved {
         }
     }
 
+    /// Collections not synced in the last `max_age` seconds (or never), oldest first, for
+    /// the refresh on launch.
+    pub fn stale(&self, now: i64, max_age: i64) -> Vec<CollectionId> {
+        let mut old: Vec<&Collection> = self
+            .collections
+            .iter()
+            .filter(|c| c.synced_at.is_none_or(|t| now - t >= max_age))
+            .collect();
+        old.sort_by_key(|c| c.synced_at.unwrap_or(i64::MIN));
+        old.into_iter().map(|c| c.id).collect()
+    }
+
+    /// The collection holding a track with this key, if any; for "it's in X" messages.
+    pub fn collection_with(&self, key: &str) -> Option<&Collection> {
+        self.collections.iter().find(|c| c.tracks.iter().any(|t| t.track.key() == key))
+    }
+
     /// Adds a single song unless it's already saved as one. Returns whether it was added.
     pub fn add_song(&mut self, track: Track) -> bool {
         if !track.is_link() || self.songs.iter().any(|t| t.key() == track.key()) {
             return false;
         }
         self.songs.insert(0, track);
-        self.dirty = true;
+        self.touch();
         true
     }
 
@@ -366,7 +399,9 @@ impl Saved {
         let before = self.songs.len();
         self.songs.retain(|t| t.key() != key);
         let removed = self.songs.len() != before;
-        self.dirty |= removed;
+        if removed {
+            self.touch();
+        }
         removed
     }
 }
@@ -421,7 +456,11 @@ pub fn sync_plan(collection: &Collection, fresh: &[Track]) -> Result<SyncResult>
             Some(prev) => {
                 restored += prev.removed_upstream as usize;
                 let mut t = prev.track.clone();
-                t.title = f.title.clone();
+                // Flat listings (SoundCloud's, for one) can carry no title, which yt-dlp's
+                // entry then fills with the link; keep the name we already have.
+                if !matches!(&f.source, Source::Link(u) if *u == f.title) {
+                    t.title = f.title.clone();
+                }
                 t.artist = f.artist.clone().or(t.artist);
                 t.duration = f.duration.or(t.duration);
                 t.thumbnail = f.thumbnail.clone().or(t.thumbnail);
@@ -461,16 +500,34 @@ pub fn offline_jobs(collection: &Collection, history: &History, settings: &Setti
         .tracks
         .iter()
         .filter(|t| !t.removed_upstream)
-        .filter(|t| matches!(&t.track.source, crate::player::Source::Link(u) if history.find_url(u).is_none()))
+        .filter(|t| matches!(&t.track.source, Source::Link(u) if history.find_url(u).is_none()))
         .filter_map(|t| library::offline_download(&t.track, settings))
+        .collect()
+}
+
+/// Leaves out downloads of links already waiting or running in the queue, so turning
+/// keep-offline off and on (or a refresh during downloads) doesn't queue them twice.
+pub fn not_queued(planned: Vec<PlannedDownload>, jobs: &JobManager) -> Vec<PlannedDownload> {
+    let url = |spec: &JobSpec| match spec {
+        JobSpec::Download(r) => Some(platform::canonical(&r.url)),
+        _ => None,
+    };
+    let queued: HashSet<String> = jobs
+        .jobs
+        .iter()
+        .filter(|j| j.status.is_active())
+        .filter_map(|j| url(&j.spec))
+        .collect();
+    planned
+        .into_iter()
+        .filter(|p| url(&p.spec).is_none_or(|u| !queued.contains(&u)))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{JobManager, JobSpec, JobStatus};
-    use crate::player::Source;
+    use crate::jobs::JobStatus;
     use crate::tools::ytdlp::{DownloadRequest, PlaylistItem};
 
     fn yt(id: &str) -> Track {
@@ -526,6 +583,12 @@ mod tests {
         assert_eq!(r.order[0].track.added_at, 100, "kept tracks keep added_at");
         assert_eq!(r.order[1].track.added_at, 999);
         assert!(!r.is_unchanged());
+
+        // A listing without titles doesn't wipe the ones already known.
+        let mut untitled = fresh(&["a"]);
+        untitled[0].title = "https://youtu.be/a?si=x".into();
+        let r = sync_plan(&c, &untitled).unwrap();
+        assert_eq!(r.order[0].track.title, "A");
     }
 
     #[test]
@@ -642,7 +705,9 @@ mod tests {
         assert_eq!(s.platforms(), [(Platform::YouTube, 2), (Platform::Bandcamp, 1)]);
         let (c, songs) = s.for_platform(Platform::YouTube);
         assert_eq!((c.len(), songs.len()), (1, 1));
+        assert!(s.contains(&platform::canonical("https://youtu.be/q")));
         assert!(s.remove_song(&platform::canonical("https://youtu.be/q")));
+        assert!(!s.contains(&platform::canonical("https://youtu.be/q")), "the key index follows changes");
         s.remove(1);
         assert_eq!(s.platforms(), [(Platform::Bandcamp, 1)]);
     }
@@ -693,6 +758,40 @@ mod tests {
         history.record(&jobs.jobs[0]);
         let planned = offline_jobs(&c, &history, &Settings::default());
         assert_eq!(planned.iter().map(|j| j.title.as_str()).collect::<Vec<_>>(), ["B"]);
+    }
+
+    #[test]
+    fn stale_collections_oldest_first() {
+        let mut s = Saved::default();
+        for (id, at) in [(1, Some(1000)), (2, None), (3, Some(90_000)), (4, Some(50_000))] {
+            let mut c = collection(&[]);
+            c.id = id;
+            c.synced_at = at;
+            s.collections.push(c);
+        }
+        assert_eq!(s.stale(100_000, 12 * 3600), [2, 1, 4]);
+        assert!(s.stale(1000, 12 * 3600) == [2]);
+    }
+
+    #[test]
+    fn already_queued_downloads_are_left_out() {
+        let c = collection(&[("a", false), ("b", false)]);
+        let settings = Settings::default();
+        let mut jobs = JobManager::new();
+        let a = library::offline_download(&c.tracks[0].track, &settings).unwrap();
+        jobs.push(a.title, a.subtitle, a.spec);
+        let planned = not_queued(offline_jobs(&c, &History::default(), &settings), &jobs);
+        assert_eq!(planned.iter().map(|j| j.title.as_str()).collect::<Vec<_>>(), ["B"]);
+        jobs.jobs[0].status = JobStatus::Failed("x".into());
+        assert_eq!(not_queued(offline_jobs(&c, &History::default(), &settings), &jobs).len(), 2, "a failed one can go again");
+        assert_eq!(s_with(&c).collection_with(&c.tracks[1].track.key()).map(|c| c.id), Some(1));
+    }
+
+    fn s_with(c: &Collection) -> Saved {
+        Saved {
+            collections: vec![c.clone()],
+            ..Default::default()
+        }
     }
 
     /// Save a small public YouTube playlist, then sync it twice: the second sync changes

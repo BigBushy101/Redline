@@ -7,7 +7,8 @@ use redline_core::format::ago;
 use redline_core::library::{self, Track};
 use redline_core::platform::Platform;
 use redline_core::player::Source;
-use redline_core::saved::{self, CollectionId, SavedTrack};
+use redline_core::download_plan::PlannedDownload;
+use redline_core::saved::{self, CollectionId, SaveOutcome, SavedTrack};
 
 use super::tracks::{RowAction, RowState, list_header, search_box, track_row};
 use crate::app::{App, Page};
@@ -50,7 +51,14 @@ pub struct SavedPage {
     /// Remove was clicked once; the next click removes.
     confirm_remove: Option<CollectionId>,
     error: Option<String>,
+    /// Stale collections still to refresh after launch, one at a time.
+    launch_queue: std::collections::VecDeque<CollectionId>,
+    launch_current: Option<CollectionId>,
+    launch_checked: bool,
 }
+
+/// Collections not refreshed for this long are refreshed on launch.
+const STALE_SECS: i64 = 12 * 3600;
 
 impl SavedPage {
     pub fn is_syncing(&self, id: CollectionId) -> bool {
@@ -81,8 +89,60 @@ pub fn start_save(app: &mut App, url: &str) {
 /// Saves a link that's already been looked up, and says what happened.
 pub fn save_info(app: &mut App, info: &MediaInfo, url: &str) {
     match app.saved.save_link(info, url) {
-        Ok(out) => app.toast(out.message()),
+        Ok(out) => {
+            if let SaveOutcome::Refreshed { id, sync, .. } = &out {
+                keep_new_offline(app, *id, &sync.added);
+            }
+            app.toast(out.message());
+        }
         Err(e) => app.toast(format!("{e:#}")),
+    }
+}
+
+/// Queues downloads that aren't already waiting in the queue. Returns how many.
+fn queue_downloads(app: &mut App, planned: Vec<PlannedDownload>) -> usize {
+    let planned = saved::not_queued(planned, &app.jobs);
+    let n = planned.len();
+    for job in planned {
+        app.jobs.push(job.title, job.subtitle, job.spec);
+    }
+    n
+}
+
+/// After a refresh: downloads for the new tracks of a keep-offline collection.
+fn keep_new_offline(app: &mut App, id: CollectionId, added: &[Track]) {
+    if !app.saved.get(id).is_some_and(|c| c.keep_offline) || added.is_empty() {
+        return;
+    }
+    let planned = added
+        .iter()
+        .filter(|t| matches!(&t.source, Source::Link(u) if app.history.find_url(u).is_none()))
+        .filter_map(|t| library::offline_download(t, &app.settings))
+        .collect();
+    queue_downloads(app, planned);
+}
+
+/// Refreshes, one at a time, the collections that were stale at launch.
+fn launch_refresh(app: &mut App) {
+    let page = &mut app.saved_page;
+    if !page.launch_checked {
+        page.launch_checked = true;
+        if app.settings.refresh_saved_on_start && app.tools.ytdlp.is_some() {
+            page.launch_queue = app.saved.stale(unix_now(), STALE_SECS).into();
+        }
+    }
+    if app.saved_page.launch_current.is_some_and(|id| app.saved_page.is_syncing(id)) {
+        return;
+    }
+    app.saved_page.launch_current = None;
+    while let Some(id) = app.saved_page.launch_queue.pop_front() {
+        // Refreshed by hand since launch, or removed: skip it.
+        let still_stale = app.saved.get(id).is_some_and(|c| c.synced_at.is_none_or(|t| unix_now() - t >= STALE_SECS));
+        if still_stale && !app.saved_page.is_syncing(id) {
+            start_sync(app, id);
+            app.saved_page.launch_current = Some(id);
+            return;
+        }
     }
 }
 
@@ -125,12 +185,18 @@ pub fn poll(app: &mut App) {
         let sync = app.saved_page.syncs.remove(i);
         finish_sync(app, sync.id, result);
     }
+    launch_refresh(app);
 }
 
 fn finish_sync(app: &mut App, id: CollectionId, result: Result<Vec<Track>, String>) {
     let Some(c) = app.saved.get(id) else { return };
     match result.and_then(|fresh| saved::sync_plan(c, &fresh).map_err(|e| format!("{e:#}"))) {
-        Ok(plan) => app.saved.apply_sync(id, plan),
+        Ok(plan) => {
+            let added = plan.added.clone();
+            app.saved.apply_sync(id, plan);
+            keep_new_offline(app, id, &added);
+        }
+        // A failed refresh is noted on the collection; the next one in line still runs.
         Err(e) => app.saved.set_sync_error(id, e),
     }
 }
@@ -269,47 +335,46 @@ fn overview(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// A card tinted with the platform's color: glyph, name, counts and last sync.
+/// A card tinted with the platform's color: glyph, name, counts and last sync. Painted
+/// with the platform's accent directly: a `with_accent` scope would stop the row wrapping.
 fn platform_card(ui: &mut Ui, p: Platform, line: &str, synced: Option<&str>) -> egui::Response {
-    theme::with_accent(ui, theme::accent_for(p), |ui| {
-        let (rect, resp) = ui.allocate_exact_size(vec2(240.0, 150.0), Sense::click());
-        let accent = theme::accent();
-        let mix = if resp.hovered() { 0.24 } else { 0.14 };
-        let painter = ui.painter();
-        painter.rect_filled(rect, CornerRadius::same(8), theme::lerp_color(theme::CARD, accent.base, mix));
-        let left = rect.left() + 18.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(240.0, 150.0), Sense::click());
+    let accent = theme::accent_for(p);
+    let mix = if resp.hovered() { 0.24 } else { 0.14 };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(8), theme::lerp_color(theme::CARD, accent.base, mix));
+    let left = rect.left() + 18.0;
+    painter.text(
+        egui::pos2(left, rect.top() + 34.0),
+        egui::Align2::LEFT_CENTER,
+        theme::platform_glyph(p),
+        egui::FontId::proportional(34.0),
+        accent.base,
+    );
+    painter.text(
+        egui::pos2(left, rect.top() + 80.0),
+        egui::Align2::LEFT_CENTER,
+        p.label(),
+        egui::FontId::new(20.0, theme::bold()),
+        theme::TEXT,
+    );
+    painter.text(
+        egui::pos2(left, rect.top() + 106.0),
+        egui::Align2::LEFT_CENTER,
+        line,
+        egui::FontId::proportional(13.0),
+        theme::MUTED,
+    );
+    if let Some(s) = synced {
         painter.text(
-            egui::pos2(left, rect.top() + 34.0),
+            egui::pos2(left, rect.top() + 126.0),
             egui::Align2::LEFT_CENTER,
-            theme::platform_glyph(p),
-            egui::FontId::proportional(34.0),
-            accent.base,
+            s,
+            egui::FontId::proportional(12.0),
+            theme::SUBTLE,
         );
-        painter.text(
-            egui::pos2(left, rect.top() + 80.0),
-            egui::Align2::LEFT_CENTER,
-            p.label(),
-            egui::FontId::new(20.0, theme::bold()),
-            theme::TEXT,
-        );
-        painter.text(
-            egui::pos2(left, rect.top() + 106.0),
-            egui::Align2::LEFT_CENTER,
-            line,
-            egui::FontId::proportional(13.0),
-            theme::MUTED,
-        );
-        if let Some(s) = synced {
-            painter.text(
-                egui::pos2(left, rect.top() + 126.0),
-                egui::Align2::LEFT_CENTER,
-                s,
-                egui::FontId::proportional(12.0),
-                theme::SUBTLE,
-            );
-        }
-        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-    })
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn platform_page(ui: &mut Ui, app: &mut App, p: Platform) {
@@ -430,6 +495,7 @@ fn row_state<'a>(app: &App, t: &Track, tag: Option<&'a str>) -> RowState<'a> {
         playing: current.is_some_and(|c| *c == t.source || *c == local),
         offline: t.is_link() && matches!(local, Source::Local(_)),
         tag,
+        platform_link: false,
     }
 }
 
@@ -689,8 +755,43 @@ fn collection(ui: &mut Ui, app: &mut App, id: CollectionId) {
     saved_table(ui, app, &tracks, p);
 }
 
+/// Turning it on downloads everything that isn't downloaded yet, straight away.
 pub fn set_keep_offline(app: &mut App, id: CollectionId, on: bool) {
     app.saved.set_keep_offline(id, on);
+    let Some(c) = app.saved.get(id).filter(|_| on) else { return };
+    let planned = saved::offline_jobs(c, &app.history, &app.settings);
+    match queue_downloads(app, planned) {
+        0 => app.toast("Everything here is downloaded or on its way"),
+        n => app.toast(format!("Downloading {} for offline", plural(n, "song"))),
+    }
+}
+
+/// Saves a link track as a single song, or says where it already is.
+pub fn save_track(app: &mut App, track: &Track) {
+    if !track.is_link() {
+        return;
+    }
+    let msg = if app.saved.add_song(track.clone()) {
+        format!("Saved {}", track.title)
+    } else {
+        "Already saved".to_owned()
+    };
+    app.toast(msg);
+}
+
+/// The player bar's bookmark: saves the track, or takes it out of the single songs. A
+/// track that's only saved as part of a collection stays (the collection follows the
+/// platform).
+pub fn toggle_saved(app: &mut App, track: &Track) {
+    let key = track.key();
+    if app.saved.remove_song(&key) {
+        app.toast(format!("Removed {} from Saved", track.title));
+    } else if let Some(c) = app.saved.collection_with(&key) {
+        let msg = format!("Saved in {}", c.name);
+        app.toast(msg);
+    } else {
+        save_track(app, track);
+    }
 }
 
 /// "Copy to playlist…" button: puts the collection's songs (not the removed ones) into one

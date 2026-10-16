@@ -27,6 +27,7 @@ enum Action {
     Play(Track),
     Add(AddTarget, Track),
     Reveal(std::path::PathBuf),
+    Save(String),
 }
 
 pub fn show(ui: &mut Ui, app: &mut App) {
@@ -109,6 +110,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Action::Play(track) => app.play_tracks(vec![track], 0, None),
             Action::Add(target, track) => add_to(app, target, vec![track]),
             Action::Reveal(path) => tools::reveal(&path),
+            Action::Save(url) => super::saved::start_save(app, &url),
         }
     }
 }
@@ -174,6 +176,11 @@ fn entry_row(
             if path.is_file() && theme::icon_button(ui, icons::ARROW_SQUARE_OUT, "Open in its app").clicked() {
                 actions.push(Action::Open(path.clone()));
             }
+        }
+        if let Some(url) = entry.url()
+            && theme::icon_button(ui, icons::BOOKMARK_SIMPLE, "Save").clicked()
+        {
+            actions.push(Action::Save(url.to_owned()));
         }
         if let Some(track) = as_track(entry, output.as_ref()) {
             if let Some(target) = add_menu(ui, playlists) {

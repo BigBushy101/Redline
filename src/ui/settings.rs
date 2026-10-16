@@ -110,6 +110,15 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     .color(theme::SUBTLE),
             );
         });
+        ui.horizontal(|ui| {
+            theme::toggle(ui, &mut app.settings.refresh_saved_on_start, "Refresh saved collections on startup");
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Ones not refreshed in the last 12 hours, one at a time in the background")
+                    .small()
+                    .color(theme::SUBTLE),
+            );
+        });
     });
     ui.add_space(16.0);
 

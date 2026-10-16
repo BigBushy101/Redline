@@ -52,6 +52,8 @@ pub struct Settings {
     /// Desktop notification when jobs finish while Redline isn't focused.
     pub notify: bool,
     pub player: PlayerSettings,
+    /// Refresh saved collections not synced in the last 12 hours when Redline starts.
+    pub refresh_saved_on_start: bool,
 }
 
 impl Default for Settings {
@@ -74,6 +76,7 @@ impl Default for Settings {
             convert_presets: presets::default_convert_presets(),
             notify: true,
             player: PlayerSettings::default(),
+            refresh_saved_on_start: true,
         }
     }
 }

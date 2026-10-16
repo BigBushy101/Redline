@@ -254,6 +254,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let ready = app.tools.ready_for_download() && !url.is_empty() && trim.is_ok();
     schedule_row(ui, &mut page.schedule);
     ui.add_space(12.0);
+    let mut save = None;
     ui.horizontal(|ui| {
         if theme::pill_button(ui, &format!("{}  Download", icons::DOWNLOAD_SIMPLE), ready).clicked() {
             let trim = trim.ok().flatten();
@@ -263,6 +264,14 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             page.toast = Some((title, now));
             page.url.clear();
             page.reset_link();
+        }
+        let can_save = page.link.info.is_some() && !url.is_empty();
+        let what = if is_playlist { "Save the playlist; it stays in step with the original" } else { "Save to Saved" };
+        if theme::ghost_button(ui, &format!("{}  Save", icons::BOOKMARK_SIMPLE), can_save)
+            .on_hover_text(what)
+            .clicked()
+        {
+            save = page.link.info.clone();
         }
 
         if let Some((title, at)) = &page.toast {
@@ -285,6 +294,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             }
         }
     });
+    if let Some(info) = save {
+        super::saved::save_info(app, &info, &url);
+    }
 }
 
 /// Trim and clean-up applied while downloading.

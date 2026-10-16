@@ -38,7 +38,10 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
     let track = st.track.clone().unwrap_or_default();
     theme::cover(&mut l, 56.0, track.thumbnail.as_deref(), icons::MUSIC_NOTES);
     l.add_space(8.0);
-    l.vertical(|ui| {
+    // The queue's track, for the bookmark: links only.
+    let link = app.now.current().filter(|t| t.is_link()).cloned();
+    let text_w = (l.available_width() - if link.is_some() { 44.0 } else { 0.0 }).max(40.0);
+    l.allocate_ui_with_layout(vec2(text_w, left.height()), Layout::top_down(Align::Min), |ui| {
         ui.add_space(12.0);
         ui.add(egui::Label::new(theme::strong(&track.title)).truncate())
             .on_hover_text(&track.title);
@@ -53,6 +56,14 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
             resp.on_hover_text(e);
         }
     });
+    if let Some(t) = link {
+        l.add_space(4.0);
+        let saved = app.saved.contains(&t.key());
+        let tip = if saved { "Saved" } else { "Save" };
+        if theme::toggle_icon(&mut l, icons::BOOKMARK_SIMPLE, saved, tip).clicked() {
+            super::saved::toggle_saved(app, &t);
+        }
+    }
 
     // Centre: transport + seek bar
     let mut c = ui.new_child(

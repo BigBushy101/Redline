@@ -37,25 +37,34 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     });
     ui.add_space(20.0);
 
+    let height_id = ui.id().with("tools-card-height");
+    let last_h = ui.data(|d| d.get_temp::<f32>(height_id)).unwrap_or(150.0);
+
+    // Scrolls once every platform under Saved makes the list taller than the window.
     let active = app.jobs.active_count();
-    for (page, icon, label, badge) in [
-        (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
-        (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
-        (Page::Saved(None), icons::BOOKMARKS_SIMPLE, "Saved", None),
-        (Page::Playlists, icons::PLAYLIST, "Playlists", None),
-        (Page::Queue, icons::QUEUE, "Queue", Some(active)),
-        (Page::History, icons::CLOCK_COUNTER_CLOCKWISE, "History", None),
-        (Page::Settings, icons::GEAR_SIX, "Settings", None),
-    ] {
-        if theme::nav_item(ui, icon, label, app.page == page, badge).clicked() {
-            app.page = page;
-            app.saved_page.open = None;
-        }
-        ui.add_space(2.0);
-        if page == Page::Saved(None) {
-            saved_platforms(ui, app);
-        }
-    }
+    egui::ScrollArea::vertical()
+        .max_height((ui.available_height() - last_h - 8.0).max(120.0))
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (page, icon, label, badge) in [
+                (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
+                (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
+                (Page::Saved(None), icons::BOOKMARKS_SIMPLE, "Saved", None),
+                (Page::Playlists, icons::PLAYLIST, "Playlists", None),
+                (Page::Queue, icons::QUEUE, "Queue", Some(active)),
+                (Page::History, icons::CLOCK_COUNTER_CLOCKWISE, "History", None),
+                (Page::Settings, icons::GEAR_SIX, "Settings", None),
+            ] {
+                if theme::nav_item(ui, icon, label, app.page == page, badge).clicked() {
+                    app.page = page;
+                    app.saved_page.open = None;
+                }
+                ui.add_space(2.0);
+                if page == Page::Saved(None) {
+                    saved_platforms(ui, app);
+                }
+            }
+        });
 
     // Pin the tools card to the bottom using last frame's measured height.
     let tools = &app.tools;
@@ -65,8 +74,6 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         ("Deno", tools.deno.is_some()),
     ];
     let all_ok = rows.iter().all(|(_, ok)| *ok);
-    let height_id = ui.id().with("tools-card-height");
-    let last_h = ui.data(|d| d.get_temp::<f32>(height_id)).unwrap_or(150.0);
     ui.add_space((ui.available_height() - last_h).max(8.0));
 
     let frame_resp = egui::Frame::new()

@@ -605,11 +605,11 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, badge: Opt
 /// Indented sidebar entry under a [`nav_item`], with a count on the right. The glyph and
 /// the selection bar take the current accent.
 pub fn nav_sub_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, count: usize) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     let painter = ui.painter();
     if selected {
         painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x24));
-        let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 8.0), vec2(3.0, 18.0));
+        let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 7.0), vec2(3.0, 18.0));
         painter.rect_filled(bar, CornerRadius::same(2), accent().base);
     } else if resp.hovered() {
         painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x1C));
