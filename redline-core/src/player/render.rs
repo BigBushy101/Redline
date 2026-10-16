@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use super::dsp::{EqSettings, Equalizer, Resampler, soft_clip};
+
 /// An `f32` that can be shared without a lock.
 #[derive(Default)]
 pub struct AtomicF32(AtomicU32);
@@ -39,6 +41,29 @@ pub struct Shared {
     pub drained_id: AtomicU64,
     /// The stream ran dry before its end: waiting on the decoder or the network.
     pub underrun: AtomicBool,
+    /// Playback speed; pitch follows.
+    pub speed: AtomicF32,
+    pub eq_enabled: AtomicBool,
+    pub eq_preamp: AtomicF32,
+    pub eq_bands: [AtomicF32; 10],
+}
+
+impl Shared {
+    pub fn set_eq(&self, eq: &EqSettings) {
+        self.eq_enabled.store(eq.enabled, Ordering::Relaxed);
+        self.eq_preamp.set(eq.preamp_db);
+        for (band, db) in self.eq_bands.iter().zip(eq.bands_db) {
+            band.set(db);
+        }
+    }
+
+    fn eq(&self) -> EqSettings {
+        EqSettings {
+            enabled: self.eq_enabled.load(Ordering::Relaxed),
+            preamp_db: self.eq_preamp.get(),
+            bands_db: std::array::from_fn(|i| self.eq_bands[i].get()),
+        }
+    }
 }
 
 impl Default for Shared {
@@ -51,6 +76,10 @@ impl Default for Shared {
             ready_id: AtomicU64::new(0),
             drained_id: AtomicU64::new(0),
             underrun: AtomicBool::new(false),
+            speed: AtomicF32::new(1.0),
+            eq_enabled: AtomicBool::new(true),
+            eq_preamp: AtomicF32::new(0.0),
+            eq_bands: Default::default(),
         }
     }
 }
@@ -90,6 +119,8 @@ pub struct Renderer {
     volume_gain: f32,
     /// Per-sample step for the ramps.
     ramp_step: f32,
+    resampler: Resampler,
+    eq: Equalizer,
 }
 
 impl Renderer {
@@ -107,6 +138,8 @@ impl Renderer {
                 play_gain: 0.0,
                 volume_gain,
                 ramp_step: 1.0 / (RAMP_SECS * rate.max(1) as f32),
+                resampler: Resampler::new(rate),
+                eq: Equalizer::new(rate),
             },
         )
     }
@@ -118,6 +151,7 @@ impl Renderer {
                     self.shared.stream_id.store(s.id, Ordering::Relaxed);
                     self.frames = 0;
                     self.shared.frames.store(0, Ordering::Relaxed);
+                    self.resampler.reset();
                     self.stream = Some(s);
                 }
                 RenderMsg::Clear => self.stream = None,
@@ -131,6 +165,8 @@ impl Renderer {
         let channels = channels.max(1);
         let playing = self.shared.playing.load(Ordering::Relaxed);
         let target_volume = volume_curve(self.shared.volume.get());
+        let speed = self.shared.speed.get();
+        let eq = self.shared.eq();
         let mut underrun = false;
 
         if let Some(s) = &self.stream
@@ -145,26 +181,29 @@ impl Renderer {
             self.volume_gain = approach(self.volume_gain, target_volume, self.ramp_step);
 
             // Only pull while audible, so pausing holds the position.
-            let (l, r) = match &mut self.stream {
+            let source = match &mut self.stream {
                 Some(s) if self.play_gain > 0.0 => {
-                    if s.pcm.slots() >= 2 {
-                        let l = s.pcm.pop().unwrap_or(0.0);
-                        let r = s.pcm.pop().unwrap_or(0.0);
-                        self.frames += 1;
-                        (l, r)
-                    } else {
+                    let (pcm, frames) = (&mut s.pcm, &mut self.frames);
+                    let pulled = self.resampler.next(speed, || {
+                        (pcm.slots() >= 2).then(|| {
+                            *frames += 1;
+                            [pcm.pop().unwrap_or(0.0), pcm.pop().unwrap_or(0.0)]
+                        })
+                    });
+                    pulled.unwrap_or_else(|| {
                         if s.eof.load(Ordering::Acquire) {
                             self.shared.drained_id.fetch_max(s.id, Ordering::Relaxed);
                         } else {
                             underrun = true;
                         }
-                        (0.0, 0.0)
-                    }
+                        [0.0; 2]
+                    })
                 }
-                _ => (0.0, 0.0),
+                _ => [0.0; 2],
             };
+            let [l, r] = self.eq.process(&eq, source);
             let g = self.play_gain * self.volume_gain;
-            write_frame(frame, l * g, r * g);
+            write_frame(frame, soft_clip(l * g), soft_clip(r * g));
         }
         // A stream that ended while paused still counts as played out once it's empty.
         if let Some(s) = &self.stream

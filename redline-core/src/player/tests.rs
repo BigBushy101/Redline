@@ -269,3 +269,22 @@ fn recognises_expired_urls() {
     assert!(!is_expired("Invalid data found when processing input"));
     assert!(!is_expired("C:/music/403.mp3: No such file"));
 }
+
+#[test]
+fn double_speed_plays_in_half_the_time_in_source_time() {
+    let capture = Capture::new(RATE, 8.0);
+    let p = player(Tone::new(2.0), &capture);
+    p.send(Command::SetSpeed(2.0));
+    p.send(Command::Load(track(), 0.0));
+    let s = wait_for(&p, "end", |s| s.status == Status::Ended);
+    // Position and duration stay in the track's own time.
+    assert_eq!(s.position, 2.0);
+    assert_eq!(s.duration, Some(2.0));
+    let secs = loud_frames(&capture) as f64 / RATE as f64;
+    assert!((0.9..=1.05).contains(&secs), "{secs:.3} s of output for 2 s at 2×");
+
+    // Out-of-range speeds are clamped.
+    p.send(Command::SetSpeed(10.0));
+    p.send(Command::Load(track(), 0.0));
+    wait_for(&p, "end again", |s| s.status == Status::Ended && s.load_id == 2);
+}

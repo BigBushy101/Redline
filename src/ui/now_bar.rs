@@ -9,6 +9,7 @@ use crate::app::{App, Page};
 use crate::format::fmt_duration;
 use crate::jobs::JobStatus;
 use crate::theme;
+use super::player_panels::{Panel, speed_label};
 
 pub fn show(ui: &mut Ui, app: &mut App) {
     if app.player_state.is_active() {
@@ -98,27 +99,51 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
         time(ui, st.duration, Align::Min);
     });
 
-    // Right: jobs indicator + volume
+    // Right: jobs indicator, speed, EQ, volume
     let mut r = ui.new_child(UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center)));
-    let mut volume = st.volume;
-    if theme::line_slider(&mut r, 96.0, &mut volume).changed() {
-        app.player.send(Command::SetVolume(volume));
-        app.player_state.volume = volume;
-    }
-    let speaker = match volume {
+    let volume = &mut app.settings.player.volume;
+    theme::line_slider(&mut r, 96.0, volume);
+    let speaker = match *volume {
         v if v <= 0.0 => icons::SPEAKER_X,
         v if v < 0.5 => icons::SPEAKER_LOW,
         _ => icons::SPEAKER_HIGH,
     };
-    if theme::icon_button(&mut r, speaker, if volume > 0.0 { "Mute" } else { "Unmute" }).clicked() {
-        let v = if volume > 0.0 { 0.0 } else { app.unmuted_volume };
-        if volume > 0.0 {
-            app.unmuted_volume = volume;
+    if theme::icon_button(&mut r, speaker, if *volume > 0.0 { "Mute" } else { "Unmute" }).clicked() {
+        if *volume > 0.0 {
+            app.unmuted_volume = *volume;
+            *volume = 0.0;
+        } else {
+            *volume = app.unmuted_volume.max(0.05);
         }
-        app.player.send(Command::SetVolume(v));
+    }
+    r.add_space(4.0);
+    let eq = &app.settings.player.eq;
+    let eq_on = eq.enabled && (eq.preamp_db != 0.0 || eq.bands_db.iter().any(|b| *b != 0.0));
+    if panel_button(&mut r, icons::SLIDERS_HORIZONTAL, eq_on, app.player_panel == Some(Panel::Eq), "Equalizer").clicked() {
+        app.toggle_panel(Panel::Eq);
+    }
+    let speed = app.settings.player.speed;
+    let resp = panel_button(
+        &mut r,
+        &speed_label(speed),
+        speed != 1.0,
+        app.player_panel == Some(Panel::Speed),
+        "Speed · double-click for 1×",
+    );
+    if resp.double_clicked() {
+        app.settings.player.speed = 1.0;
+    } else if resp.clicked() {
+        app.toggle_panel(Panel::Speed);
     }
     r.add_space(12.0);
     jobs_indicator(&mut r, app);
+}
+
+/// Small text or icon button in the bar, red while its setting is in effect.
+fn panel_button(ui: &mut Ui, text: &str, active: bool, open: bool, tip: &str) -> egui::Response {
+    let color = if active { theme::ACCENT_HOVER } else if open { theme::TEXT } else { theme::MUTED };
+    ui.add(egui::Button::new(RichText::new(text).size(15.0).color(color)).frame(open))
+        .on_hover_text(tip)
 }
 
 /// Compact "jobs running" chip so downloads stay visible while music plays.

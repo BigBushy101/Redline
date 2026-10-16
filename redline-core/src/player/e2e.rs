@@ -89,3 +89,35 @@ fn streams_a_youtube_link_and_seeks() {
     println!("{} loud frames after the seek", after - before);
     assert!(after - before > RATE as usize / 2, "sound after the seek");
 }
+
+#[test]
+#[ignore]
+fn double_speed_and_eq_on_a_real_track() {
+    let tools = ensure_tools();
+    let dir = scratch("player-speed");
+    let tone = dir.join("tone.wav");
+    let status = command(tools.ffmpeg.as_ref().unwrap())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=3"])
+        .arg(&tone)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let capture = Capture::new(RATE, 4.0);
+    let p = Player::spawn(tools, Arc::new(Ffmpeg), capture.opener(), crate::no_wake());
+    p.send(Command::SetSpeed(2.0));
+    let mut eq = dsp::EqSettings::default();
+    eq.bands_db[9] = 12.0; // 16 kHz: shouldn't touch a 2 kHz tone much
+    p.send(Command::SetEq(eq));
+    p.send(Command::Load(Source::Local(tone), 0.0));
+    wait_for(&p, "end", 10, |s| s.status == Status::Ended);
+    let samples = capture.samples.lock().unwrap().clone();
+    let left: Vec<f32> = samples.chunks(2).map(|f| f[0]).filter(|v| v.abs() > 1e-3).collect();
+    let secs = left.len() as f64 / RATE as f64;
+    // Count rising zero crossings for the pitch.
+    let crossings = left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+    let freq = crossings as f64 / secs;
+    println!("{secs:.3} s at about {freq:.0} Hz");
+    assert!((1.4..=1.55).contains(&secs), "{secs:.3} s");
+    assert!((freq - 2000.0).abs() < 60.0, "{freq:.0} Hz");
+}

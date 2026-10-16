@@ -9,6 +9,7 @@
 //! URLs expire after a few hours.
 
 pub mod decode;
+pub mod dsp;
 pub mod output;
 pub mod render;
 
@@ -124,11 +125,36 @@ pub enum Command {
     Toggle,
     Seek(f64),
     SetVolume(f32),
+    /// 0.5 to 2; pitch follows.
+    SetSpeed(f32),
+    SetEq(dsp::EqSettings),
     Stop,
     /// The tools moved, e.g. after the installer ran.
     SetTools(ToolPaths),
     /// Cookies, proxy and so on for resolving links.
     SetNetwork(NetworkOptions),
+}
+
+/// The player's saved controls.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct PlayerSettings {
+    pub volume: f32,
+    pub speed: f32,
+    /// Go back to 1× whenever a new track loads.
+    pub reset_speed: bool,
+    pub eq: dsp::EqSettings,
+}
+
+impl Default for PlayerSettings {
+    fn default() -> Self {
+        Self {
+            volume: 0.8,
+            speed: 1.0,
+            reset_speed: false,
+            eq: dsp::EqSettings::default(),
+        }
+    }
 }
 
 /// What the player needs from the app's settings to find and decode audio.
@@ -434,6 +460,8 @@ impl Engine {
                 self.shared.volume.set(v);
                 self.set_state(|s| s.volume = v);
             }
+            Command::SetSpeed(speed) => self.shared.speed.set(speed.clamp(dsp::MIN_SPEED, dsp::MAX_SPEED)),
+            Command::SetEq(eq) => self.shared.set_eq(&eq),
             Command::Stop => {
                 self.stop_stream();
                 self.current = None;

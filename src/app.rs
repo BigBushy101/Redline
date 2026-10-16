@@ -4,7 +4,7 @@ use eframe::egui::{
 use egui_phosphor::regular as icons;
 
 use redline_core::Wake;
-use redline_core::player::{Command, Player, PlayerState, Source};
+use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source};
 use redline_core::queue_watch::{self, AfterQueueStep, QueueWatch};
 
 use crate::history::History;
@@ -53,6 +53,12 @@ pub struct App {
     pub unmuted_volume: f32,
     /// Network settings the player was last given.
     player_network: Option<crate::tools::ytdlp::NetworkOptions>,
+    /// Volume, speed and EQ the player was last given.
+    player_sent: Option<PlayerSettings>,
+    /// The load the speed was last reset for.
+    seen_load: u64,
+    /// Speed or EQ popup above the player bar.
+    pub player_panel: Option<ui::player_panels::Panel>,
     /// egui time when a shutdown was scheduled, for the countdown.
     pub shutdown_at: Option<f64>,
 }
@@ -86,6 +92,9 @@ impl App {
             player_state: PlayerState::default(),
             unmuted_volume: 1.0,
             player_network: None,
+            player_sent: None,
+            seen_load: 0,
+            player_panel: None,
             wake,
             shutdown_at: None,
         }
@@ -110,6 +119,34 @@ impl App {
         if self.settings.notify {
             system::notify(a.title, a.body);
         }
+    }
+
+    /// Opens a popup above the player bar, or closes it if it's open.
+    pub fn toggle_panel(&mut self, panel: ui::player_panels::Panel) {
+        self.player_panel = if self.player_panel == Some(panel) { None } else { Some(panel) };
+    }
+
+    /// Hands changed volume, speed and EQ settings to the player.
+    fn sync_player(&mut self) {
+        let st = &self.player_state;
+        if st.load_id != self.seen_load {
+            self.seen_load = st.load_id;
+            if self.settings.player.reset_speed {
+                self.settings.player.speed = 1.0;
+            }
+        }
+        let want = &self.settings.player;
+        let sent = self.player_sent.as_ref();
+        if sent.is_none_or(|s| s.volume != want.volume) {
+            self.player.send(Command::SetVolume(want.volume));
+        }
+        if sent.is_none_or(|s| s.speed != want.speed) {
+            self.player.send(Command::SetSpeed(want.speed));
+        }
+        if sent.is_none_or(|s| s.eq != want.eq) {
+            self.player.send(Command::SetEq(want.eq));
+        }
+        self.player_sent = Some(want.clone());
     }
 
     /// Plays a file in the player bar.
@@ -182,6 +219,7 @@ impl eframe::App for App {
             self.encoders_task = Self::detect_encoders(&self.wake, &self.tools);
         }
         self.player_state = self.player.state();
+        self.sync_player();
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());
             self.player.send(Command::SetNetwork(self.settings.network.clone()));
@@ -220,6 +258,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.handle_dropped_files(&ctx);
         self.shutdown_window(&ctx);
+        ui::player_panels::show(&ctx, self);
 
         Panel::bottom("now-bar")
             .exact_size(84.0)

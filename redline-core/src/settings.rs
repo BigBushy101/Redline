@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::player::PlayerSettings;
 use crate::presets::{self, ConvertPreset, DownloadPreset};
 use crate::tools::convert::ConvertOptions;
 use crate::tools::ytdlp::{DownloadOptions, NetworkOptions};
@@ -50,6 +51,7 @@ pub struct Settings {
     pub convert_presets: Vec<ConvertPreset>,
     /// Desktop notification when jobs finish while Redline isn't focused.
     pub notify: bool,
+    pub player: PlayerSettings,
 }
 
 impl Default for Settings {
@@ -71,6 +73,7 @@ impl Default for Settings {
             download_presets: presets::default_download_presets(),
             convert_presets: presets::default_convert_presets(),
             notify: true,
+            player: PlayerSettings::default(),
         }
     }
 }
