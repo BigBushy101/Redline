@@ -5,8 +5,10 @@ use egui_phosphor::regular as icons;
 
 use crate::app::{App, Page};
 use crate::jobs::JobSpec;
+use crate::presets::DownloadPreset;
 use crate::task::Task;
 use crate::theme;
+use super::presets::{PresetAction, PresetBar};
 use crate::tools::ytdlp::{
     self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DownloadOptions, DownloadRequest,
     FormatInfo, MediaInfo, Mode, SubsMode, Tags, Trim, VIDEO_QUALITIES,
@@ -27,6 +29,7 @@ pub struct DownloadPage {
     /// Audio tags as edited, and as they came from the site.
     tags: Tags,
     tags_prefill: Tags,
+    presets: PresetBar,
 }
 
 impl DownloadPage {
@@ -531,6 +534,7 @@ fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) {
 fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
     let page = &mut app.download;
     let o = &mut app.settings.download;
+    let presets = &mut app.settings.download_presets;
     let duration = page.info.as_ref().and_then(|i| i.duration);
     let has_formats = page
         .info
@@ -539,6 +543,21 @@ fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
     theme::card(ui, |ui| {
         ui.label(theme::heading("Format"));
         ui.add_space(6.0);
+        // "Whole playlist" follows the link, so it doesn't make a preset differ.
+        let same = |p: &DownloadPreset| DownloadOptions { playlist: o.playlist, ..p.options.clone() } == *o;
+        let names: Vec<String> = presets.iter().map(|p| p.name.clone()).collect();
+        match page.presets.show(ui, &names, presets.iter().position(same)) {
+            Some(PresetAction::Apply(i)) => {
+                *o = DownloadOptions { playlist: o.playlist, ..presets[i].options.clone() };
+            }
+            Some(PresetAction::Delete(i)) => {
+                presets.remove(i);
+            }
+            Some(PresetAction::Rename(i, name)) => presets[i].name = name,
+            Some(PresetAction::SaveNew(name)) => presets.push(DownloadPreset { name, options: o.clone() }),
+            None => {}
+        }
+        ui.add_space(8.0);
         theme::chips(ui, &mut o.mode, &[(Mode::Video, "Video"), (Mode::Audio, "Audio only")]);
         ui.add_space(10.0);
 

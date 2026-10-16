@@ -2,6 +2,7 @@ pub mod convert;
 pub mod download;
 pub mod history;
 pub mod now_bar;
+pub mod presets;
 pub mod queue;
 pub mod settings;
 pub mod sidebar;

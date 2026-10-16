@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::presets::{self, ConvertPreset, DownloadPreset};
 use crate::tools::convert::ConvertOptions;
 use crate::tools::ytdlp::{DownloadOptions, NetworkOptions};
 
@@ -45,6 +46,8 @@ pub struct Settings {
     pub rename_template: String,
     /// Send originals to the Recycle Bin after a successful conversion.
     pub recycle_originals: bool,
+    pub download_presets: Vec<DownloadPreset>,
+    pub convert_presets: Vec<ConvertPreset>,
 }
 
 impl Default for Settings {
@@ -63,6 +66,8 @@ impl Default for Settings {
             convert: ConvertOptions::default(),
             rename_template: "{name}".into(),
             recycle_originals: false,
+            download_presets: presets::default_download_presets(),
+            convert_presets: presets::default_convert_presets(),
         }
     }
 }

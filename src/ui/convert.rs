@@ -6,7 +6,9 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icons;
 
+use super::presets::{PresetAction, PresetBar};
 use crate::app::App;
+use crate::presets::ConvertPreset;
 use crate::jobs::JobSpec;
 use crate::theme;
 use crate::tools::convert::{
@@ -60,6 +62,7 @@ impl ConvertItem {
 pub struct ConvertPage {
     pub items: Vec<ConvertItem>,
     skipped: Vec<String>,
+    presets: PresetBar,
 }
 
 impl ConvertPage {
@@ -357,8 +360,42 @@ fn options_card(ui: &mut Ui, app: &mut App) {
     let sec = Sections::of(app.convert.items.iter().filter(|i| i.options.is_none()));
     let customized = app.convert.items.iter().filter(|i| i.options.is_some()).count();
     let o = &mut app.settings.convert;
+    let presets = &mut app.settings.convert_presets;
     theme::card(ui, |ui| {
         ui.label(theme::heading("Options"));
+        ui.add_space(4.0);
+        let names: Vec<String> = presets.iter().map(|p| p.name.clone()).collect();
+        match app.convert.presets.show(ui, &names, presets.iter().position(|p| p.matches(o))) {
+            Some(PresetAction::Apply(i)) => {
+                let p = &presets[i];
+                *o = p.options_keeping_hardware(o);
+                for item in app.convert.items.iter_mut().filter(|i| i.options.is_none()) {
+                    if let Some(t) = p.target_for(item.category) {
+                        item.target = t.to_owned();
+                    }
+                }
+            }
+            Some(PresetAction::Delete(i)) => {
+                presets.remove(i);
+            }
+            Some(PresetAction::Rename(i, name)) => presets[i].name = name,
+            Some(PresetAction::SaveNew(name)) => {
+                // Remember the formats in use, when every file of a kind agrees.
+                let target = |c: Category| {
+                    let mut ts = app.convert.items.iter().filter(|i| i.category == c).map(|i| i.target.clone());
+                    let first = ts.next()?;
+                    ts.all(|t| t == first).then_some(first)
+                };
+                presets.push(ConvertPreset {
+                    name,
+                    options: o.clone(),
+                    image_target: target(Category::Image),
+                    video_target: target(Category::Video),
+                    audio_target: target(Category::Audio),
+                });
+            }
+            None => {}
+        }
         if customized > 0 {
             ui.label(theme::muted(format!(
                 "{customized} file{} use their own settings",

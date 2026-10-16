@@ -3,6 +3,7 @@
 mod app;
 mod history;
 mod jobs;
+mod presets;
 mod settings;
 mod task;
 mod theme;

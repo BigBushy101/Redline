@@ -521,3 +521,44 @@ fn converts_to_size_with_filters_subs_and_joins() {
         .unwrap_or_else(|e| panic!("recycle: {e:#}"));
     assert!(!copy.exists(), "source should be in the Recycle Bin");
 }
+
+#[test]
+#[ignore]
+fn discord_preset_fits_under_10_mb() {
+    let tools = ensure_tools();
+    let dir = scratch("discord");
+    // Noisy 1080p source, so the size target actually has to squeeze.
+    let src = dir.join("noisy.mp4");
+    let status = command(tools.ffmpeg.as_ref().unwrap())
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i"])
+        .arg("testsrc2=duration=120:size=1920x1080:rate=30,noise=alls=40:allf=t")
+        .args(["-f", "lavfi", "-i", "sine=frequency=300:duration=120"])
+        .args(["-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30", "-c:a", "aac"])
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let preset = crate::presets::default_convert_presets()
+        .into_iter()
+        .find(|p| p.name.starts_with("Discord"))
+        .unwrap();
+    let req = ConvertRequest {
+        input: src.clone(),
+        category: Category::Video,
+        target: preset.video_target.clone().unwrap(),
+        options: ConvertOptions {
+            preset: "veryfast".into(),
+            ..preset.options.clone()
+        },
+        out_dir: Some(dir.join("out")),
+        ..Default::default()
+    };
+    let out = convert::run(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+        .unwrap_or_else(|e| panic!("{e:#}"))
+        .unwrap();
+    let src_len = std::fs::metadata(&src).unwrap().len();
+    let len = std::fs::metadata(&out).unwrap().len();
+    println!("source {src_len} bytes -> {len} bytes");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(len < 10_000_000 && len > 7_000_000, "{len}");
+}
