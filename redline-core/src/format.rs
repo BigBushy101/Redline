@@ -71,6 +71,17 @@ pub fn fmt_timestamp(secs: i64) -> String {
         .unwrap_or_default()
 }
 
+/// "just now", "5 min ago", "3 h ago", "2 days ago" for a past Unix time, as of `now`.
+pub fn ago(secs: i64, now: i64) -> String {
+    match (now - secs).max(0) {
+        s if s < 60 => "just now".into(),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86_400 => format!("{} h ago", s / 3600),
+        s if s < 2 * 86_400 => "yesterday".into(),
+        s => format!("{} days ago", s / 86_400),
+    }
+}
+
 /// "Starts at 14:05", "Starts tomorrow at 02:00" or a full date further out.
 pub fn starts_at(ts: i64) -> String {
     use chrono::{Local, TimeZone};
@@ -110,5 +121,8 @@ mod tests {
         assert_eq!(fmt_bytes(512), "512 B");
         assert_eq!(fmt_bytes(1536), "1.5 KB");
         assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(ago(100, 130), "just now");
+        assert_eq!(ago(0, 3 * 3600 + 5), "3 h ago");
+        assert_eq!(ago(0, 5 * 86_400), "5 days ago");
     }
 }

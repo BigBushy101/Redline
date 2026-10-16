@@ -12,7 +12,7 @@ use crate::theme;
 use redline_core::library::{PlaylistId, Track};
 use redline_core::player::Source;
 
-use super::library::{AddTarget, add_menu, add_to, playlist_names};
+use super::playlists::{AddTarget, add_menu, add_to, playlist_names};
 use crate::tools;
 
 #[derive(Default)]

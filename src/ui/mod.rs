@@ -1,13 +1,15 @@
 pub mod convert;
 pub mod download;
 pub mod history;
-pub mod library;
 pub mod now_bar;
 pub mod player_panels;
+pub mod playlists;
 pub mod presets;
 pub mod queue;
+pub mod saved;
 pub mod settings;
 pub mod sidebar;
+pub mod tracks;
 
 use eframe::egui::{self, Frame, Margin, RichText, Ui, vec2};
 use egui_phosphor::regular as icons;

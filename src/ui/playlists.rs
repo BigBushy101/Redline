@@ -1,17 +1,15 @@
-//! Library page: playlists of links and local files, and the Now playing queue.
+//! Playlists page: your own mixes of links and local files, and the Now playing queue.
 
 use std::path::PathBuf;
 
-use eframe::egui::{
-    self, Align, CornerRadius, Frame, Key, Layout, Margin, RichText, Sense, Spinner, TextEdit, Ui,
-    UiBuilder, vec2,
-};
+use eframe::egui::{self, Align, Frame, Key, Layout, Margin, RichText, Sense, Spinner, TextEdit, Ui};
 use egui_phosphor::regular as icons;
 use redline_core::library::{self, PlaylistId, Repeat, Track};
 use redline_core::player::Source;
 
 use crate::app::App;
 use crate::format::fmt_duration;
+use super::tracks::{RowAction, RowState, list_header, search_box, track_row};
 use crate::task::Task;
 use crate::theme;
 use crate::tools::ytdlp;
@@ -30,7 +28,7 @@ struct Adding {
 }
 
 #[derive(Default)]
-pub struct LibraryPage {
+pub struct PlaylistsPage {
     pub view: Option<View>,
     link: String,
     adding: Vec<Adding>,
@@ -42,7 +40,7 @@ pub struct LibraryPage {
     search: String,
 }
 
-impl LibraryPage {
+impl PlaylistsPage {
     /// Takes in finished lookups and scans. Called every frame, whichever page is showing.
     pub fn poll(&mut self, lib: &mut library::Library) {
         let mut i = 0;
@@ -80,14 +78,14 @@ impl LibraryPage {
 
 /// Adds dropped files to the playlist on screen. Returns false if no playlist is showing.
 pub fn drop_files(app: &mut App, paths: Vec<PathBuf>) -> bool {
-    let Some(View::Playlist(id)) = app.library_page.view else {
+    let Some(View::Playlist(id)) = app.playlists_page.view else {
         return false;
     };
     if app.library.get(id).is_none() {
         return false;
     }
     let (wake, tools) = (app.wake.clone(), app.tools.clone());
-    app.library_page.scan(&wake, &tools, id, paths);
+    app.playlists_page.scan(&wake, &tools, id, paths);
     true
 }
 
@@ -96,7 +94,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let total: usize = lib.playlists.iter().map(|p| p.tracks.len()).sum();
     theme::page_header(
         ui,
-        "Library",
+        "Playlists",
         "Your playlists",
         &format!(
             "{} playlist{} · {total} track{}",
@@ -107,7 +105,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     );
 
     // Fall back to something that exists.
-    let page = &mut app.library_page;
+    let page = &mut app.playlists_page;
     let valid = |v: &View| match v {
         View::NowPlaying => true,
         View::Playlist(id) => app.library.get(*id).is_some(),
@@ -131,18 +129,18 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             options.push((Some(View::Playlist(p.id)), p.name.clone()));
         }
         let opts: Vec<(Option<View>, &str)> = options.iter().map(|(v, l)| (*v, l.as_str())).collect();
-        theme::chips(ui, &mut app.library_page.view, &opts);
+        theme::chips(ui, &mut app.playlists_page.view, &opts);
         ui.add_space(4.0);
         if theme::ghost_button(ui, &format!("{}  New playlist", icons::PLUS), true).clicked() {
             let id = app.library.create("");
             let name = app.library.get(id).map(|p| p.name.clone()).unwrap_or_default();
-            app.library_page.view = Some(View::Playlist(id));
-            app.library_page.renaming = Some((id, name));
+            app.playlists_page.view = Some(View::Playlist(id));
+            app.playlists_page.renaming = Some((id, name));
         }
     });
     ui.add_space(16.0);
 
-    match app.library_page.view {
+    match app.playlists_page.view {
         None => empty_state(ui),
         Some(View::NowPlaying) => now_playing(ui, app),
         Some(View::Playlist(id)) => playlist(ui, app, id),
@@ -161,14 +159,6 @@ fn empty_state(ui: &mut Ui) {
     });
 }
 
-enum RowAction {
-    Play(usize),
-    Up(usize),
-    Down(usize),
-    Remove(usize),
-    Offline(usize),
-}
-
 fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
     let Some(pl) = app.library.get(id) else { return };
     let (name, count, secs) = (pl.name.clone(), pl.tracks.len(), pl.duration());
@@ -181,7 +171,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             ui.vertical(|ui| {
                 ui.add_space(4.0);
                 ui.label(theme::eyebrow("Playlist"));
-                let page = &mut app.library_page;
+                let page = &mut app.playlists_page;
                 match &mut page.renaming {
                     Some((rid, text)) if *rid == id => {
                         let r = ui.add(
@@ -224,18 +214,18 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
                         app.play_playlist(id, 0, true);
                     }
                     if theme::icon_button(ui, icons::PENCIL_SIMPLE, "Rename").clicked() {
-                        app.library_page.renaming = Some((id, name.clone()));
+                        app.playlists_page.renaming = Some((id, name.clone()));
                     }
-                    let confirming = app.library_page.confirm_delete == Some(id);
+                    let confirming = app.playlists_page.confirm_delete == Some(id);
                     let tip = if confirming { "Click again to delete" } else { "Delete playlist" };
                     let icon = if confirming { icons::WARNING } else { icons::TRASH };
                     if theme::icon_button(ui, icon, tip).clicked() {
                         if confirming {
                             app.library.delete(id);
-                            app.library_page.confirm_delete = None;
-                            app.library_page.view = None;
+                            app.playlists_page.confirm_delete = None;
+                            app.playlists_page.view = None;
                         } else {
-                            app.library_page.confirm_delete = Some(id);
+                            app.playlists_page.confirm_delete = Some(id);
                         }
                     }
                     if confirming {
@@ -252,7 +242,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
     add_bar(ui, app, id);
     ui.add_space(12.0);
 
-    let page = &app.library_page;
+    let page = &app.playlists_page;
     let query = page.search.trim().to_lowercase();
     let current = app.now_playing_source();
     let tracks = app.library.get(id).map(|p| p.tracks.clone()).unwrap_or_default();
@@ -261,7 +251,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
         return;
     }
     if tracks.len() > 8 {
-        search_box(ui, &mut app.library_page.search);
+        search_box(ui, &mut app.playlists_page.search, "Find in playlist");
         ui.add_space(8.0);
     }
     list_header(ui);
@@ -274,7 +264,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
         let local = library::playable_source(t, &app.history);
         let playing = current.as_ref().is_some_and(|c| *c == t.source || *c == local);
         let offline = t.is_link() && matches!(local, Source::Local(_));
-        let row = track_row(ui, idx, t, playing, offline, |ui| {
+        let row = track_row(ui, idx, t, RowState { playing, offline, ..Default::default() }, |ui| {
             let mut a = None;
             if theme::icon_button(ui, icons::X, "Remove from playlist").clicked() {
                 a = Some(RowAction::Remove(idx));
@@ -309,25 +299,6 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
     }
 }
 
-fn search_box(ui: &mut Ui, text: &mut String) {
-    Frame::new()
-        .fill(theme::INPUT)
-        .corner_radius(255)
-        .inner_margin(Margin::symmetric(16, 8))
-        .show(ui, |ui| {
-            ui.set_width(300.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icons::MAGNIFYING_GLASS).size(16.0).color(theme::MUTED));
-                ui.add(
-                    TextEdit::singleline(text)
-                        .frame(Frame::NONE)
-                        .hint_text("Find in playlist")
-                        .desired_width(f32::INFINITY),
-                );
-            });
-        });
-}
-
 /// Add files, add a folder, or paste a link (a playlist link adds every entry).
 fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
     let mut add_link = false;
@@ -336,13 +307,13 @@ fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             && let Some(files) = rfd::FileDialog::new().pick_files()
         {
             let (wake, tools) = (app.wake.clone(), app.tools.clone());
-            app.library_page.scan(&wake, &tools, id, files);
+            app.playlists_page.scan(&wake, &tools, id, files);
         }
         if theme::ghost_button(ui, &format!("{}  Add folder", icons::FOLDER_PLUS), true).clicked()
             && let Some(dir) = rfd::FileDialog::new().pick_folder()
         {
             let (wake, tools) = (app.wake.clone(), app.tools.clone());
-            app.library_page.scan(&wake, &tools, id, vec![dir]);
+            app.playlists_page.scan(&wake, &tools, id, vec![dir]);
         }
         ui.add_space(8.0);
         Frame::new()
@@ -354,7 +325,7 @@ fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(icons::LINK).size(16.0).color(theme::MUTED));
                     let r = ui.add(
-                        TextEdit::singleline(&mut app.library_page.link)
+                        TextEdit::singleline(&mut app.playlists_page.link)
                             .frame(Frame::NONE)
                             .hint_text("Paste a song or playlist link")
                             .desired_width(f32::INFINITY),
@@ -364,16 +335,16 @@ fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
                     }
                 });
             });
-        let can = app.tools.ytdlp.is_some() && !app.library_page.link.trim().is_empty();
+        let can = app.tools.ytdlp.is_some() && !app.playlists_page.link.trim().is_empty();
         if theme::ghost_button(ui, "Add link", can).clicked() {
             add_link = true;
         }
     });
-    let url = app.library_page.link.trim().to_owned();
+    let url = app.playlists_page.link.trim().to_owned();
     if add_link && !url.is_empty() && app.tools.ytdlp.is_some() {
         let (tools, net) = (app.tools.clone(), app.settings.network.clone());
         let fetch = url.clone();
-        let page = &mut app.library_page;
+        let page = &mut app.playlists_page;
         page.error = None;
         page.link.clear();
         page.adding.push(Adding {
@@ -386,7 +357,7 @@ fn add_bar(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             }),
         });
     }
-    let page = &mut app.library_page;
+    let page = &mut app.playlists_page;
     for a in page.adding.iter().filter(|a| a.playlist == id) {
         ui.horizontal(|ui| {
             ui.add(Spinner::new().size(14.0).color(theme::accent().base));
@@ -435,7 +406,12 @@ fn now_playing(ui: &mut Ui, app: &mut App) {
     let mut remove = None;
     for (n, (idx, t)) in rows.iter().enumerate() {
         let offline = t.is_link() && matches!(library::playable_source(t, &app.history), Source::Local(_));
-        let r = track_row(ui, n, t, current == Some(*idx), offline, |ui| {
+        let state = RowState {
+            playing: current == Some(*idx),
+            offline,
+            ..Default::default()
+        };
+        let r = track_row(ui, n, t, state, |ui| {
             (current != Some(*idx) && theme::icon_button(ui, icons::X, "Remove from queue").clicked())
                 .then_some(RowAction::Remove(*idx))
         });
@@ -451,104 +427,6 @@ fn now_playing(ui: &mut Ui, app: &mut App) {
     if let Some(i) = remove {
         app.now.remove(i);
     }
-}
-
-fn list_header(ui: &mut Ui) {
-    let w = ui.available_width();
-    ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        ui.add_sized([28.0, 16.0], egui::Label::new(theme::eyebrow("#")));
-        ui.add_space(52.0);
-        ui.label(theme::eyebrow("Title"));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(170.0);
-            ui.add_sized([60.0, 16.0], egui::Label::new(theme::eyebrow("Time")));
-            ui.add_sized([96.0, 16.0], egui::Label::new(theme::eyebrow("Source")));
-        });
-    });
-    let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
-    ui.painter().rect_filled(sep, 0.0, egui::Color32::from_gray(0x2A));
-    ui.add_space(4.0);
-}
-
-/// A playlist-style row. Double-click asks to play it; `actions` draws the buttons on the
-/// right, right to left.
-fn track_row(
-    ui: &mut Ui,
-    idx: usize,
-    t: &Track,
-    playing: bool,
-    offline: bool,
-    actions: impl FnOnce(&mut Ui) -> Option<RowAction>,
-) -> Option<RowAction> {
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 56.0), Sense::click());
-    let hovered = ui.rect_contains_pointer(rect);
-    if hovered || playing {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(4),
-            if playing { theme::ELEVATED } else { theme::CARD_HOVER },
-        );
-    }
-    let mut action = resp.double_clicked().then_some(RowAction::Play(idx));
-    let mut row = ui.new_child(
-        UiBuilder::new()
-            .max_rect(rect.shrink2(vec2(12.0, 0.0)))
-            .layout(Layout::left_to_right(Align::Center)),
-    );
-    let number = if playing {
-        RichText::new(icons::SPEAKER_HIGH).color(theme::accent().base)
-    } else {
-        theme::muted((idx + 1).to_string())
-    };
-    row.add_sized([28.0, 20.0], egui::Label::new(number));
-    row.add_space(4.0);
-    let icon = if t.is_link() { icons::LINK } else { icons::MUSIC_NOTES };
-    theme::cover(&mut row, 40.0, t.thumbnail.as_deref(), icon);
-    row.add_space(8.0);
-    row.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.allocate_ui_with_layout(vec2(160.0, 40.0), Layout::right_to_left(Align::Center), |ui| {
-            // Fixed width, so the columns line up whatever buttons a row has.
-            ui.set_min_width(160.0);
-            if let Some(a) = actions(ui) {
-                action = Some(a);
-            }
-        });
-        ui.add_space(10.0);
-        let time = t.duration.map_or("".to_owned(), fmt_duration);
-        ui.add_sized([60.0, 20.0], egui::Label::new(theme::muted(time)));
-        let (src_icon, src) = match (&t.source, offline) {
-            (Source::Link(_), true) => (icons::CHECK_CIRCLE, "Downloaded"),
-            (Source::Link(_), false) => (icons::GLOBE, "Stream"),
-            (Source::Local(_), _) => (icons::HARD_DRIVE, "On this PC"),
-        };
-        let hover = match &t.source {
-            Source::Link(u) => u.clone(),
-            Source::Local(p) => p.display().to_string(),
-        };
-        ui.add_sized(
-            [96.0, 20.0],
-            egui::Label::new(RichText::new(format!("{src_icon} {src}")).small().color(theme::MUTED)),
-        )
-        .on_hover_text(hover);
-        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            ui.vertical(|ui| {
-                ui.add_space(2.0);
-                let title = if playing {
-                    RichText::new(&t.title).family(theme::bold()).color(theme::accent().hover)
-                } else {
-                    theme::strong(&t.title)
-                };
-                ui.add(egui::Label::new(title).truncate());
-                ui.add(
-                    egui::Label::new(RichText::new(t.artist.clone().unwrap_or_default()).small().color(theme::MUTED))
-                        .truncate(),
-                );
-            });
-        });
-    });
-    action
 }
 
 /// Where the "Add to playlist" menu puts tracks.

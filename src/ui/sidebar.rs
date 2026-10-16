@@ -4,6 +4,21 @@ use egui_phosphor::regular as icons;
 use crate::app::{App, Page};
 use crate::theme;
 
+/// One sub-item under Saved per platform that has something saved, in its color.
+fn saved_platforms(ui: &mut Ui, app: &mut App) {
+    for (p, count) in app.saved.platforms() {
+        let selected = app.page == Page::Saved(Some(p));
+        let clicked = theme::with_accent(ui, theme::accent_for(p), |ui| {
+            theme::nav_sub_item(ui, theme::platform_glyph(p), p.label(), selected, count).clicked()
+        });
+        if clicked {
+            app.page = Page::Saved(Some(p));
+            app.saved_page.open = None;
+        }
+        ui.add_space(2.0);
+    }
+}
+
 pub fn show(ui: &mut Ui, app: &mut App) {
     // Logo
     ui.horizontal(|ui| {
@@ -26,15 +41,20 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     for (page, icon, label, badge) in [
         (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
         (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
-        (Page::Library, icons::PLAYLIST, "Library", None),
+        (Page::Saved(None), icons::BOOKMARKS_SIMPLE, "Saved", None),
+        (Page::Playlists, icons::PLAYLIST, "Playlists", None),
         (Page::Queue, icons::QUEUE, "Queue", Some(active)),
         (Page::History, icons::CLOCK_COUNTER_CLOCKWISE, "History", None),
         (Page::Settings, icons::GEAR_SIX, "Settings", None),
     ] {
         if theme::nav_item(ui, icon, label, app.page == page, badge).clicked() {
             app.page = page;
+            app.saved_page.open = None;
         }
         ui.add_space(2.0);
+        if page == Page::Saved(None) {
+            saved_platforms(ui, app);
+        }
     }
 
     // Pin the tools card to the bottom using last frame's measured height.

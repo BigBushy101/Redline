@@ -5,6 +5,8 @@ use egui_phosphor::regular as icons;
 
 use redline_core::Wake;
 use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
+use redline_core::platform::Platform;
+use redline_core::saved::Saved;
 use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source};
 use redline_core::queue_watch::{self, AfterQueueStep, QueueWatch};
 
@@ -23,7 +25,9 @@ use crate::ui;
 pub enum Page {
     Download,
     Convert,
-    Library,
+    /// The overview, or one platform's page.
+    Saved(Option<Platform>),
+    Playlists,
     Queue,
     History,
     Settings,
@@ -45,7 +49,11 @@ pub struct App {
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
     pub library: Library,
-    pub library_page: ui::library::LibraryPage,
+    pub playlists_page: ui::playlists::PlaylistsPage,
+    pub saved: Saved,
+    pub saved_page: ui::saved::SavedPage,
+    /// A short message at the bottom of the window, and when it was shown.
+    toast: Option<(String, std::time::Instant)>,
     /// What the player bar works through: a playlist or ad-hoc picks.
     pub now: NowPlaying,
     /// Auto-advances of the player the queue has caught up with.
@@ -104,7 +112,10 @@ impl App {
             history_page: Default::default(),
             settings_page: Default::default(),
             library: Library::load(),
-            library_page: Default::default(),
+            playlists_page: Default::default(),
+            saved: Saved::load(),
+            saved_page: Default::default(),
+            toast: None,
             now: NowPlaying::default(),
             seen_advances: 0,
             sent_next: None,
@@ -216,9 +227,23 @@ impl App {
         self.load_current();
     }
 
+    /// Shows `message` briefly at the bottom of the window.
+    pub fn toast(&mut self, message: impl Into<String>) {
+        self.toast = Some((message.into(), std::time::Instant::now()));
+    }
+
     pub fn play_playlist(&mut self, id: PlaylistId, start: usize, shuffle: bool) {
         let Some(p) = self.library.get(id) else { return };
         let tracks = p.tracks.clone();
+        self.play_from(tracks, start, shuffle, Some(id));
+    }
+
+    /// Plays tracks that aren't a playlist (Saved collections and songs), shuffled if asked.
+    pub fn play_list(&mut self, tracks: Vec<Track>, start: usize, shuffle: bool) {
+        self.play_from(tracks, start, shuffle, None);
+    }
+
+    fn play_from(&mut self, tracks: Vec<Track>, start: usize, shuffle: bool, playlist: Option<PlaylistId>) {
         let start = if shuffle && !tracks.is_empty() {
             // Shuffle from a random first track, not always the top one.
             self.now.shuffle = true;
@@ -229,7 +254,7 @@ impl App {
         } else {
             start
         };
-        self.play_tracks(tracks, start, Some(id));
+        self.play_tracks(tracks, start, playlist);
     }
 
     /// Adds tracks to the end of Now playing, starting it if nothing's queued.
@@ -343,6 +368,63 @@ impl App {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
 
+    /// The main panel: background, header gradient and the current page.
+    fn central(&mut self, ui: &mut egui::Ui) {
+        let rect = ui.available_rect_before_wrap();
+        ui.painter().rect_filled(rect, CornerRadius::same(8), theme::BG);
+        theme::paint_header_gradient(ui.painter(), rect);
+        let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
+        child.set_clip_rect(rect);
+        ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(&mut child, |ui| {
+                Frame::new()
+                    .inner_margin(Margin {
+                        left: 32,
+                        right: 32,
+                        top: 20,
+                        bottom: 40,
+                    })
+                    .show(ui, |ui| match self.page {
+                        Page::Download => ui::download::show(ui, self),
+                        Page::Convert => ui::convert::show(ui, self),
+                        Page::Saved(p) => ui::saved::show(ui, self, p),
+                        Page::Playlists => ui::playlists::show(ui, self),
+                        Page::Queue => ui::queue::show(ui, self),
+                        Page::History => ui::history::show(ui, self),
+                        Page::Settings => ui::settings::show(ui, self),
+                    });
+            });
+    }
+
+    /// The latest toast, for a few seconds, just above the player bar.
+    fn toast_area(&mut self, ctx: &egui::Context) {
+        let Some((message, at)) = &self.toast else { return };
+        let age = at.elapsed().as_secs_f32();
+        if age > 4.0 {
+            self.toast = None;
+            return;
+        }
+        egui::Area::new(egui::Id::new("toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -104.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(theme::ELEVATED)
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(16, 10))
+                    .shadow(ui.visuals().popup_shadow)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(icons::CHECK_CIRCLE).color(theme::accent().base));
+                            ui.label(theme::strong(message.as_str()));
+                        });
+                    });
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<_> = ctx.input(|i| {
             i.raw
@@ -354,7 +436,7 @@ impl App {
         if dropped.is_empty() {
             return;
         }
-        if self.page == Page::Library && ui::library::drop_files(self, dropped.clone()) {
+        if self.page == Page::Playlists && ui::playlists::drop_files(self, dropped.clone()) {
             return;
         }
         self.convert.add_paths(dropped);
@@ -375,7 +457,8 @@ impl eframe::App for App {
         self.follow_queue();
         #[cfg(windows)]
         self.media_keys_frame(ctx);
-        self.library_page.poll(&mut self.library);
+        self.playlists_page.poll(&mut self.library);
+        ui::saved::poll(self);
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());
             self.player.send(Command::SetNetwork(self.settings.network.clone()));
@@ -405,6 +488,7 @@ impl eframe::App for App {
         self.jobs.save_if_dirty();
         self.history.save_if_dirty();
         self.library.save_if_dirty();
+        self.saved.save_if_dirty();
         if self.settings != self.saved_settings {
             self.settings.save();
             self.saved_settings = self.settings.clone();
@@ -458,33 +542,14 @@ impl eframe::App for App {
                 bottom: 0,
             }))
             .show(ui, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                ui.painter()
-                    .rect_filled(rect, CornerRadius::same(8), theme::BG);
-                theme::paint_header_gradient(ui.painter(), rect);
-
-                let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
-                child.set_clip_rect(rect);
-                ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(&mut child, |ui| {
-                        Frame::new()
-                            .inner_margin(Margin {
-                                left: 32,
-                                right: 32,
-                                top: 20,
-                                bottom: 40,
-                            })
-                            .show(ui, |ui| match self.page {
-                                Page::Download => ui::download::show(ui, self),
-                                Page::Convert => ui::convert::show(ui, self),
-                                Page::Library => ui::library::show(ui, self),
-                                Page::Queue => ui::queue::show(ui, self),
-                                Page::History => ui::history::show(ui, self),
-                                Page::Settings => ui::settings::show(ui, self),
-                            });
-                    });
+                // A platform's Saved pages take its color; everything else stays red.
+                let accent = match self.page {
+                    Page::Saved(Some(p)) => theme::accent_for(p),
+                    _ => theme::Accent::REDLINE,
+                };
+                theme::with_accent(ui, accent, |ui| self.central(ui));
             });
+        self.toast_area(&ctx);
 
         // Full-window hint while files are dragged over.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
@@ -510,7 +575,7 @@ impl eframe::App for App {
             painter.text(
                 screen.center() + egui::vec2(0.0, 36.0),
                 egui::Align2::CENTER_CENTER,
-                if self.page == Page::Library && matches!(self.library_page.view, Some(ui::library::View::Playlist(_))) {
+                if self.page == Page::Playlists && matches!(self.playlists_page.view, Some(ui::playlists::View::Playlist(_))) {
                     "Drop to add to the playlist"
                 } else {
                     "Drop to convert"

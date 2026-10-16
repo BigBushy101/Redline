@@ -16,7 +16,7 @@ use crate::tools::ytdlp::{
 use redline_core::download_plan::{LinkChoices, Schedule};
 use redline_core::library::{self, PlaylistId};
 
-use super::library::{AddTarget, add_to, playlist_names};
+use super::playlists::{AddTarget, add_to, playlist_names};
 
 #[derive(Default)]
 pub struct DownloadPage {
@@ -483,7 +483,7 @@ fn media_card(
                         {
                             action = Some(CardAction::Play);
                         }
-                        if let Some(target) = super::library::add_menu(ui, playlists) {
+                        if let Some(target) = super::playlists::add_menu(ui, playlists) {
                             action = Some(CardAction::Add(target));
                         }
                     });

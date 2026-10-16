@@ -5,6 +5,7 @@ use eframe::egui::{
     Margin, Mesh, Pos2, Rect, Response, RichText, Sense, Shadow, Stroke, StrokeKind, TextStyle, Ui,
     Vec2, pos2, vec2,
 };
+use redline_core::platform::Platform;
 use std::sync::Arc;
 
 pub const BLACK: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
@@ -35,6 +36,67 @@ impl Accent {
         pressed: Color32::from_rgb(0xC4, 0x1A, 0x2D),
         header_tint: Color32::from_rgb(0x6E, 0x12, 0x1D),
     };
+
+    /// The set for a brand color: hover lighter, pressed darker, and the header tint about
+    /// 45% of it mixed into the background.
+    pub fn from_base(base: Color32) -> Accent {
+        Accent {
+            base,
+            hover: lerp_color(base, Color32::WHITE, 0.15),
+            pressed: lerp_color(base, BLACK, 0.18),
+            header_tint: lerp_color(BG, base, 0.45),
+        }
+    }
+
+    /// Fill, hover and pressed colors for pills with white labels, darkened where the base
+    /// is too light for white text to read (at least 3:1).
+    pub fn pill_colors(self) -> (Color32, Color32, Color32) {
+        let readable = |mut c: Color32| {
+            while contrast(TEXT, c) < 3.0 {
+                c = lerp_color(c, BLACK, 0.04);
+            }
+            c
+        };
+        (readable(self.base), readable(self.hover), readable(self.pressed))
+    }
+}
+
+/// WCAG contrast ratio between two opaque colors.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let lum = |c: Color32| {
+        let ch = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
+    };
+    let (la, lb) = (lum(a), lum(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// A platform's tint for its Saved pages.
+pub fn accent_for(p: Platform) -> Accent {
+    let rgb = |r, g, b| Accent::from_base(Color32::from_rgb(r, g, b));
+    match p {
+        Platform::YouTube => rgb(0xFF, 0x00, 0x33),
+        Platform::SoundCloud => rgb(0xFF, 0x55, 0x00),
+        Platform::Bandcamp => rgb(0x1D, 0xA0, 0xC3),
+        // Lightened from the brand purple so it reads on the dark background.
+        Platform::Mixcloud => rgb(0x7B, 0x5C, 0xFF),
+        Platform::Vimeo => rgb(0x1A, 0xB7, 0xEA),
+        Platform::Other => rgb(0x9A, 0x9A, 0x9A),
+    }
+}
+
+/// Phosphor's logo glyph for the platform where it has one; a globe otherwise. No
+/// official artwork is bundled.
+pub fn platform_glyph(p: Platform) -> &'static str {
+    use egui_phosphor::regular as icons;
+    match p {
+        Platform::YouTube => icons::YOUTUBE_LOGO,
+        Platform::SoundCloud => icons::SOUNDCLOUD_LOGO,
+        _ => icons::GLOBE,
+    }
 }
 
 thread_local! {
@@ -49,7 +111,6 @@ pub fn accent() -> Accent {
 
 /// Paints `add` with `accent`, including the built-in egui widgets that read it from the
 /// visuals (selection, links, slider fill and checkboxes).
-#[allow(dead_code)] // the Saved platform pages use it
 pub fn with_accent<R>(ui: &mut Ui, accent: Accent, add: impl FnOnce(&mut Ui) -> R) -> R {
     let before = CURRENT.with(|c| c.replace(accent));
     let r = ui
@@ -274,14 +335,15 @@ fn pill(ui: &mut Ui, label: &str, enabled: bool, height: f32, size: f32) -> Resp
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(desired, sense);
     if ui.is_rect_visible(rect) {
+        let (base, hover, pressed) = accent().pill_colors();
         let fill = if !enabled {
-            accent().base.gamma_multiply(0.35)
+            base.gamma_multiply(0.35)
         } else if resp.is_pointer_button_down_on() {
-            accent().pressed
+            pressed
         } else if resp.hovered() {
-            accent().hover
+            hover
         } else {
-            accent().base
+            base
         };
         let draw = if enabled && resp.hovered() && !resp.is_pointer_button_down_on() {
             rect.expand(1.5)
@@ -413,7 +475,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     .inner
 }
 
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
@@ -537,6 +599,43 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, badge: Opt
         painter.rect_filled(pill, CornerRadius::same(255), accent().base);
         painter.galley(pill.center() - galley.size() / 2.0, galley, TEXT);
     }
+    pointer(resp, true)
+}
+
+/// Indented sidebar entry under a [`nav_item`], with a count on the right. The glyph and
+/// the selection bar take the current accent.
+pub fn nav_sub_item(ui: &mut Ui, icon: &str, label: &str, selected: bool, count: usize) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x24));
+        let bar = Rect::from_min_size(rect.left_top() + vec2(0.0, 8.0), vec2(3.0, 18.0));
+        painter.rect_filled(bar, CornerRadius::same(2), accent().base);
+    } else if resp.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(0x1C));
+    }
+    let color = if selected || resp.hovered() { TEXT } else { MUTED };
+    painter.text(
+        pos2(rect.left() + 40.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon,
+        FontId::proportional(17.0),
+        accent().base,
+    );
+    painter.text(
+        pos2(rect.left() + 64.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::new(14.0, bold()),
+        color,
+    );
+    painter.text(
+        pos2(rect.right() - 12.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        count.to_string(),
+        FontId::proportional(12.0),
+        SUBTLE,
+    );
     pointer(resp, true)
 }
 
@@ -686,4 +785,29 @@ pub fn toggle_icon(ui: &mut Ui, icon: &str, on: bool, tooltip: &str) -> Response
         }
     }
     pointer(resp, true).on_hover_text(tooltip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn white_reads_on_every_pill() {
+        for p in Platform::ALL.into_iter().map(accent_for).chain([Accent::REDLINE]) {
+            let (fill, hover, pressed) = p.pill_colors();
+            for c in [fill, hover, pressed] {
+                assert!(contrast(TEXT, c) >= 3.0, "{p:?}: {c:?} is {}", contrast(TEXT, c));
+            }
+        }
+        assert_eq!(Accent::REDLINE.pill_colors().0, Accent::REDLINE.base, "red is unchanged");
+        let vimeo = accent_for(Platform::Vimeo);
+        assert_ne!(vimeo.pill_colors().0, vimeo.base, "too light for white text: darkened");
+    }
+
+    #[test]
+    fn tint_is_between_background_and_base() {
+        let a = accent_for(Platform::SoundCloud);
+        assert!(a.header_tint.r() > BG.r() && a.header_tint.r() < a.base.r());
+        assert!(contrast(a.hover, BG) > contrast(a.pressed, BG));
+    }
 }
