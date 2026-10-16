@@ -13,6 +13,7 @@ pub mod platform;
 pub mod player;
 pub mod presets;
 pub mod queue_watch;
+pub mod saved;
 pub mod settings;
 pub mod system;
 pub mod tools;
