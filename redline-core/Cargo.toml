@@ -1,0 +1,21 @@
+[package]
+name = "redline-core"
+version = "0.1.0"
+edition = "2024"
+description = "Redline's working parts (yt-dlp, ffmpeg, the job queue), with no UI dependency"
+
+[dependencies]
+ureq = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "tga", "qoi", "avif"] }
+open = "5"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+trash = "5"
+notify-rust = "4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power"] }

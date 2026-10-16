@@ -60,7 +60,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let (text, progress) = match &job.status {
         JobStatus::Queued => (
             job.not_before
-                .map_or("Waiting to start…".to_owned(), super::queue::starts_at),
+                .map_or("Waiting to start…".to_owned(), crate::format::starts_at),
             Some(0.0),
         ),
         JobStatus::Running { progress, detail } => (detail.clone(), *progress),

@@ -5,7 +5,8 @@ use eframe::egui::{
 use egui_phosphor::regular as icons;
 
 use crate::app::{App, Page};
-use crate::history::{HistoryEntry, fmt_timestamp};
+use crate::format::fmt_timestamp;
+use crate::history::HistoryEntry;
 use crate::jobs::JobSpec;
 use crate::theme;
 use crate::tools;

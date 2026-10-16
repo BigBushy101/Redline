@@ -3,12 +3,15 @@ use eframe::egui::{
 };
 use egui_phosphor::regular as icons;
 
+use redline_core::Wake;
+use redline_core::queue_watch::{self, AfterQueueStep, QueueWatch};
+
 use crate::history::History;
 use crate::jobs::{JobManager, JobStatus};
-use crate::system::{self, AfterQueue};
+use crate::system;
 use crate::settings::Settings;
 use crate::theme;
-use crate::task::Task;
+use crate::task::{self, Task};
 use crate::tools::ToolPaths;
 use crate::tools::hwaccel::{self, Encoders};
 use crate::tools::install::Installer;
@@ -38,14 +41,10 @@ pub struct App {
     pub convert: ui::convert::ConvertPage,
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
-    /// One-shot action once the queue empties.
-    pub after_queue: AfterQueue,
-    /// A job finished successfully since the queue was last empty.
-    finished_ok: bool,
-    /// Last output folder, for "Open folder when done".
-    last_output: Option<std::path::PathBuf>,
-    /// The PC is being kept awake for active jobs.
-    awake: bool,
+    /// Notifications, keep-awake and the after-queue action.
+    pub watch: QueueWatch,
+    /// Repaints the window; handed to background work.
+    pub wake: Wake,
     /// egui time when a shutdown was scheduled, for the countdown.
     pub shutdown_at: Option<f64>,
 }
@@ -56,7 +55,10 @@ impl App {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings = Settings::load();
         let tools = ToolPaths::locate(&settings);
-        let encoders_task = Self::detect_encoders(&cc.egui_ctx, &tools);
+        let wake = task::waker(&cc.egui_ctx);
+        let encoders_task = Self::detect_encoders(&wake, &tools);
+        let mut jobs = JobManager::load();
+        jobs.set_wake(wake.clone());
         Self {
             page: Page::Download,
             saved_settings: settings.clone(),
@@ -64,81 +66,47 @@ impl App {
             tools,
             encoders: Encoders::default(),
             encoders_task,
-            jobs: JobManager::load(),
+            jobs,
             history: History::load(),
             installer: Installer::default(),
             download: Default::default(),
             convert: Default::default(),
             history_page: Default::default(),
             settings_page: Default::default(),
-            after_queue: AfterQueue::Nothing,
-            finished_ok: false,
-            last_output: None,
-            awake: false,
+            watch: QueueWatch::default(),
+            wake,
             shutdown_at: None,
         }
     }
 
-    fn detect_encoders(ctx: &egui::Context, tools: &ToolPaths) -> Option<Task<Encoders>> {
+    fn detect_encoders(wake: &Wake, tools: &ToolPaths) -> Option<Task<Encoders>> {
         let ffmpeg = tools.ffmpeg.clone()?;
-        Some(Task::spawn(ctx, move || hwaccel::detect(&ffmpeg)))
+        Some(Task::spawn(wake, move || hwaccel::detect(&ffmpeg)))
     }
 
     /// Notifies about jobs that just ended, if Redline isn't the focused window.
     fn announce(&self, ctx: &egui::Context, ended: &[(String, JobStatus)]) {
-        let ended: Vec<_> = ended
-            .iter()
-            .filter(|(_, s)| !matches!(s, JobStatus::Cancelled))
-            .collect();
-        if ended.is_empty() || ctx.input(|i| i.viewport().focused).unwrap_or(true) {
+        let Some(a) = queue_watch::announcement(ended, self.jobs.active_count()) else {
+            return;
+        };
+        if ctx.input(|i| i.viewport().focused).unwrap_or(true) {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
             egui::UserAttentionType::Informational,
         ));
-        if !self.settings.notify {
-            return;
+        if self.settings.notify {
+            system::notify(a.title, a.body);
         }
-        let failed = ended.iter().filter(|(_, s)| matches!(s, JobStatus::Failed(_))).count();
-        let (title, body) = match ended.as_slice() {
-            [(name, status)] => (
-                match status {
-                    JobStatus::Failed(_) => "Failed".to_owned(),
-                    JobStatus::Skipped(why) => why.clone(),
-                    _ => "Finished".to_owned(),
-                },
-                name.clone(),
-            ),
-            many => (
-                format!("{} jobs ended", many.len()),
-                if failed > 0 {
-                    format!("{} finished, {failed} failed", many.len() - failed)
-                } else {
-                    "All finished".to_owned()
-                },
-            ),
-        };
-        let remaining = self.jobs.active_count();
-        let body = if remaining > 0 {
-            format!("{body} · {remaining} still in the queue")
-        } else {
-            body
-        };
-        system::notify(title, body);
     }
 
-    fn run_after_queue(&mut self, ctx: &egui::Context) {
-        match std::mem::take(&mut self.after_queue) {
-            AfterQueue::Nothing => {}
-            AfterQueue::OpenFolder => {
-                let dir = self
-                    .last_output
-                    .clone()
-                    .unwrap_or_else(|| self.settings.download_dir.clone());
+    fn run_after_queue(&mut self, ctx: &egui::Context, step: AfterQueueStep) {
+        match step {
+            AfterQueueStep::OpenFolder(dir) => {
                 let _ = open::that_detached(dir);
             }
-            AfterQueue::Sleep => system::sleep_now(),
-            AfterQueue::ShutDown => {
+            AfterQueueStep::Sleep => system::sleep_now(),
+            AfterQueueStep::ShutDown => {
                 if system::schedule_shutdown().is_ok() {
                     self.shutdown_at = Some(ctx.input(|i| i.time));
                 }
@@ -193,35 +161,29 @@ impl eframe::App for App {
         if self.installer.take_finished() {
             self.tools = ToolPaths::locate(&self.settings);
             self.settings_page.invalidate_version();
-            self.encoders_task = Self::detect_encoders(ctx, &self.tools);
+            self.encoders_task = Self::detect_encoders(&self.wake, &self.tools);
         }
         if let Some(e) = self.encoders_task.as_ref().and_then(Task::take) {
             self.encoders = e;
             self.encoders_task = None;
         }
-        self.jobs
-            .pump(ctx, &self.tools, self.settings.concurrency);
+        // Wake up when the next scheduled job is due.
+        if let Some(after) = self.jobs.pump(&self.tools, self.settings.concurrency) {
+            ctx.request_repaint_after(after);
+        }
         let mut ended = Vec::new();
         for id in self.jobs.take_finished() {
             if let Some(job) = self.jobs.get(id) {
                 self.history.record(job);
-                if matches!(job.status, JobStatus::Done(_) | JobStatus::Skipped(_)) {
-                    self.finished_ok = true;
-                    self.last_output = job.output_dir();
-                }
+                self.watch.job_ended(job);
                 ended.push((job.title.clone(), job.status.clone()));
             }
         }
         self.announce(ctx, &ended);
 
         let active = self.jobs.active_count();
-        if active == 0 && self.finished_ok {
-            self.finished_ok = false;
-            self.run_after_queue(ctx);
-        }
-        if (active > 0) != self.awake {
-            self.awake = active > 0;
-            system::keep_awake(self.awake);
+        if let Some(step) = self.watch.update(active, &self.settings.download_dir) {
+            self.run_after_queue(ctx, step);
         }
         self.jobs.save_if_dirty();
         self.history.save_if_dirty();

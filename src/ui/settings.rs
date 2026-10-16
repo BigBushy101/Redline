@@ -38,7 +38,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     if !page.version_checked && app.tools.ytdlp.is_some() {
         page.version_checked = true;
         let tools = app.tools.clone();
-        page.version = Some(Task::spawn(ui.ctx(), move || install::ytdlp_version(&tools)));
+        page.version = Some(Task::spawn(&app.wake, move || install::ytdlp_version(&tools)));
     }
 
     theme::page_header(ui, "Settings", "Settings", "Tools, folders and performance.");
@@ -197,14 +197,14 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
             if app.tools.missing_any()
                 && theme::small_pill_button(ui, "Download missing tools", !status.running).clicked()
             {
-                app.installer.start(&app.tools, ui.ctx());
+                app.installer.start(&app.tools, app.wake.clone());
             }
             let page = &mut app.settings_page;
             let updating = page.update.is_some();
             if theme::ghost_button(ui, "Update yt-dlp", app.tools.ytdlp.is_some() && !updating).clicked() {
                 let tools: ToolPaths = app.tools.clone();
                 page.update_msg = None;
-                page.update = Some(Task::spawn(ui.ctx(), move || install::update_ytdlp(&tools)));
+                page.update = Some(Task::spawn(&app.wake, move || install::update_ytdlp(&tools)));
             }
             if theme::ghost_button(ui, "Open tools folder", true).clicked() {
                 let dir = tools::bin_dir();

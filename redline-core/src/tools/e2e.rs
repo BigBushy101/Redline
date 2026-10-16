@@ -5,8 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui;
-
 use super::convert::{Category, ConvertOptions, ConvertRequest, GifDirection, GifOptions};
 use super::install::Installer;
 use super::ytdlp::{DownloadOptions, DownloadRequest, Mode, Trim};
@@ -18,7 +16,7 @@ fn ensure_tools() -> ToolPaths {
     let tools = ToolPaths::locate(&Settings::default());
     if tools.missing_any() {
         let installer = Installer::default();
-        installer.start(&tools, &egui::Context::default());
+        installer.start(&tools, crate::no_wake());
         let start = Instant::now();
         while installer.status().running {
             assert!(start.elapsed() < Duration::from_secs(900), "install timed out");

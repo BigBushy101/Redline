@@ -9,52 +9,33 @@ use egui_phosphor::regular as icons;
 use super::presets::{PresetAction, PresetBar};
 use crate::app::App;
 use crate::presets::ConvertPreset;
-use crate::jobs::JobSpec;
 use crate::theme;
 use crate::tools::convert::{
-    AUDIO_BITRATES, Category, ConcatRequest, ConvertOptions, ConvertRequest, GIF_DITHERS,
-    GIF_FPS, GIF_SPEEDS, GIF_WIDTHS, GifDirection, MAX_HEIGHTS, PRESETS, classify, render_stem,
+    AUDIO_BITRATES, Category, ConvertOptions, GIF_DITHERS, GIF_FPS, GIF_SPEEDS, GIF_WIDTHS,
+    GifDirection, MAX_HEIGHTS, PRESETS, render_stem,
 };
+use redline_core::convert_plan;
 use crate::tools::ffmpeg::is_audio_target;
 use crate::tools::filters::{CropAspect, Rotation, SPEEDS, SubSource};
-use crate::tools::hwaccel::{self, Encoders, Hardware, VideoCodec};
+use crate::tools::hwaccel::{Encoders, Hardware, VideoCodec};
 
+/// A file in the list: the core item plus whether its editor is open.
 pub struct ConvertItem {
-    pub path: PathBuf,
-    pub category: Category,
-    pub size: u64,
-    pub target: String,
-    /// Settings for this file only; `None` follows the shared options.
-    pub options: Option<ConvertOptions>,
-    pub burn_subs: Option<SubSource>,
+    pub file: convert_plan::ConvertItem,
     /// Per-file editor open.
     expanded: bool,
 }
 
-impl ConvertItem {
-    fn name(&self) -> String {
-        self.path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
+impl std::ops::Deref for ConvertItem {
+    type Target = convert_plan::ConvertItem;
+    fn deref(&self) -> &Self::Target {
+        &self.file
     }
+}
 
-    fn stem(&self) -> String {
-        self.path
-            .file_stem()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "output".into())
-    }
-
-    fn is_customized(&self) -> bool {
-        self.options.is_some() || self.burn_subs.is_some()
-    }
-
-    /// Video in, video out (not GIF): the only case where subtitles can be burned in.
-    fn makes_video(&self) -> bool {
-        self.category == Category::Video
-            && !is_audio_target(&self.target)
-            && !hwaccel::codecs_for(&self.target).is_empty()
+impl std::ops::DerefMut for ConvertItem {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
     }
 }
 
@@ -73,37 +54,25 @@ impl ConvertPage {
             if self.items.iter().any(|i| i.path == path) {
                 continue;
             }
-            match classify(&path) {
-                Some(category) if path.is_file() => {
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    self.items.push(ConvertItem {
-                        path,
-                        category,
-                        size,
-                        target: category.default_target().to_owned(),
-                        options: None,
-                        burn_subs: None,
-                        expanded: false,
-                    });
-                }
-                _ => self.skipped.push(
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                ),
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match convert_plan::ConvertItem::from_path(path) {
+                Some(file) => self.items.push(ConvertItem { file, expanded: false }),
+                None => self.skipped.push(name),
             }
         }
     }
 
     /// The target all files would be joined into, if joining makes sense for this list.
     fn join_target(&self) -> Option<&str> {
-        let first = self.items.first()?;
-        let same_kind = self.items.len() >= 2
-            && first.category != Category::Image
-            && self.items.iter().all(|i| i.category == first.category);
-        let target = first.target.as_str();
-        (same_kind && (is_audio_target(target) || !hwaccel::codecs_for(target).is_empty()))
-            .then_some(target)
+        convert_plan::join_target(self.items.iter().map(|i| &i.file))
+    }
+
+    /// Takes the files out of the list, for queueing.
+    fn take_files(&mut self) -> Vec<convert_plan::ConvertItem> {
+        self.items.drain(..).map(|i| i.file).collect()
     }
 }
 
@@ -235,67 +204,17 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     });
 }
 
-/// Options as sent with a job: the GPU falls back to CPU if it can't encode this codec.
-fn job_options(o: &ConvertOptions, target: &str, enc: &Encoders) -> ConvertOptions {
-    let mut o = o.clone();
-    o.hardware = enc.resolve(hwaccel::effective_codec(target, o.codec), o.hardware);
-    o
-}
-
 fn queue_conversions(app: &mut App) {
-    let template = app.settings.rename_template.clone();
-    for (idx, item) in app.convert.items.drain(..).enumerate() {
-        let from = item
-            .path
-            .extension()
-            .map(|e| e.to_string_lossy().to_uppercase())
-            .unwrap_or_default();
-        let options = item.options.as_ref().unwrap_or(&app.settings.convert);
-        let stem = render_stem(&template, &item.stem(), idx + 1, &item.target);
-        let burn = item.burn_subs.clone().filter(|_| item.makes_video());
-        let mut subtitle = format!("{from} {} {}", icons::ARROW_RIGHT, item.target.to_uppercase());
-        if burn.is_some() {
-            subtitle.push_str(" · subtitles burned in");
-        }
-        app.jobs.push(
-            item.name(),
-            subtitle,
-            JobSpec::Convert(ConvertRequest {
-                options: job_options(options, &item.target, &app.encoders),
-                category: item.category,
-                out_dir: app.settings.convert_dir.clone(),
-                output_stem: (stem != item.stem()).then_some(stem),
-                burn_subs: burn,
-                recycle_source: app.settings.recycle_originals,
-                target: item.target,
-                input: item.path,
-            }),
-        );
+    let files = app.convert.take_files();
+    for job in convert_plan::requests(files, &app.settings, &app.encoders) {
+        app.jobs.push(job.title, job.subtitle, job.spec);
     }
 }
 
 fn queue_join(app: &mut App, target: &str) {
-    let items = std::mem::take(&mut app.convert.items);
-    let first = &items[0];
-    let options = first.options.as_ref().unwrap_or(&app.settings.convert);
-    let stem = render_stem(
-        &app.settings.rename_template,
-        &format!("{} (joined)", first.stem()),
-        1,
-        target,
-    );
-    app.jobs.push(
-        format!("{} + {} more", first.name(), items.len() - 1),
-        format!("Join {} files {} {}", items.len(), icons::ARROW_RIGHT, target.to_uppercase()),
-        JobSpec::Concat(ConcatRequest {
-            options: job_options(options, target, &app.encoders),
-            target: target.to_owned(),
-            out_dir: app.settings.convert_dir.clone(),
-            output_stem: stem,
-            recycle_sources: app.settings.recycle_originals,
-            inputs: items.into_iter().map(|i| i.path).collect(),
-        }),
-    );
+    let files = app.convert.take_files();
+    let job = convert_plan::join_request(files, target, &app.settings, &app.encoders);
+    app.jobs.push(job.title, job.subtitle, job.spec);
 }
 
 fn drop_zone(ui: &mut Ui, app: &mut App) {

@@ -124,17 +124,6 @@ impl History {
     }
 }
 
-/// "Mar 4, 2026 14:05" in local time.
-pub fn fmt_timestamp(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%b %-d, %Y %H:%M")
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

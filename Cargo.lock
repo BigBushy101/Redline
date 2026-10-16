@@ -3318,15 +3318,24 @@ name = "redline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
- "directories",
  "eframe",
  "egui-phosphor",
  "egui_extras",
+ "open",
+ "redline-core",
+ "rfd",
+]
+
+[[package]]
+name = "redline-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "directories",
  "image",
  "notify-rust",
  "open",
- "rfd",
  "serde",
  "serde_json",
  "trash",

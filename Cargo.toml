@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "redline-core"]
+
 [package]
 name = "redline"
 version = "0.1.0"
@@ -5,25 +8,14 @@ edition = "2024"
 description = "Download media with yt-dlp and convert local files, in a Spotify-style egui app"
 
 [dependencies]
+redline-core = { path = "redline-core" }
 # pinned to 0.36 to match egui-phosphor 0.14
 eframe = "0.36"
 egui_extras = { version = "0.36", features = ["http", "image"] }
 egui-phosphor = "0.14"
 rfd = "0.17"
-ureq = "3"
-zip = { version = "9", default-features = false, features = ["deflate"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-directories = "6"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "tga", "qoi", "avif"] }
 open = "5"
 anyhow = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-trash = "5"
-notify-rust = "4"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power"] }
 
 [profile.release]
 opt-level = 3

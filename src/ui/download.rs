@@ -4,93 +4,37 @@ use eframe::egui::{
 use egui_phosphor::regular as icons;
 
 use crate::app::{App, Page};
-use crate::jobs::JobSpec;
 use crate::presets::DownloadPreset;
 use crate::task::Task;
 use crate::theme;
 use super::presets::{PresetAction, PresetBar};
+use crate::format::{fmt_time, fmt_timestamp, starts_at};
 use crate::tools::ytdlp::{
-    self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DownloadOptions, DownloadRequest,
-    FormatInfo, MediaInfo, Mode, SubsMode, Tags, Trim, VIDEO_QUALITIES,
+    self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DownloadOptions, FormatInfo, MediaInfo,
+    Mode, SubsMode, Tags, Trim, VIDEO_QUALITIES,
 };
+use redline_core::download_plan::{LinkChoices, Schedule};
 
 #[derive(Default)]
 pub struct DownloadPage {
     url: String,
-    info: Option<MediaInfo>,
     fetching: Option<Task<anyhow::Result<MediaInfo>>>,
     error: Option<String>,
     /// "Added to queue" toast and when it was shown.
     toast: Option<(String, f64)>,
     trim: TrimState,
-    /// Exact formats picked from the lookup's format list.
-    pick_video: Option<String>,
-    pick_audio: Option<String>,
-    /// Audio tags as edited, and as they came from the site.
-    tags: Tags,
-    tags_prefill: Tags,
+    /// Lookup result, picked formats and tags for the current link.
+    link: LinkChoices,
     presets: PresetBar,
     schedule: Schedule,
-}
-
-/// "Start later" choice next to the Download button; kept between links.
-struct Schedule {
-    later: bool,
-    hour: u32,
-    minute: u32,
-}
-
-impl Default for Schedule {
-    fn default() -> Self {
-        Self {
-            later: false,
-            hour: 2,
-            minute: 0,
-        }
-    }
-}
-
-impl Schedule {
-    /// Next time the clock shows hour:minute, as Unix seconds.
-    fn next(&self) -> Option<i64> {
-        use chrono::{Duration, Local};
-        let now = Local::now();
-        let today = now.date_naive().and_hms_opt(self.hour, self.minute, 0)?;
-        let mut at = today.and_local_timezone(Local).earliest()?;
-        if at <= now {
-            at += Duration::days(1);
-        }
-        Some(at.timestamp())
-    }
 }
 
 impl DownloadPage {
     /// Forgets everything tied to the current link.
     fn reset_link(&mut self) {
-        self.info = None;
         self.error = None;
         self.trim = TrimState::default();
-        self.pick_video = None;
-        self.pick_audio = None;
-        self.tags = Tags::default();
-        self.tags_prefill = Tags::default();
-    }
-
-    /// The `-f` selector for the picked formats, if any apply to `mode`.
-    fn picked_format(&self, mode: Mode) -> Option<String> {
-        let formats = &self.info.as_ref()?.formats;
-        match mode {
-            Mode::Audio => self.pick_audio.clone(),
-            Mode::Video => {
-                let v = self.pick_video.as_ref()?;
-                let has_audio = formats.iter().any(|f| &f.id == v && f.has_audio());
-                Some(match (&self.pick_audio, has_audio) {
-                    (Some(a), _) => format!("{v}+{a}"),
-                    (None, true) => v.clone(),
-                    (None, false) => format!("{v}+ba"),
-                })
-            }
-        }
+        self.link = LinkChoices::default();
     }
 }
 
@@ -162,16 +106,6 @@ impl TrimState {
     }
 }
 
-/// Like `fmt_duration` but keeps tenths of a second when the time isn't whole.
-fn fmt_time(secs: f64) -> String {
-    let tenths = (secs.fract() * 10.0).round() as u32;
-    if tenths == 0 || tenths >= 10 {
-        super::fmt_duration(secs)
-    } else {
-        format!("{}.{tenths}", super::fmt_duration(secs.trunc()))
-    }
-}
-
 pub fn show(ui: &mut Ui, app: &mut App) {
     let now = ui.input(|i| i.time);
     let page = &mut app.download;
@@ -182,17 +116,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             Ok(info) => {
                 app.settings.download.playlist = info.is_playlist;
                 page.trim = TrimState::for_duration(info.duration);
-                page.tags_prefill = Tags {
-                    title: info.track.clone().unwrap_or_else(|| info.title.clone()),
-                    artist: info
-                        .artist
-                        .clone()
-                        .or_else(|| info.uploader.clone())
-                        .unwrap_or_default(),
-                    album: info.album.clone().unwrap_or_default(),
-                };
-                page.tags = page.tags_prefill.clone();
-                page.info = Some(info);
+                page.link.set_info(info);
             }
             Err(e) => page.error = Some(format!("{e:#}")),
         }
@@ -255,7 +179,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         let tools = app.tools.clone();
         let net = app.settings.network.clone();
         let fetch_url = url.clone();
-        page.fetching = Some(Task::spawn(ui.ctx(), move || {
+        page.fetching = Some(Task::spawn(&app.wake, move || {
             ytdlp::fetch_info(&tools, &net, &fetch_url)
         }));
     }
@@ -279,21 +203,21 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             });
         });
         ui.add_space(16.0);
-    } else if let Some(info) = &page.info {
+    } else if let Some(info) = &page.link.info {
         let seen = app.history.find_url(&url).map(|e| e.finished_at);
         media_card(ui, info, seen);
         ui.add_space(16.0);
     }
 
     // Format options
-    let is_playlist = page.info.as_ref().is_some_and(|i| i.is_playlist);
+    let is_playlist = page.link.is_playlist();
     format_card(ui, app, is_playlist);
     ui.add_space(16.0);
-    let duration = app.download.info.as_ref().and_then(|i| i.duration);
+    let duration = app.download.link.info.as_ref().and_then(|i| i.duration);
     edit_card(ui, app, is_playlist, duration);
     ui.add_space(16.0);
-    if app.settings.download.mode == Mode::Audio && !is_playlist && app.download.info.is_some() {
-        tags_card(ui, &mut app.download.tags);
+    if app.settings.download.mode == Mode::Audio && !is_playlist && app.download.link.info.is_some() {
+        tags_card(ui, &mut app.download.link.tags);
         ui.add_space(16.0);
     }
 
@@ -323,44 +247,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     ui.horizontal(|ui| {
         if theme::pill_button(ui, &format!("{}  Download", icons::DOWNLOAD_SIMPLE), ready).clicked() {
             let trim = trim.ok().flatten();
-            let title = page
-                .info
-                .as_ref()
-                .map_or_else(|| url.clone(), |i| i.title.clone());
-            let options = app.settings.download.clone();
-            let mut options_for_job = options.clone();
-            if !is_playlist {
-                options_for_job.playlist = false;
-            }
-            let format = page.picked_format(options.mode);
-            let mut summary = options.summary();
-            if let Some(f) = &format {
-                summary = format!("{} · format {f}", summary.split(" · ").take(2).collect::<Vec<_>>().join(" · "));
-            }
-            if let Some(t) = &trim {
-                let end = t.end.map_or("end".to_owned(), fmt_time);
-                summary.push_str(&format!(" · Clip {}–{end}", fmt_time(t.start)));
-            }
-            let tags = (options.mode == Mode::Audio && !is_playlist && page.tags != page.tags_prefill)
-                .then(|| page.tags.clone());
-            let not_before = if page.schedule.later { page.schedule.next() } else { None };
-            app.jobs.push_at(
-                title.clone(),
-                summary,
-                JobSpec::Download(DownloadRequest {
-                    url: url.clone(),
-                    options: options_for_job,
-                    out_dir: app.settings.download_dir.clone(),
-                    // Clips of something already downloaded are still wanted.
-                    archive: (app.settings.skip_downloaded && trim.is_none())
-                        .then(crate::settings::archive_path),
-                    network: app.settings.network.clone(),
-                    trim,
-                    format,
-                    tags,
-                }),
-                not_before,
-            );
+            let job = page.link.plan(&url, trim, &app.settings);
+            let title = job.title.clone();
+            app.jobs.push_at(job.title, job.subtitle, job.spec, page.schedule.not_before());
             page.toast = Some((title, now));
             page.url.clear();
             page.reset_link();
@@ -390,7 +279,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
 /// Trim and clean-up applied while downloading.
 fn edit_card(ui: &mut Ui, app: &mut App, is_playlist: bool, duration: Option<f64>) {
-    let chapters = app.download.info.as_ref().map(|i| i.chapters);
+    let chapters = app.download.link.info.as_ref().map(|i| i.chapters);
     let t = &mut app.download.trim;
     let o = &mut app.settings.download;
     theme::card(ui, |ui| {
@@ -555,7 +444,7 @@ fn media_card(ui: &mut Ui, info: &MediaInfo, downloaded_at: Option<i64>) {
                         RichText::new(format!(
                             "{} You downloaded this on {}",
                             icons::CLOCK_COUNTER_CLOCKWISE,
-                            crate::history::fmt_timestamp(at)
+                            fmt_timestamp(at)
                         ))
                         .small()
                         .color(theme::ACCENT_HOVER),
@@ -571,8 +460,9 @@ fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
     let page = &mut app.download;
     let o = &mut app.settings.download;
     let presets = &mut app.settings.download_presets;
-    let duration = page.info.as_ref().and_then(|i| i.duration);
+    let duration = page.link.info.as_ref().and_then(|i| i.duration);
     let has_formats = page
+        .link
         .info
         .as_ref()
         .is_some_and(|i| !i.is_playlist && !i.formats.is_empty());
@@ -598,10 +488,10 @@ fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
         ui.add_space(10.0);
 
         let picked = match o.mode {
-            Mode::Video => page.pick_video.is_some(),
-            Mode::Audio => page.pick_audio.is_some(),
+            Mode::Video => page.link.pick_video.is_some(),
+            Mode::Audio => page.link.pick_audio.is_some(),
         };
-        let formats: &[FormatInfo] = match &page.info {
+        let formats: &[FormatInfo] = match &page.link.info {
             Some(i) if has_formats => &i.formats,
             _ => &[],
         };
@@ -670,7 +560,7 @@ fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
             egui::CollapsingHeader::new(RichText::new("Pick exact formats").color(theme::MUTED))
                 .id_salt("dl-exact")
                 .show(ui, |ui| {
-                    exact_formats(ui, &mut page.pick_video, &mut page.pick_audio, formats, o.mode, duration)
+                    exact_formats(ui, &mut page.link.pick_video, &mut page.link.pick_audio, formats, o.mode, duration)
                 });
         }
 
@@ -691,7 +581,7 @@ fn format_card(ui: &mut Ui, app: &mut App, is_playlist: bool) {
         });
         if o.embed_subs {
             ui.add_space(6.0);
-            subtitle_options(ui, o, page.info.as_ref());
+            subtitle_options(ui, o, page.link.info.as_ref());
         }
     });
 }
@@ -895,7 +785,7 @@ fn schedule_row(ui: &mut Ui, s: &mut Schedule) {
                 ui.label(
                     RichText::new(format!(
                         "{} · Redline has to stay open",
-                        super::queue::starts_at(t)
+                        starts_at(t)
                     ))
                     .small()
                     .color(theme::SUBTLE),

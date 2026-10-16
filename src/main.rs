@@ -1,15 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod history;
-mod jobs;
-mod presets;
-mod settings;
-mod system;
 mod task;
 mod theme;
-mod tools;
 mod ui;
+
+use redline_core::{format, history, jobs, presets, settings, system, tools};
 
 use eframe::egui;
 

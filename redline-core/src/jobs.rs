@@ -8,10 +8,10 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use eframe::egui;
 use serde::{Deserialize, Serialize};
 
 use crate::settings;
+use crate::{Wake, no_wake};
 use crate::tools::convert::{ConcatRequest, ConvertRequest};
 use crate::tools::ytdlp::DownloadRequest;
 use crate::tools::{self, ToolPaths};
@@ -165,7 +165,7 @@ enum JobEvent {
 pub struct Reporter {
     id: JobId,
     tx: Sender<JobEvent>,
-    ctx: egui::Context,
+    wake: Wake,
 }
 
 impl Reporter {
@@ -192,13 +192,13 @@ impl Reporter {
         Self {
             id: 0,
             tx: channel().0,
-            ctx: egui::Context::default(),
+            wake: no_wake(),
         }
     }
 
     fn send(&self, ev: JobEvent) {
         let _ = self.tx.send(ev);
-        self.ctx.request_repaint();
+        (self.wake)();
     }
 }
 
@@ -216,6 +216,7 @@ pub struct JobManager {
     dirty: bool,
     /// Jobs that finished since the last `take_finished`.
     finished: Vec<JobId>,
+    wake: Wake,
 }
 
 impl JobManager {
@@ -229,6 +230,7 @@ impl JobManager {
             rx,
             dirty: false,
             finished: Vec::new(),
+            wake: no_wake(),
         }
     }
 
@@ -241,6 +243,11 @@ impl JobManager {
             .unwrap_or_default();
         m.set_jobs(jobs);
         m
+    }
+
+    /// Called by workers whenever a job reports progress or ends.
+    pub fn set_wake(&mut self, wake: Wake) {
+        self.wake = wake;
     }
 
     fn set_jobs(&mut self, mut jobs: Vec<Job>) {
@@ -361,7 +368,8 @@ impl JobManager {
     }
 
     /// Applies worker events and starts queued jobs up to the concurrency limit.
-    pub fn pump(&mut self, ctx: &egui::Context, tools: &ToolPaths, concurrency: usize) {
+    /// Returns how long until the next scheduled job is due, so the caller can check back then.
+    pub fn pump(&mut self, tools: &ToolPaths, concurrency: usize) -> Option<std::time::Duration> {
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
                 JobEvent::Status(id, status) => {
@@ -398,16 +406,13 @@ impl JobManager {
 
         let now = chrono::Utc::now().timestamp();
         let due = |j: &Job| j.not_before.is_none_or(|t| t <= now);
-        // Wake up when the next scheduled job is due.
-        if let Some(next) = self
+        let recheck = self
             .jobs
             .iter()
             .filter(|j| j.status == JobStatus::Queued && !due(j))
             .filter_map(|j| j.not_before)
             .min()
-        {
-            ctx.request_repaint_after(std::time::Duration::from_secs((next - now).clamp(1, 60) as u64));
-        }
+            .map(|next| std::time::Duration::from_secs((next - now).clamp(1, 60) as u64));
         while self.running < concurrency.max(1) {
             let Some(job) = self
                 .jobs
@@ -429,7 +434,7 @@ impl JobManager {
             let reporter = Reporter {
                 id: job.id,
                 tx: self.tx.clone(),
-                ctx: ctx.clone(),
+                wake: self.wake.clone(),
             };
             thread::spawn(move || {
                 let result = match &spec {
@@ -440,6 +445,7 @@ impl JobManager {
                 reporter.send(JobEvent::Finished(reporter.id, result));
             });
         }
+        recheck
     }
 
     fn find(&mut self, id: JobId) -> Option<&mut Job> {
@@ -458,7 +464,8 @@ mod tests {
         let spec = || JobSpec::Download(DownloadRequest::default());
         m.push_at("later".into(), String::new(), spec(), Some(now + 3600));
         m.push_at("due".into(), String::new(), spec(), Some(now - 1));
-        m.pump(&egui::Context::default(), &ToolPaths::default(), 4);
+        let recheck = m.pump(&ToolPaths::default(), 4);
+        assert!(recheck.is_some_and(|d| d.as_secs() >= 1 && d.as_secs() <= 60), "asks to be woken for the later job");
         assert!(m.jobs[0].status == JobStatus::Queued, "not due yet");
         assert!(m.jobs[0].not_before.is_some());
         assert!(m.jobs[1].status != JobStatus::Queued, "due job started");
