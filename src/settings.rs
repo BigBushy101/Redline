@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::tools::convert::ConvertOptions;
-use crate::tools::ytdlp::DownloadOptions;
+use crate::tools::ytdlp::{DownloadOptions, NetworkOptions};
 
 /// `%APPDATA%\Redline` on Windows (the platform's roaming data dir elsewhere).
 pub fn data_dir() -> PathBuf {
@@ -38,6 +38,7 @@ pub struct Settings {
     pub concurrency: usize,
     /// Skip links that were downloaded before (yt-dlp's download archive).
     pub skip_downloaded: bool,
+    pub network: NetworkOptions,
     pub download: DownloadOptions,
     pub convert: ConvertOptions,
 }
@@ -53,6 +54,7 @@ impl Default for Settings {
             deno_path: None,
             concurrency: 2,
             skip_downloaded: true,
+            network: NetworkOptions::default(),
             download: DownloadOptions::default(),
             convert: ConvertOptions::default(),
         }

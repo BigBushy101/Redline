@@ -176,9 +176,10 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         page.error = None;
         page.trim = TrimState::default();
         let tools = app.tools.clone();
+        let net = app.settings.network.clone();
         let fetch_url = url.clone();
         page.fetching = Some(Task::spawn(ui.ctx(), move || {
-            ytdlp::fetch_info(&tools, &fetch_url)
+            ytdlp::fetch_info(&tools, &net, &fetch_url)
         }));
     }
 
@@ -332,6 +333,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     // Clips of something already downloaded are still wanted.
                     archive: (app.settings.skip_downloaded && trim.is_none())
                         .then(crate::settings::archive_path),
+                    network: app.settings.network.clone(),
                     trim,
                 }),
             );

@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use eframe::egui::{self, RichText, Slider, Spinner, Ui};
+use eframe::egui::{self, ComboBox, RichText, Slider, Spinner, Ui};
 use egui_phosphor::regular as icons;
 
 use crate::app::App;
 use crate::task::Task;
 use crate::theme;
-use crate::tools::{self, ToolPaths, install};
+use crate::tools::{self, ToolPaths, install, ytdlp};
 
 #[derive(Default)]
 pub struct SettingsPage {
@@ -102,6 +102,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             );
         });
     });
+    ui.add_space(16.0);
+
+    network_card(ui, &mut app.settings.network);
     ui.add_space(16.0);
 
     ui.label(
@@ -217,4 +220,88 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
         app.tools = ToolPaths::locate(&app.settings);
         app.settings_page.invalidate_version();
     }
+}
+
+fn network_card(ui: &mut Ui, net: &mut ytdlp::NetworkOptions) {
+    theme::card(ui, |ui| {
+        ui.label(theme::heading("Network & sign-in"));
+        ui.label(theme::muted(
+            "Use your browser's logins for age-restricted, private or members-only videos.",
+        ));
+        ui.add_space(6.0);
+
+        theme::option_row(ui, "Cookies", |ui| {
+            let label = match (&net.cookies_browser, &net.cookies_file) {
+                (Some(b), _) => ytdlp::COOKIE_BROWSERS
+                    .iter()
+                    .find(|(v, _)| v == b)
+                    .map_or(b.as_str(), |(_, l)| l)
+                    .to_owned(),
+                (None, Some(_)) => "cookies.txt file".to_owned(),
+                (None, None) => "Don't sign in".to_owned(),
+            };
+            ComboBox::from_id_salt("net-cookies")
+                .selected_text(label)
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(net.cookies_browser.is_none() && net.cookies_file.is_none(), "Don't sign in").clicked() {
+                        net.cookies_browser = None;
+                        net.cookies_file = None;
+                    }
+                    for (v, l) in ytdlp::COOKIE_BROWSERS {
+                        if ui.selectable_label(net.cookies_browser.as_deref() == Some(v), format!("From {l}")).clicked() {
+                            net.cookies_browser = Some(v.to_string());
+                        }
+                    }
+                    if ui.selectable_label(net.cookies_browser.is_none() && net.cookies_file.is_some(), "cookies.txt file…").clicked()
+                        && let Some(f) = rfd::FileDialog::new().add_filter("Cookies", &["txt"]).pick_file()
+                    {
+                        net.cookies_browser = None;
+                        net.cookies_file = Some(f);
+                    }
+                });
+            if net.cookies_browser.is_none()
+                && let Some(f) = &net.cookies_file
+            {
+                ui.add(egui::Label::new(theme::muted(f.display().to_string())).truncate());
+            }
+        });
+        if matches!(net.cookies_browser.as_deref(), Some("chrome" | "edge" | "brave" | "opera" | "vivaldi" | "chromium")) {
+            ui.label(
+                RichText::new(format!(
+                    "{} Chromium browsers lock their cookies while open. If downloads fail, close the browser or use Firefox.",
+                    icons::INFO
+                ))
+                .small()
+                .color(theme::MUTED),
+            );
+        }
+
+        theme::option_row(ui, "Proxy", |ui| {
+            text_field(ui, &mut net.proxy, "none, e.g. socks5://127.0.0.1:1080", 280.0);
+        });
+        theme::option_row(ui, "Speed limit", |ui| {
+            text_field(ui, &mut net.rate_limit, "unlimited", 100.0);
+            ui.label(RichText::new("e.g. 500K or 2M per second").small().color(theme::SUBTLE));
+        });
+        theme::option_row(ui, "Retries", |ui| {
+            ui.add(egui::DragValue::new(&mut net.retries).range(0..=50));
+            ui.label(RichText::new("0 uses yt-dlp's default (10)").small().color(theme::SUBTLE));
+        });
+    });
+}
+
+fn text_field(ui: &mut Ui, text: &mut String, hint: &str, width: f32) {
+    egui::Frame::new()
+        .fill(theme::INPUT)
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(hint)
+                    .desired_width(width),
+            );
+        });
 }

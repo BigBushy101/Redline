@@ -98,6 +98,54 @@ impl DownloadOptions {
     }
 }
 
+/// Browsers yt-dlp can read cookies from, with display names.
+pub const COOKIE_BROWSERS: &[(&str, &str)] = &[
+    ("firefox", "Firefox"),
+    ("chrome", "Chrome"),
+    ("edge", "Edge"),
+    ("brave", "Brave"),
+    ("opera", "Opera"),
+    ("vivaldi", "Vivaldi"),
+    ("chromium", "Chromium"),
+];
+
+/// Sign-in and connection settings applied to every yt-dlp call.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct NetworkOptions {
+    /// `--cookies-from-browser` value, e.g. `firefox`.
+    pub cookies_browser: Option<String>,
+    /// Netscape-format cookies.txt; used when no browser is picked.
+    pub cookies_file: Option<PathBuf>,
+    /// e.g. `socks5://127.0.0.1:1080`; empty for none.
+    pub proxy: String,
+    /// e.g. `2M` or `500K`; empty for unlimited.
+    pub rate_limit: String,
+    /// 0 keeps yt-dlp's default.
+    pub retries: u32,
+}
+
+impl NetworkOptions {
+    pub fn args(&self) -> Vec<String> {
+        let mut a = Vec::new();
+        if let Some(b) = self.cookies_browser.as_deref().filter(|b| !b.is_empty()) {
+            a.extend(["--cookies-from-browser".into(), b.to_owned()]);
+        } else if let Some(f) = &self.cookies_file {
+            a.extend(["--cookies".into(), f.display().to_string()]);
+        }
+        if !self.proxy.trim().is_empty() {
+            a.extend(["--proxy".into(), self.proxy.trim().to_owned()]);
+        }
+        if !self.rate_limit.trim().is_empty() {
+            a.extend(["-r".into(), self.rate_limit.trim().to_owned()]);
+        }
+        if self.retries > 0 {
+            a.extend(["--retries".into(), self.retries.to_string()]);
+        }
+        a
+    }
+}
+
 /// Only download part of the media. Times are in seconds; `end: None` runs to the end.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Trim {
@@ -137,6 +185,7 @@ pub struct DownloadRequest {
     pub trim: Option<Trim>,
     /// yt-dlp `--download-archive` file; links recorded there are skipped.
     pub archive: Option<PathBuf>,
+    pub network: NetworkOptions,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -172,7 +221,7 @@ struct RawThumb {
     url: String,
 }
 
-fn base_command(tools: &ToolPaths) -> Result<std::process::Command> {
+fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process::Command> {
     let ytdlp = tools
         .ytdlp
         .as_ref()
@@ -187,12 +236,13 @@ fn base_command(tools: &ToolPaths) -> Result<std::process::Command> {
         cmd.arg("--js-runtimes")
             .arg(format!("deno:{}", deno.display()));
     }
+    cmd.args(net.args());
     Ok(cmd)
 }
 
 /// `yt-dlp -J --flat-playlist URL`, parsed into the bits the UI shows.
-pub fn fetch_info(tools: &ToolPaths, url: &str) -> Result<MediaInfo> {
-    let mut cmd = base_command(tools)?;
+pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<MediaInfo> {
+    let mut cmd = base_command(tools, net)?;
     cmd.args(["-J", "--flat-playlist", "--", url]);
     let out = cmd.output().context("failed to run yt-dlp")?;
     if !out.status.success() {
@@ -231,8 +281,29 @@ pub fn friendly_error(msg: &str) -> String {
     let lower = msg.to_lowercase();
     if lower.contains("js runtime") || lower.contains("javascript runtime") || lower.contains("n challenge") {
         format!("{msg}\n\nYouTube needs a JavaScript runtime. Install Deno from Settings > Tools.")
-    } else if lower.contains("sign in to confirm") {
-        format!("{msg}\n\nYouTube is rate-limiting this network. Try again later.")
+    } else if lower.contains("could not copy") && lower.contains("cookie")
+        || lower.contains("failed to decrypt")
+        || lower.contains("cookie") && lower.contains("permission denied")
+    {
+        format!(
+            "{msg}\n\nRedline couldn't read the browser's cookies. Close the browser and try again, \
+             or switch to Firefox or a cookies.txt file in Settings > Network & sign-in."
+        )
+    } else if lower.contains("sign in to confirm you're not a bot")
+        || lower.contains("sign in to confirm you’re not a bot")
+    {
+        format!(
+            "{msg}\n\nYouTube is rate-limiting this network. Try again later, or sign in with \
+             browser cookies in Settings > Network & sign-in."
+        )
+    } else if lower.contains("sign in to confirm your age")
+        || lower.contains("age-restricted")
+        || lower.contains("private video")
+        || lower.contains("members-only")
+        || lower.contains("login required")
+        || lower.contains("requires authentication")
+    {
+        format!("{msg}\n\nThis needs a signed-in account. Turn on browser cookies in Settings > Network & sign-in.")
     } else if lower.contains("unsupported url") {
         "That link isn't from a supported site.".to_owned()
     } else {
@@ -400,7 +471,7 @@ pub fn download(
 ) -> Result<Option<PathBuf>> {
     std::fs::create_dir_all(&req.out_dir)
         .with_context(|| format!("can't create {}", req.out_dir.display()))?;
-    let mut cmd = base_command(tools)?;
+    let mut cmd = base_command(tools, &req.network)?;
     cmd.args(build_args(req));
 
     let mut last_file: Option<PathBuf> = None;
@@ -492,6 +563,28 @@ mod tests {
             out_dir: PathBuf::from("out"),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn network_args() {
+        assert!(NetworkOptions::default().args().is_empty());
+        let mut n = NetworkOptions {
+            cookies_browser: Some("firefox".into()),
+            cookies_file: Some(PathBuf::from("c.txt")),
+            proxy: " socks5://h:1 ".into(),
+            rate_limit: "2M".into(),
+            retries: 5,
+        };
+        let a = n.args();
+        assert!(has_pair(&a, "--cookies-from-browser", "firefox"));
+        assert!(!a.contains(&"--cookies".to_string()), "browser wins over file");
+        assert!(has_pair(&a, "--proxy", "socks5://h:1"));
+        assert!(has_pair(&a, "-r", "2M"));
+        assert!(has_pair(&a, "--retries", "5"));
+        n.cookies_browser = None;
+        assert!(has_pair(&n.args(), "--cookies", "c.txt"));
+        assert!(friendly_error("ERROR: Could not copy Chrome cookie database").contains("Firefox"));
+        assert!(friendly_error("Sign in to confirm your age").contains("cookies"));
     }
 
     #[test]

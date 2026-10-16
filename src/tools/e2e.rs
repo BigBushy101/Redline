@@ -201,7 +201,7 @@ fn downloads_with_ytdlp() {
     // "Me at the zoo": 19 seconds and unlikely to ever go away.
     let url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
 
-    let info = ytdlp::fetch_info(&tools, url).expect("fetch_info");
+    let info = ytdlp::fetch_info(&tools, &Default::default(), url).expect("fetch_info");
     println!("info: {} by {:?}, {:?}s", info.title, info.uploader, info.duration);
     assert!(!info.title.is_empty());
 
