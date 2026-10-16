@@ -332,3 +332,60 @@ fn downloads_with_formats_tags_subs_and_archive() {
     println!("srt files: {}", srts.len());
     assert!(!srts.is_empty(), "no .srt written");
 }
+
+#[test]
+#[ignore]
+fn encodes_with_every_working_encoder() {
+    use super::hwaccel::{self, Hardware, VideoCodec};
+    let tools = ensure_tools();
+    let dir = scratch("encoders");
+    let clip = make_clip(&tools, &dir, 3);
+    let enc = hwaccel::detect(tools.ffmpeg.as_ref().unwrap());
+    println!("GPUs: {:?}", enc.gpus());
+    let mut tried = 0;
+    for (target, codec) in [
+        ("mp4", VideoCodec::H264),
+        ("mp4", VideoCodec::H265),
+        ("mkv", VideoCodec::Av1),
+        ("webm", VideoCodec::Vp9),
+        ("webm", VideoCodec::Av1),
+    ] {
+        for hw in Hardware::ALL {
+            if !enc.supports(codec, hw) {
+                continue;
+            }
+            tried += 1;
+            let req = ConvertRequest {
+                input: clip.clone(),
+                category: Category::Video,
+                target: target.into(),
+                options: ConvertOptions {
+                    codec,
+                    hardware: hw,
+                    preset: "veryfast".into(),
+                    ..Default::default()
+                },
+                out_dir: Some(dir.join(format!("{target}-{codec:?}-{hw:?}"))),
+                ..Default::default()
+            };
+            let out = convert::run(&tools, &req, &CancelHandle::default(), &Reporter::for_test())
+                .unwrap_or_else(|e| panic!("{target} {codec:?} {hw:?}: {e:#}"))
+                .unwrap();
+            let probe = command(tools.ffprobe.as_ref().unwrap())
+                .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"])
+                .arg(&out)
+                .output()
+                .unwrap();
+            let got = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+            println!("{target} {codec:?} {hw:?} -> {got}");
+            let want = match codec {
+                VideoCodec::H264 => "h264",
+                VideoCodec::H265 => "hevc",
+                VideoCodec::Av1 => "av1",
+                VideoCodec::Vp9 => "vp9",
+            };
+            assert_eq!(got, want);
+        }
+    }
+    assert!(tried >= 5);
+}

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+use super::hwaccel::{Hardware, VideoCodec};
 use super::{ToolPaths, command, ffmpeg, image_conv, run_streaming, unique_path};
 use crate::jobs::{CancelHandle, Cancelled, Reporter};
 
@@ -159,6 +160,8 @@ impl GifOptions {
 pub struct ConvertOptions {
     pub crf: u8,
     pub preset: String,
+    pub codec: VideoCodec,
+    pub hardware: Hardware,
     pub max_height: u32,
     pub audio_bitrate: u32,
     pub image_quality: u8,
@@ -172,6 +175,8 @@ impl Default for ConvertOptions {
         Self {
             crf: 23,
             preset: "medium".into(),
+            codec: VideoCodec::H264,
+            hardware: Hardware::Cpu,
             max_height: 0,
             audio_bitrate: 192,
             image_quality: 85,

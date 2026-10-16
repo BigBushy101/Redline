@@ -7,7 +7,9 @@ use crate::history::History;
 use crate::jobs::JobManager;
 use crate::settings::Settings;
 use crate::theme;
+use crate::task::Task;
 use crate::tools::ToolPaths;
+use crate::tools::hwaccel::{self, Encoders};
 use crate::tools::install::Installer;
 use crate::ui;
 
@@ -25,6 +27,9 @@ pub struct App {
     pub settings: Settings,
     saved_settings: Settings,
     pub tools: ToolPaths,
+    /// Video encoders that work on this machine (CPU only until detection finishes).
+    pub encoders: Encoders,
+    encoders_task: Option<Task<Encoders>>,
     pub jobs: JobManager,
     pub history: History,
     pub installer: Installer,
@@ -40,11 +45,14 @@ impl App {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings = Settings::load();
         let tools = ToolPaths::locate(&settings);
+        let encoders_task = Self::detect_encoders(&cc.egui_ctx, &tools);
         Self {
             page: Page::Download,
             saved_settings: settings.clone(),
             settings,
             tools,
+            encoders: Encoders::default(),
+            encoders_task,
             jobs: JobManager::load(),
             history: History::load(),
             installer: Installer::default(),
@@ -53,6 +61,11 @@ impl App {
             history_page: Default::default(),
             settings_page: Default::default(),
         }
+    }
+
+    fn detect_encoders(ctx: &egui::Context, tools: &ToolPaths) -> Option<Task<Encoders>> {
+        let ffmpeg = tools.ffmpeg.clone()?;
+        Some(Task::spawn(ctx, move || hwaccel::detect(&ffmpeg)))
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -75,6 +88,11 @@ impl eframe::App for App {
         if self.installer.take_finished() {
             self.tools = ToolPaths::locate(&self.settings);
             self.settings_page.invalidate_version();
+            self.encoders_task = Self::detect_encoders(ctx, &self.tools);
+        }
+        if let Some(e) = self.encoders_task.as_ref().and_then(Task::take) {
+            self.encoders = e;
+            self.encoders_task = None;
         }
         self.jobs
             .pump(ctx, &self.tools, self.settings.concurrency);

@@ -4,6 +4,7 @@ pub mod convert;
 #[cfg(test)]
 mod e2e;
 pub mod ffmpeg;
+pub mod hwaccel;
 pub mod image_conv;
 pub mod install;
 pub mod ytdlp;

@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use super::convert::{ConvertOptions, GifDirection, GifOptions};
+use super::hwaccel::{self, Rate, VideoCodec};
 
 pub fn is_audio_target(target: &str) -> bool {
     matches!(target, "mp3" | "m4a" | "flac" | "wav" | "ogg" | "opus")
@@ -93,31 +94,25 @@ pub fn build_args(input: &Path, output: &Path, target: &str, o: &ConvertOptions)
             push(&[&s]);
         }
     } else {
-        let crf = o.crf.to_string();
-        let preset = o.preset.clone();
         let scale = scale_filter(o.max_height);
         match target {
-            "mp4" | "mkv" | "mov" => {
-                push(&["-c:v", "libx264", "-preset", &preset, "-crf", &crf, "-pix_fmt", "yuv420p"]);
+            "mp4" | "mkv" | "mov" | "webm" => {
+                let codec = hwaccel::effective_codec(target, o.codec);
+                for s in hwaccel::video_encoder_args(codec, o.hardware, Rate::Crf(o.crf), &o.preset) {
+                    push(&[&s]);
+                }
+                // Apple players only take HEVC tagged hvc1.
+                if codec == VideoCodec::H265 && target != "mkv" {
+                    push(&["-tag:v", "hvc1"]);
+                }
                 if let Some(s) = &scale {
                     push(&["-vf", s]);
                 }
-                push(&["-c:a", "aac", "-b:a", &format!("{}k", o.audio_bitrate)]);
-                if target != "mkv" {
+                let audio = if target == "webm" { "libopus" } else { "aac" };
+                push(&["-c:a", audio, "-b:a", &format!("{}k", o.audio_bitrate)]);
+                if target == "mp4" || target == "mov" {
                     push(&["-movflags", "+faststart"]);
                 }
-            }
-            "webm" => {
-                // VP9's CRF scale is wider than x264's; shift it to land at similar quality.
-                let vp9_crf = (o.crf as u32 + 8).min(63).to_string();
-                push(&[
-                    "-c:v", "libvpx-vp9", "-crf", &vp9_crf, "-b:v", "0", "-row-mt", "1",
-                    "-deadline", "good", "-cpu-used", "4",
-                ]);
-                if let Some(s) = &scale {
-                    push(&["-vf", s]);
-                }
-                push(&["-c:a", "libopus", "-b:a", &format!("{}k", o.audio_bitrate)]);
             }
             "avi" => {
                 push(&["-c:v", "mpeg4", "-q:v", "4"]);

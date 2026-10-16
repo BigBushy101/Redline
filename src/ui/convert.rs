@@ -14,6 +14,7 @@ use crate::tools::convert::{
     GifDirection, MAX_HEIGHTS, PRESETS, classify,
 };
 use crate::tools::ffmpeg::is_audio_target;
+use crate::tools::hwaccel::{self, Encoders, Hardware, VideoCodec};
 
 pub struct ConvertItem {
     pub path: PathBuf,
@@ -167,10 +168,10 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     name,
                     format!("{from} {} {}", icons::ARROW_RIGHT, item.target.to_uppercase()),
                     JobSpec::Convert(ConvertRequest {
+                        options: job_options(&app.settings.convert, &item.target, &app.encoders),
                         input: item.path,
                         category: item.category,
                         target: item.target,
-                        options: app.settings.convert.clone(),
                         out_dir: app.settings.convert_dir.clone(),
                     }),
                 );
@@ -264,6 +265,7 @@ fn options_card(ui: &mut Ui, app: &mut App) {
                 ui.label(theme::muted("Better"));
                 ui.label(RichText::new(format!("CRF {}", o.crf)).small().color(theme::SUBTLE));
             });
+            codec_rows(ui, o, &app.encoders, &app.convert.items);
             theme::option_row(ui, "Encode speed", |ui| {
                 ComboBox::from_id_salt("cv-preset")
                     .selected_text(&o.preset)
@@ -563,4 +565,78 @@ fn file_list(ui: &mut Ui, app: &mut App) {
     if let Some(i) = remove {
         page.items.remove(i);
     }
+}
+
+/// Options as sent with a job: the GPU falls back to CPU if it can't encode this codec.
+fn job_options(o: &crate::tools::convert::ConvertOptions, target: &str, enc: &Encoders) -> crate::tools::convert::ConvertOptions {
+    let mut o = o.clone();
+    o.hardware = enc.resolve(hwaccel::effective_codec(target, o.codec), o.hardware);
+    o
+}
+
+fn codec_rows(
+    ui: &mut Ui,
+    o: &mut crate::tools::convert::ConvertOptions,
+    enc: &Encoders,
+    items: &[ConvertItem],
+) {
+    let video_targets: Vec<&str> = items
+        .iter()
+        .filter(|i| i.category == Category::Video)
+        .map(|i| i.target.as_str())
+        .filter(|t| !hwaccel::codecs_for(t).is_empty())
+        .collect();
+    let has_webm = video_targets.contains(&"webm");
+    let has_mp4ish = video_targets.iter().any(|t| *t != "webm");
+    theme::option_row(ui, "Codec", |ui| {
+        let mut opts = vec![(VideoCodec::H264, "H.264"), (VideoCodec::H265, "H.265"), (VideoCodec::Av1, "AV1")];
+        if has_webm {
+            opts.push((VideoCodec::Vp9, "VP9"));
+        }
+        if !has_mp4ish && matches!(o.codec, VideoCodec::H264 | VideoCodec::H265) {
+            o.codec = VideoCodec::Vp9;
+        }
+        theme::chips(ui, &mut o.codec, &opts);
+        let hint = match o.codec {
+            VideoCodec::H264 => "Plays everywhere",
+            VideoCodec::H265 => "Smaller files, newer devices",
+            VideoCodec::Av1 => "Smallest files, slowest on CPU",
+            VideoCodec::Vp9 => "WebM only",
+        };
+        ui.label(RichText::new(hint).small().color(theme::SUBTLE));
+    });
+    if has_webm && matches!(o.codec, VideoCodec::H264 | VideoCodec::H265) {
+        ui.horizontal(|ui| {
+            ui.add_space(150.0);
+            ui.label(RichText::new("WebM files use VP9").small().color(theme::SUBTLE));
+        });
+    }
+    if has_mp4ish && o.codec == VideoCodec::Vp9 {
+        ui.horizontal(|ui| {
+            ui.add_space(150.0);
+            ui.label(RichText::new("MP4, MKV and MOV files use H.264").small().color(theme::SUBTLE));
+        });
+    }
+
+    let gpus = enc.gpus();
+    theme::option_row(ui, "Encoder", |ui| {
+        let mut opts: Vec<(Hardware, &str)> = vec![(Hardware::Cpu, "CPU")];
+        for hw in &gpus {
+            opts.push((*hw, hw.label()));
+        }
+        if !opts.iter().any(|(h, _)| *h == o.hardware) {
+            opts.push((o.hardware, o.hardware.label()));
+        }
+        theme::chips(ui, &mut o.hardware, &opts);
+        let msg = if gpus.is_empty() {
+            "No GPU encoder found".to_owned()
+        } else if o.hardware == Hardware::Cpu {
+            "GPU is much faster; CPU makes smaller files".to_owned()
+        } else if !enc.supports(o.codec, o.hardware) {
+            format!("{} can't encode {} here, so CPU is used", o.hardware.label(), o.codec.label())
+        } else {
+            "Much faster, slightly larger files".to_owned()
+        };
+        ui.label(RichText::new(msg).small().color(theme::SUBTLE));
+    });
 }
