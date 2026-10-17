@@ -1,0 +1,4 @@
+<resources>
+    <!-- Compose draws everything; this only covers the window before the first frame. -->
+    <style name="Theme.Redline" parent="android:Theme.Material.NoActionBar" />
+</resources>
