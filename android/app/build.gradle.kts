@@ -15,7 +15,7 @@ android {
 
     defaultConfig {
         applicationId = "app.redline"
-        minSdk = 24
+        minSdk = 26 // cpal plays through AAudio, which exists only from API 26
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
