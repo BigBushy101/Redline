@@ -150,11 +150,12 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
 
         let s = &mut app.settings;
         let t = &app.tools;
+        let deno = t.js_runtime.as_ref().map(|js| js.path.clone());
         let rows: [(&str, &Option<PathBuf>, &mut Option<PathBuf>, &str); 4] = [
             ("yt-dlp", &t.ytdlp, &mut s.ytdlp_path, "Downloads media"),
             ("ffmpeg", &t.ffmpeg, &mut s.ffmpeg_path, "Converts and merges video/audio"),
             ("ffprobe", &t.ffprobe, &mut s.ffprobe_path, "Reads durations for progress"),
-            ("Deno", &t.deno, &mut s.deno_path, "Lets yt-dlp solve YouTube's JavaScript checks"),
+            ("Deno", &deno, &mut s.deno_path, "Lets yt-dlp solve YouTube's JavaScript checks"),
         ];
         for (name, found, override_path, what) in rows {
             ui.horizontal(|ui| {

@@ -1,6 +1,8 @@
 //! Everything Redline does apart from drawing it: the external tools, the job queue, history,
 //! settings and OS integration. No UI dependency, so it can be driven and tested headless.
 
+#[cfg(any(target_os = "android", test))]
+pub mod android;
 pub mod convert_plan;
 pub mod download_plan;
 pub mod format;

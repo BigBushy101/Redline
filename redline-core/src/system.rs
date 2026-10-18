@@ -2,8 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Shows a desktop notification without blocking the UI.
+/// Shows a desktop notification without blocking the UI. Does nothing on Android, where the
+/// app posts its own.
 pub fn notify(title: String, body: String) {
+    #[cfg(target_os = "android")]
+    let _ = (title, body);
+    #[cfg(not(target_os = "android"))]
     std::thread::spawn(move || {
         let _ = notify_rust::Notification::new()
             .appname("Redline")
@@ -13,7 +17,8 @@ pub fn notify(title: String, body: String) {
     });
 }
 
-/// Stops Windows from sleeping while `on` (the display may still turn off).
+/// Stops Windows from sleeping while `on` (the display may still turn off). A no-op elsewhere;
+/// on Android the app holds its own wake lock.
 pub fn keep_awake(on: bool) {
     #[cfg(windows)]
     {
@@ -60,6 +65,10 @@ pub fn schedule_shutdown() -> std::io::Result<()> {
             return Err(std::io::Error::other(format!("shutdown exited with {status}")));
         }
     }
+    // Apps can't shut an Android phone down.
+    #[cfg(target_os = "android")]
+    return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Android apps can't shut down the device"));
+    #[cfg(not(target_os = "android"))]
     Ok(())
 }
 

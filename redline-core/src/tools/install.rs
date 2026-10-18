@@ -1,29 +1,38 @@
-//! First-run download of yt-dlp, ffmpeg/ffprobe and deno into the app's bin folder.
+//! First-run download of yt-dlp, ffmpeg/ffprobe and deno into the app's bin folder. Not on
+//! Android, where the tools come in the APK; updating yt-dlp works everywhere.
 
+#[cfg(not(target_os = "android"))]
 use std::fs::{self, File};
+#[cfg(not(target_os = "android"))]
 use std::io::{Read, Write};
+#[cfg(not(target_os = "android"))]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+#[cfg(not(target_os = "android"))]
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "android"))]
+use anyhow::Context;
+use anyhow::{Result, bail};
 
-use super::{ToolPaths, bin_dir, exe_name};
+use super::ToolPaths;
+#[cfg(not(target_os = "android"))]
+use super::{bin_dir, exe_name};
 use crate::Wake;
 
 #[cfg(windows)]
 const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 #[cfg(target_os = "macos")]
 const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 const YTDLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
 
 #[cfg(windows)]
 const FFMPEG_ZIP_URL: Option<&str> = Some(
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
 );
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 const FFMPEG_ZIP_URL: Option<&str> = None;
 
 #[cfg(windows)]
@@ -32,7 +41,7 @@ const DENO_ZIP_URL: Option<&str> =
 #[cfg(target_os = "macos")]
 const DENO_ZIP_URL: Option<&str> =
     Some("https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip");
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 const DENO_ZIP_URL: Option<&str> =
     Some("https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip");
 
@@ -74,7 +83,7 @@ impl Installer {
         }
         let want_ytdlp = tools.ytdlp.is_none();
         let want_ffmpeg = tools.ffmpeg.is_none() || tools.ffprobe.is_none();
-        let want_deno = tools.deno.is_none();
+        let want_deno = tools.js_runtime.is_none();
         let status = self.status.clone();
         thread::spawn(move || {
             let p = Progress {
@@ -96,11 +105,14 @@ impl Installer {
     }
 }
 
+// Unused on Android, where nothing is downloaded.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 struct Progress {
     status: Arc<Mutex<InstallStatus>>,
     wake: Wake,
 }
 
+#[cfg_attr(target_os = "android", allow(dead_code))]
 impl Progress {
     fn set(&self, step: String, progress: Option<f32>) {
         let mut s = self.status.lock().unwrap();
@@ -111,6 +123,12 @@ impl Progress {
     }
 }
 
+#[cfg(target_os = "android")]
+fn install(_: &Progress, _ytdlp: bool, _ffmpeg: bool, _deno: bool) -> Result<()> {
+    bail!("Redline for Android ships its tools in the app; reinstall it to restore them.")
+}
+
+#[cfg(not(target_os = "android"))]
 fn install(p: &Progress, ytdlp: bool, ffmpeg: bool, deno: bool) -> Result<()> {
     let bin = bin_dir();
     fs::create_dir_all(&bin).with_context(|| format!("can't create {}", bin.display()))?;
@@ -144,6 +162,7 @@ fn install(p: &Progress, ytdlp: bool, ffmpeg: bool, deno: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "android"))]
 fn download(p: &Progress, label: &str, url: &str, dest: &Path) -> Result<()> {
     p.set(format!("Connecting to download {label}…"), None);
     let resp = ureq::get(url)
@@ -196,6 +215,7 @@ fn download(p: &Progress, label: &str, url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Copies the named files (matched by file name anywhere in the archive) into `dest_dir`.
+#[cfg(not(target_os = "android"))]
 fn extract(zip_path: &Path, dest_dir: &Path, names: &[&str]) -> Result<()> {
     let mut archive = zip::ZipArchive::new(File::open(zip_path)?).context("corrupt archive")?;
     let mut found = 0;
@@ -226,12 +246,10 @@ fn extract(zip_path: &Path, dest_dir: &Path, names: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Runs `yt-dlp -U` and returns its last line of output.
+/// Runs `yt-dlp -U` and returns its last line of output. On Android this replaces the zipapp
+/// script in the app's storage, which is writable, so it works there too.
 pub fn update_ytdlp(tools: &ToolPaths) -> Result<String> {
-    let Some(ytdlp) = &tools.ytdlp else {
-        bail!("yt-dlp is not installed");
-    };
-    let out = super::command(ytdlp).arg("-U").output()?;
+    let out = tools.ytdlp_command()?.arg("-U").output()?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -253,6 +271,6 @@ pub fn update_ytdlp(tools: &ToolPaths) -> Result<String> {
 
 /// `yt-dlp --version`, for the settings page.
 pub fn ytdlp_version(tools: &ToolPaths) -> Option<String> {
-    let out = super::command(tools.ytdlp.as_ref()?).arg("--version").output().ok()?;
+    let out = tools.ytdlp_command().ok()?.arg("--version").output().ok()?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
 }

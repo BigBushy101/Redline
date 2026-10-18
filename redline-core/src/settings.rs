@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::player::PlayerSettings;
@@ -8,12 +10,50 @@ use crate::presets::{self, ConvertPreset, DownloadPreset};
 use crate::tools::convert::ConvertOptions;
 use crate::tools::ytdlp::{DownloadOptions, NetworkOptions};
 
-/// `%APPDATA%\Redline` on Windows (the platform's roaming data dir elsewhere).
+/// Redline's folders, for hosts where the platform lookup doesn't apply (Android has no
+/// user dirs to look up; the app hands over its own storage). Desktop never sets them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppDirs {
+    /// Settings, history, the queue and the tools' bin folder; used as is, without a
+    /// `Redline` subfolder.
+    pub data: PathBuf,
+    /// Where downloads go until the user picks another folder.
+    pub downloads: PathBuf,
+}
+
+static APP_DIRS: OnceLock<AppDirs> = OnceLock::new();
+
+/// Overrides [`data_dir`] and the default download folder for the rest of the process. Call it
+/// before anything reads settings. Setting the same folders again is fine (Android re-runs init
+/// when an activity is recreated in the same process); different ones fail rather than moving
+/// Redline's files mid-run.
+pub fn set_app_dirs(dirs: AppDirs) -> Result<()> {
+    let set = APP_DIRS.get_or_init(|| dirs.clone());
+    ensure!(*set == dirs, "Redline's folders are already set to {}", set.data.display());
+    Ok(())
+}
+
 pub fn data_dir() -> PathBuf {
+    resolve_data_dir(APP_DIRS.get())
+}
+
+fn resolve_data_dir(dirs: Option<&AppDirs>) -> PathBuf {
+    dirs.map_or_else(platform_data_dir, |d| d.data.clone())
+}
+
+/// `%APPDATA%\Redline` on Windows (the platform's roaming data dir elsewhere).
+#[cfg(not(target_os = "android"))]
+fn platform_data_dir() -> PathBuf {
     directories::BaseDirs::new()
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(std::env::temp_dir)
         .join("Redline")
+}
+
+/// Only reached if the app didn't call [`set_app_dirs`]; nothing here survives a reboot.
+#[cfg(target_os = "android")]
+fn platform_data_dir() -> PathBuf {
+    std::env::temp_dir().join("Redline")
 }
 
 fn settings_path() -> PathBuf {
@@ -21,10 +61,24 @@ fn settings_path() -> PathBuf {
 }
 
 fn default_download_dir() -> PathBuf {
+    resolve_download_dir(APP_DIRS.get())
+}
+
+fn resolve_download_dir(dirs: Option<&AppDirs>) -> PathBuf {
+    dirs.map_or_else(platform_download_dir, |d| d.downloads.clone())
+}
+
+#[cfg(not(target_os = "android"))]
+fn platform_download_dir() -> PathBuf {
     directories::UserDirs::new()
         .and_then(|u| u.download_dir().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Redline")
+}
+
+#[cfg(target_os = "android")]
+fn platform_download_dir() -> PathBuf {
+    platform_data_dir().join("Downloads")
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -102,5 +156,25 @@ impl Settings {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = fs::write(path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The process-wide override is never set in tests (it would leak into every other test),
+    // so these exercise the resolution it goes through.
+    #[test]
+    fn app_dirs_take_precedence() {
+        let dirs = AppDirs {
+            data: PathBuf::from("/data/user/0/app/files"),
+            downloads: PathBuf::from("/storage/emulated/0/Download/Redline"),
+        };
+        assert_eq!(resolve_data_dir(Some(&dirs)), dirs.data);
+        assert_eq!(resolve_download_dir(Some(&dirs)), dirs.downloads);
+        assert_eq!(resolve_data_dir(None), platform_data_dir());
+        assert_eq!(resolve_download_dir(None), platform_download_dir());
+        assert!(platform_data_dir().ends_with("Redline"));
     }
 }

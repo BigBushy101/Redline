@@ -242,9 +242,15 @@ pub fn render_stem(template: &str, name: &str, n: usize, target: &str) -> String
 
 /// Sends a finished job's source to the Recycle Bin; failures are ignored (the output is
 /// already safe, and the original simply stays).
+#[cfg(not(target_os = "android"))]
 fn recycle(path: &Path) {
     let _ = trash::delete(path);
 }
+
+/// Android has no recycle bin, and deleting outright isn't what the setting promises, so the
+/// original stays.
+#[cfg(target_os = "android")]
+fn recycle(_path: &Path) {}
 
 pub fn run(
     tools: &ToolPaths,

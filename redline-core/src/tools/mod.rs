@@ -1,4 +1,4 @@
-//! Locating and running the external tools (yt-dlp, ffmpeg, ffprobe, deno).
+//! Locating and running the external tools (yt-dlp, ffmpeg, ffprobe, a JS runtime).
 
 pub mod convert;
 #[cfg(test)]
@@ -14,10 +14,10 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 
 use crate::jobs::{CancelHandle, Cancelled};
 use crate::settings::{self, Settings};
@@ -30,17 +30,59 @@ pub fn exe_name(name: &str) -> String {
     format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
-#[derive(Clone, Debug, Default)]
+/// A JavaScript runtime yt-dlp can use for YouTube's checks, passed as `--js-runtimes name:path`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsRuntime {
+    /// yt-dlp's name for it: `deno` on desktop, `quickjs` on Android.
+    pub name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToolPaths {
+    /// The yt-dlp executable, or its script when [`Self::ytdlp_launcher`] is set.
     pub ytdlp: Option<PathBuf>,
+    /// Interpreter that runs `ytdlp` when it's a script rather than a program (Android ships a
+    /// Python launcher and the yt-dlp zipapp). `None` runs `ytdlp` itself.
+    pub ytdlp_launcher: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
     pub ffprobe: Option<PathBuf>,
-    pub deno: Option<PathBuf>,
+    pub js_runtime: Option<JsRuntime>,
+}
+
+/// Tools that came with the app instead of being found on disk (the Android APK's), filling in
+/// whatever [`ToolPaths::locate`] doesn't find. Desktop never sets it.
+static BUNDLED: OnceLock<ToolPaths> = OnceLock::new();
+
+/// Registers the app's own tools for [`ToolPaths::locate`]. Setting the same ones again is fine;
+/// different ones fail, since running jobs would be holding the old paths.
+pub fn set_bundled(tools: ToolPaths) -> Result<()> {
+    let set = BUNDLED.get_or_init(|| tools.clone());
+    ensure!(*set == tools, "bundled tools are already set");
+    Ok(())
+}
+
+/// Environment every tool runs with on top of Redline's own (Android's yt-dlp and ffmpeg need
+/// `LD_LIBRARY_PATH`, `PYTHONHOME` and friends). Applied in [`command`] rather than set on the
+/// process: changing the environment of a process whose other threads may read it (the JVM's,
+/// on Android) is a data race, and every tool already starts through [`command`].
+static CHILD_ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Sets the extra environment for every tool started from now on. Same rules as [`set_bundled`].
+pub fn set_child_env(vars: Vec<(String, String)>) -> Result<()> {
+    let set = CHILD_ENV.get_or_init(|| vars.clone());
+    ensure!(*set == vars, "the tools' environment is already set");
+    Ok(())
 }
 
 impl ToolPaths {
     pub fn locate(s: &Settings) -> Self {
-        let ffmpeg = find("ffmpeg", s.ffmpeg_path.as_deref());
+        Self::locate_with(s, BUNDLED.get())
+    }
+
+    fn locate_with(s: &Settings, bundled: Option<&ToolPaths>) -> Self {
+        let bundled_path = |pick: fn(&ToolPaths) -> &Option<PathBuf>| bundled.and_then(|b| pick(b).clone());
+        let ffmpeg = find("ffmpeg", s.ffmpeg_path.as_deref()).or_else(|| bundled_path(|b| &b.ffmpeg));
         // Prefer the ffprobe that ships next to whichever ffmpeg we picked.
         let ffprobe = s
             .ffprobe_path
@@ -53,13 +95,29 @@ impl ToolPaths {
                     .map(|d| d.join(exe_name("ffprobe")))
                     .filter(|p| p.is_file())
             })
-            .or_else(|| find("ffprobe", None));
+            .or_else(|| find("ffprobe", None))
+            .or_else(|| bundled_path(|b| &b.ffprobe));
+        let deno = find("deno", s.deno_path.as_deref()).map(|path| JsRuntime { name: "deno".into(), path });
         Self {
-            ytdlp: find("yt-dlp", s.ytdlp_path.as_deref()),
+            ytdlp: find("yt-dlp", s.ytdlp_path.as_deref()).or_else(|| bundled_path(|b| &b.ytdlp)),
+            ytdlp_launcher: bundled_path(|b| &b.ytdlp_launcher),
             ffmpeg,
             ffprobe,
-            deno: find("deno", s.deno_path.as_deref()),
+            js_runtime: deno.or_else(|| bundled.and_then(|b| b.js_runtime.clone())),
         }
+    }
+
+    /// A command that runs yt-dlp (through its launcher, if it has one), with no arguments yet.
+    pub fn ytdlp_command(&self) -> Result<Command> {
+        let ytdlp = self.ytdlp.as_ref().ok_or_else(|| anyhow!("yt-dlp is not installed"))?;
+        Ok(match &self.ytdlp_launcher {
+            Some(launcher) => {
+                let mut cmd = command(launcher);
+                cmd.arg(ytdlp);
+                cmd
+            }
+            None => command(ytdlp),
+        })
     }
 
     pub fn ready_for_download(&self) -> bool {
@@ -71,7 +129,7 @@ impl ToolPaths {
     }
 
     pub fn missing_any(&self) -> bool {
-        self.ytdlp.is_none() || self.ffmpeg.is_none() || self.ffprobe.is_none() || self.deno.is_none()
+        self.ytdlp.is_none() || self.ffmpeg.is_none() || self.ffprobe.is_none() || self.js_runtime.is_none()
     }
 }
 
@@ -91,10 +149,13 @@ fn find(name: &str, override_path: Option<&Path>) -> Option<PathBuf> {
     })
 }
 
-/// A `Command` that won't flash a console window on Windows.
+/// A `Command` that won't flash a console window on Windows, with the tools' extra environment
+/// (see [`set_child_env`]).
 pub fn command(program: &Path) -> Command {
-    #[allow(unused_mut)]
     let mut cmd = Command::new(program);
+    if let Some(vars) = CHILD_ENV.get() {
+        cmd.envs(vars.iter().map(|(k, v)| (k, v)));
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -204,7 +265,9 @@ pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
         .expect("unbounded range")
 }
 
-/// Opens Explorer with the file selected (or just the folder elsewhere).
+/// Opens Explorer with the file selected (or just the folder elsewhere). Does nothing on
+/// Android, where the app shows files itself.
+#[cfg(not(target_os = "android"))]
 pub fn reveal(path: &Path) {
     #[cfg(windows)]
     if path.is_file() {
@@ -222,6 +285,9 @@ pub fn reveal(path: &Path) {
     let _ = open::that_detached(dir);
 }
 
+#[cfg(target_os = "android")]
+pub fn reveal(_path: &Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +301,26 @@ mod tests {
         assert_eq!(unique_path(&dir, "a", "png"), dir.join("a (1).png"));
         std::fs::write(dir.join("a (1).png"), b"").unwrap();
         assert_eq!(unique_path(&dir, "a", "png"), dir.join("a (2).png"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bundled_tools_fill_in_and_overrides_win() {
+        let dir = std::env::temp_dir().join(format!("redline-locate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("my-yt-dlp");
+        std::fs::write(&mine, b"").unwrap();
+        let bundled = ToolPaths {
+            ytdlp: Some(PathBuf::from("/app/yt-dlp")),
+            ytdlp_launcher: Some(PathBuf::from("/app/libpython.so")),
+            ..Default::default()
+        };
+        let s = Settings { ytdlp_path: Some(mine.clone()), ..Default::default() };
+        let t = ToolPaths::locate_with(&s, Some(&bundled));
+        assert_eq!(t.ytdlp, Some(mine));
+        assert_eq!(t.ytdlp_launcher, bundled.ytdlp_launcher);
+        // Without bundled tools (desktop), nothing runs through a launcher.
+        assert_eq!(ToolPaths::locate_with(&s, None).ytdlp_launcher, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

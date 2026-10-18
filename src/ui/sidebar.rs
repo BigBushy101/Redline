@@ -71,7 +71,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let rows = [
         ("yt-dlp", tools.ytdlp.is_some()),
         ("ffmpeg", tools.ffmpeg.is_some() && tools.ffprobe.is_some()),
-        ("Deno", tools.deno.is_some()),
+        ("Deno", tools.js_runtime.is_some()),
     ];
     let all_ok = rows.iter().all(|(_, ok)| *ok);
     ui.add_space((ui.available_height() - last_h).max(8.0));

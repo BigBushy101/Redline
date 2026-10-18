@@ -572,19 +572,15 @@ struct RawThumb {
 }
 
 pub(crate) fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process::Command> {
-    let ytdlp = tools
-        .ytdlp
-        .as_ref()
-        .ok_or_else(|| anyhow!("yt-dlp is not installed"))?;
-    let mut cmd = command(ytdlp);
+    let mut cmd = tools.ytdlp_command()?;
     cmd.env("PYTHONIOENCODING", "utf-8")
         .args(["--encoding", "utf-8", "--no-warnings", "--ignore-config"]);
     if let Some(dir) = tools.ffmpeg.as_ref().and_then(|f| f.parent()) {
         cmd.arg("--ffmpeg-location").arg(dir);
     }
-    if let Some(deno) = &tools.deno {
+    if let Some(js) = &tools.js_runtime {
         cmd.arg("--js-runtimes")
-            .arg(format!("deno:{}", deno.display()));
+            .arg(format!("{}:{}", js.name, js.path.display()));
     }
     cmd.args(net.args());
     Ok(cmd)
@@ -1403,5 +1399,49 @@ mod tests {
         );
         assert_eq!(r["https://x/1"].title, "Tab\there");
         assert_eq!(r["https://x/1"].uploader, None);
+    }
+
+    fn program_and_args(cmd: &std::process::Command) -> (String, Vec<String>) {
+        let s = |o: &std::ffi::OsStr| o.to_string_lossy().into_owned();
+        (s(cmd.get_program()), cmd.get_args().map(s).collect())
+    }
+
+    #[test]
+    fn base_command_desktop_shape() {
+        let bin = PathBuf::from("bin");
+        let tools = ToolPaths {
+            ytdlp: Some(bin.join("yt-dlp.exe")),
+            ffmpeg: Some(bin.join("ffmpeg.exe")),
+            js_runtime: Some(crate::tools::JsRuntime { name: "deno".into(), path: bin.join("deno.exe") }),
+            ..Default::default()
+        };
+        let (program, args) = program_and_args(&base_command(&tools, &NetworkOptions::default()).unwrap());
+        assert_eq!(program, bin.join("yt-dlp.exe").to_string_lossy());
+        assert_eq!(args[..4], ["--encoding", "utf-8", "--no-warnings", "--ignore-config"]);
+        assert!(has_pair(&args, "--ffmpeg-location", &bin.to_string_lossy()));
+        assert!(has_pair(&args, "--js-runtimes", &format!("deno:{}", bin.join("deno.exe").display())));
+
+        assert!(base_command(&ToolPaths::default(), &NetworkOptions::default()).is_err());
+    }
+
+    #[test]
+    fn base_command_through_launcher() {
+        let lib = PathBuf::from("/data/app/lib/x86_64");
+        let script = PathBuf::from("/data/user/0/app/no_backup/youtubedl-android/yt-dlp/yt-dlp");
+        let bin = PathBuf::from("/data/user/0/app/files/bin");
+        let tools = ToolPaths {
+            ytdlp: Some(script.clone()),
+            ytdlp_launcher: Some(lib.join("libpython.so")),
+            ffmpeg: Some(bin.join("ffmpeg")),
+            ffprobe: Some(bin.join("ffprobe")),
+            js_runtime: Some(crate::tools::JsRuntime { name: "quickjs".into(), path: lib.join("libqjs.so") }),
+        };
+        let (program, args) = program_and_args(&base_command(&tools, &NetworkOptions::default()).unwrap());
+        assert_eq!(program, lib.join("libpython.so").to_string_lossy());
+        // The script comes first, then yt-dlp's own arguments.
+        assert_eq!(args[0], script.to_string_lossy());
+        assert_eq!(args[1..5], ["--encoding", "utf-8", "--no-warnings", "--ignore-config"]);
+        assert!(has_pair(&args, "--ffmpeg-location", &bin.to_string_lossy()));
+        assert!(has_pair(&args, "--js-runtimes", &format!("quickjs:{}", lib.join("libqjs.so").display())));
     }
 }
