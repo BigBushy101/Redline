@@ -52,6 +52,8 @@ import app.redline.util.formatTimestamp
 
 sealed interface HistoryAction {
     data class Open(val path: String) : HistoryAction
+    /** Add the finished file to the Convert page. */
+    data class Convert(val path: String) : HistoryAction
     data class Again(val index: UInt) : HistoryAction
     data class Remove(val index: UInt) : HistoryAction
     data object Clear : HistoryAction
@@ -65,7 +67,7 @@ fun HistoryScreen(entries: List<HistoryRecord>, onAction: (HistoryAction) -> Uni
     if (n == 0) {
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             PageHeader("History", "Recently finished", subtitle)
-            EmptyState(Icons.Rounded.History, "Nothing here yet", "Finished downloads are kept here.")
+            EmptyState(Icons.Rounded.History, "Nothing here yet", "Finished downloads and conversions are kept here.")
         }
         return
     }
@@ -138,9 +140,17 @@ private fun EntryRow(entry: HistoryRecord, onAction: (HistoryAction) -> Unit) {
             IconButton(onClick = { onAction(HistoryAction.Open(output)) }) {
                 Icon(Icons.AutoMirrored.Rounded.OpenInNew, "Open in its app", tint = RedlineColors.Muted)
             }
+            if (!java.io.File(output).isDirectory) {
+                IconButton(onClick = { onAction(HistoryAction.Convert(output)) }) {
+                    Icon(Icons.Rounded.SwapHoriz, "Convert", tint = RedlineColors.Muted)
+                }
+            }
         }
-        IconButton(onClick = { onAction(HistoryAction.Again(entry.index)) }) {
-            Icon(Icons.Rounded.Refresh, if (entry.isDownload) "Download again" else "Convert again", tint = RedlineColors.Muted)
+        // A conversion of a picked file can't run again: its copy is gone once it's done.
+        if (entry.canRepeat) {
+            IconButton(onClick = { onAction(HistoryAction.Again(entry.index)) }) {
+                Icon(Icons.Rounded.Refresh, if (entry.isDownload) "Download again" else "Convert again", tint = RedlineColors.Muted)
+            }
         }
         IconButton(onClick = { onAction(HistoryAction.Remove(entry.index)) }) {
             Icon(Icons.Rounded.Delete, "Remove from history", tint = RedlineColors.Muted)

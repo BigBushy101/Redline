@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
@@ -43,10 +44,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.redline.state.EngineStatus
 import app.redline.state.RedlineState
+import app.redline.ui.convert.ConvertMessage
+import app.redline.ui.convert.ConvertModel
+import app.redline.ui.convert.ConvertScreen
 import app.redline.ui.download.DownloadMessage
 import app.redline.ui.download.DownloadModel
 import app.redline.ui.download.DownloadScreen
@@ -62,18 +67,19 @@ import app.redline.work.Notifications
 import kotlinx.coroutines.launch
 
 /**
- * The pages the bottom bar switches between: the desktop sidebar's entries that this slice has.
- * Convert, Saved, Playlists and the player join in later slices.
+ * The pages the bottom bar switches between: the desktop sidebar's entries that this slice has,
+ * in its order. Saved, Playlists and the player join in later slices.
  */
 enum class Tab(val label: String, val icon: ImageVector) {
     Download("Download", Icons.Rounded.Download),
+    Convert("Convert", Icons.Rounded.SwapHoriz),
     Queue("Queue", Icons.AutoMirrored.Rounded.QueueMusic),
     History("History", Icons.Rounded.History),
     Settings("Settings", Icons.Rounded.Settings),
 }
 
 @Composable
-fun RedlineRoot(state: RedlineState, download: DownloadModel, tab: Tab, selectTab: (Tab) -> Unit) {
+fun RedlineRoot(state: RedlineState, download: DownloadModel, convert: ConvertModel, tab: Tab, selectTab: (Tab) -> Unit) {
     val status by state.status.collectAsStateWithLifecycle()
     when (val s = status) {
         EngineStatus.Initializing -> Starting()
@@ -81,7 +87,7 @@ fun RedlineRoot(state: RedlineState, download: DownloadModel, tab: Tab, selectTa
         is EngineStatus.Ready -> {
             LaunchedEffect(Unit) { download.onEngineReady() }
             AskForNotifications()
-            Pages(state, download, tab, selectTab)
+            Pages(state, download, convert, tab, selectTab)
         }
     }
 }
@@ -102,14 +108,16 @@ private fun AskForNotifications() {
 }
 
 @Composable
-private fun Pages(state: RedlineState, download: DownloadModel, tab: Tab, selectTab: (Tab) -> Unit) {
+private fun Pages(state: RedlineState, download: DownloadModel, convert: ConvertModel, tab: Tab, selectTab: (Tab) -> Unit) {
     val context = LocalContext.current
     val queue by state.queue.collectAsStateWithLifecycle()
     val active by state.activeCount.collectAsStateWithLifecycle()
     val history by state.history.collectAsStateWithLifecycle()
     val settings by state.settings.collectAsStateWithLifecycle()
     val tools by state.tools.collectAsStateWithLifecycle()
+    val encoders by state.encoders.collectAsStateWithLifecycle()
     val lists = state.choiceLists
+    val convertLists = state.convertLists
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -133,6 +141,22 @@ private fun Pages(state: RedlineState, download: DownloadModel, tab: Tab, select
         }
     }
 
+    LaunchedEffect(convert) {
+        convert.messages.collect { m ->
+            when (m) {
+                is ConvertMessage.Error -> say(m.text)
+                // As on the desktop, converting moves to the queue.
+                ConvertMessage.Queued -> selectTab(Tab.Queue)
+            }
+        }
+    }
+
+    /** "Convert" on a finished download or conversion: it's in Redline's folders already. */
+    fun convertFile(path: String) {
+        convert.addPaths(listOf(path))
+        selectTab(Tab.Convert)
+    }
+
     Scaffold(
         containerColor = RedlineColors.Bg,
         snackbarHost = { SnackbarHost(snackbar) },
@@ -140,12 +164,13 @@ private fun Pages(state: RedlineState, download: DownloadModel, tab: Tab, select
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             val s = settings
-            if (s == null || lists == null) {
+            if (s == null || lists == null || convertLists == null) {
                 Starting()
                 return@Box
             }
             when (tab) {
                 Tab.Download -> DownloadScreen(download, s, lists, tools, history, openSettings = { selectTab(Tab.Settings) })
+                Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = { selectTab(Tab.Settings) })
                 Tab.Queue -> QueueScreen(
                     queue,
                     onAction = { a ->
@@ -157,6 +182,7 @@ private fun Pages(state: RedlineState, download: DownloadModel, tab: Tab, select
                             QueueAction.ClearFinished -> state.act { it.clearFinished() }
                             QueueAction.CancelAll -> state.act { it.cancelAll() }
                             is QueueAction.Open -> openFile(context, a.path)?.let(::say)
+                            is QueueAction.Convert -> convertFile(a.path)
                         }
                     },
                     findSomething = { selectTab(Tab.Download) },
@@ -164,6 +190,7 @@ private fun Pages(state: RedlineState, download: DownloadModel, tab: Tab, select
                 Tab.History -> HistoryScreen(history) { a ->
                     when (a) {
                         is HistoryAction.Open -> openFile(context, a.path)?.let(::say)
+                        is HistoryAction.Convert -> convertFile(a.path)
                         is HistoryAction.Remove -> state.act(touchesHistory = true) { it.removeHistory(a.index) }
                         HistoryAction.Clear -> state.act(touchesHistory = true) { it.clearHistory() }
                         is HistoryAction.Again -> scope.launch {
@@ -201,7 +228,7 @@ private fun BottomBar(tab: Tab, active: Int, selectTab: (Tab) -> Unit) {
                         Icon(t.icon, contentDescription = t.label)
                     }
                 },
-                label = { Text(t.label, style = MaterialTheme.typography.labelMedium) },
+                label = { Text(t.label, style = MaterialTheme.typography.labelMedium, maxLines = 1, softWrap = false, overflow = TextOverflow.Visible) },
                 colors = NavigationBarItemDefaults.colors(
                     selectedIconColor = RedlineColors.Text,
                     selectedTextColor = RedlineColors.Text,

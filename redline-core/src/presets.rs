@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::convert_plan::ConvertItem;
 use crate::tools::convert::{Category, ConvertOptions};
 use crate::tools::filters::Filters;
 use crate::tools::hwaccel::VideoCodec;
@@ -49,6 +50,37 @@ impl ConvertPreset {
         ConvertOptions {
             hardware: current.hardware,
             ..self.options.clone()
+        }
+    }
+
+    /// Applies the preset to the shared options and to the formats of the files that follow
+    /// them (files with their own settings keep theirs).
+    pub fn apply<'a>(&self, shared: &mut ConvertOptions, items: impl IntoIterator<Item = &'a mut ConvertItem>) {
+        *shared = self.options_keeping_hardware(shared);
+        for item in items.into_iter().filter(|i| i.options.is_none()) {
+            if let Some(t) = self.target_for(item.category) {
+                item.target = t.to_owned();
+            }
+        }
+    }
+
+    /// A preset of `options`, remembering the formats in use when every file of a kind agrees.
+    pub fn from_items<'a>(
+        name: String,
+        options: ConvertOptions,
+        items: impl IntoIterator<Item = &'a ConvertItem> + Clone,
+    ) -> Self {
+        let target = |c: Category| {
+            let mut ts = items.clone().into_iter().filter(|i| i.category == c).map(|i| i.target.clone());
+            let first = ts.next()?;
+            ts.all(|t| t == first).then_some(first)
+        };
+        Self {
+            name,
+            image_target: target(Category::Image),
+            video_target: target(Category::Video),
+            audio_target: target(Category::Audio),
+            options,
         }
     }
 }
@@ -188,6 +220,32 @@ mod tests {
         current = discord.options_keeping_hardware(&current);
         assert_eq!(current.hardware, Hardware::Nvidia);
         assert!(discord.matches(&current));
+
+        let item = |path: &str, category, target: &str| ConvertItem {
+            path: path.into(),
+            category,
+            size: 0,
+            target: target.into(),
+            options: None,
+            burn_subs: None,
+        };
+        let mut items = vec![
+            item("a.mkv", Category::Video, "webm"),
+            item("b.mkv", Category::Video, "mkv"),
+            item("c.flac", Category::Audio, "ogg"),
+        ];
+        let saved = ConvertPreset::from_items("Mine".into(), ConvertOptions::default(), &items);
+        assert_eq!(saved.video_target, None, "the videos disagree");
+        assert_eq!(saved.audio_target.as_deref(), Some("ogg"));
+        assert_eq!(saved.image_target, None, "no images");
+
+        items[1].options = Some(ConvertOptions::default());
+        let mut shared = ConvertOptions { hardware: Hardware::Intel, ..Default::default() };
+        discord.apply(&mut shared, &mut items);
+        assert!(discord.matches(&shared) && shared.hardware == Hardware::Intel);
+        assert_eq!(items[0].target, "mp4");
+        assert_eq!(items[1].target, "mkv", "has its own settings");
+        assert_eq!(items[2].target, "ogg", "the preset has no audio format");
 
         // Saved settings without preset fields still load the built-ins.
         let loaded: crate::settings::Settings = serde_json::from_str(r#"{"concurrency":3}"#).unwrap();

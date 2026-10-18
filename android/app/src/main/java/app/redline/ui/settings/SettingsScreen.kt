@@ -61,8 +61,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * Port of the download-related parts of src/ui/settings.rs. Tool path overrides, the tools
- * installer, the conversions folder and browser cookies are desktop-only or for later slices.
+ * Port of the download and convert parts of src/ui/settings.rs. Tool path overrides, the tools
+ * installer and browser cookies are desktop-only or for later slices; the folders are read-only.
  */
 @Composable
 fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsStatusRecord?, lists: DownloadChoiceListsRecord) {
@@ -79,6 +79,9 @@ fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsSt
             SectionCard(title = "Folders") {
                 OptionRow("Downloads", hint = "Redline's own folder for now; saving to your Download folder comes later.") {
                     Text(settings.downloadDir, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Text)
+                }
+                OptionRow("Conversions", hint = "Redline's own folder too: ffmpeg can only write there.") {
+                    Text(settings.convert.convertDir ?: "Next to the original file", style = MaterialTheme.typography.bodySmall, color = RedlineColors.Text)
                 }
             }
 

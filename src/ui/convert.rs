@@ -14,8 +14,7 @@ use crate::tools::convert::{
     AUDIO_BITRATES, Category, ConvertOptions, GIF_DITHERS, GIF_FPS, GIF_SPEEDS, GIF_WIDTHS,
     GifDirection, MAX_HEIGHTS, PRESETS, render_stem,
 };
-use redline_core::convert_plan;
-use crate::tools::ffmpeg::is_audio_target;
+use redline_core::convert_plan::{self, Sections};
 use crate::tools::filters::{CropAspect, Rotation, SPEEDS, SubSource};
 use crate::tools::hwaccel::{Encoders, Hardware, VideoCodec};
 
@@ -73,34 +72,6 @@ impl ConvertPage {
     /// Takes the files out of the list, for queueing.
     fn take_files(&mut self) -> Vec<convert_plan::ConvertItem> {
         self.items.drain(..).map(|i| i.file).collect()
-    }
-}
-
-/// Which option groups apply to the files in the list.
-struct Sections {
-    video: bool,
-    audio: bool,
-    gif: bool,
-    image: bool,
-    /// Video output targets, for the codec row.
-    video_targets: Vec<String>,
-}
-
-impl Sections {
-    fn of<'a>(items: impl IntoIterator<Item = &'a ConvertItem> + Clone) -> Self {
-        let has = |f: &dyn Fn(&ConvertItem) -> bool| items.clone().into_iter().any(f);
-        let is_video = |i: &ConvertItem| i.category == Category::Video;
-        Self {
-            video: has(&|i| is_video(i) && i.target != "gif" && !is_audio_target(&i.target)),
-            audio: has(&|i| i.category == Category::Audio || is_video(i) && i.target != "gif"),
-            gif: has(&|i| is_video(i) && i.target == "gif"),
-            image: has(&|i| i.category == Category::Image),
-            video_targets: items
-                .into_iter()
-                .filter(|i| i.makes_video())
-                .map(|i| i.target.clone())
-                .collect(),
-        }
     }
 }
 
@@ -276,7 +247,7 @@ fn drop_zone(ui: &mut Ui, app: &mut App) {
 }
 
 fn options_card(ui: &mut Ui, app: &mut App) {
-    let sec = Sections::of(app.convert.items.iter().filter(|i| i.options.is_none()));
+    let sec = Sections::of(app.convert.items.iter().filter(|i| i.options.is_none()).map(|i| &i.file));
     let customized = app.convert.items.iter().filter(|i| i.options.is_some()).count();
     let o = &mut app.settings.convert;
     let presets = &mut app.settings.convert_presets;
@@ -286,32 +257,14 @@ fn options_card(ui: &mut Ui, app: &mut App) {
         let names: Vec<String> = presets.iter().map(|p| p.name.clone()).collect();
         match app.convert.presets.show(ui, &names, presets.iter().position(|p| p.matches(o))) {
             Some(PresetAction::Apply(i)) => {
-                let p = &presets[i];
-                *o = p.options_keeping_hardware(o);
-                for item in app.convert.items.iter_mut().filter(|i| i.options.is_none()) {
-                    if let Some(t) = p.target_for(item.category) {
-                        item.target = t.to_owned();
-                    }
-                }
+                presets[i].apply(o, app.convert.items.iter_mut().map(|i| &mut i.file));
             }
             Some(PresetAction::Delete(i)) => {
                 presets.remove(i);
             }
             Some(PresetAction::Rename(i, name)) => presets[i].name = name,
             Some(PresetAction::SaveNew(name)) => {
-                // Remember the formats in use, when every file of a kind agrees.
-                let target = |c: Category| {
-                    let mut ts = app.convert.items.iter().filter(|i| i.category == c).map(|i| i.target.clone());
-                    let first = ts.next()?;
-                    ts.all(|t| t == first).then_some(first)
-                };
-                presets.push(ConvertPreset {
-                    name,
-                    options: o.clone(),
-                    image_target: target(Category::Image),
-                    video_target: target(Category::Video),
-                    audio_target: target(Category::Audio),
-                });
+                presets.push(ConvertPreset::from_items(name, o.clone(), app.convert.items.iter().map(|i| &i.file)));
             }
             None => {}
         }
@@ -374,7 +327,7 @@ fn options_card(ui: &mut Ui, app: &mut App) {
 fn option_sections(ui: &mut Ui, o: &mut ConvertOptions, sec: &Sections, enc: &Encoders) {
     if sec.video {
         ui.label(theme::eyebrow("Video"));
-        codec_rows(ui, o, enc, &sec.video_targets);
+        codec_rows(ui, o, enc, sec);
         theme::option_row(ui, "Size", |ui| {
             let mut by_size = o.target_size_mb > 0.0;
             if theme::chips(ui, &mut by_size, &[(false, "Set quality"), (true, "Fit a file size")]) {
@@ -475,8 +428,8 @@ fn option_sections(ui: &mut Ui, o: &mut ConvertOptions, sec: &Sections, enc: &En
 
 /// Rotate, crop, speed and loudness.
 fn adjust_options(ui: &mut Ui, o: &mut ConvertOptions, sec: &Sections) {
-    let picture = sec.video || sec.gif || sec.image;
-    let timed = sec.video || sec.audio;
+    let picture = sec.picture();
+    let timed = sec.timed();
     if !picture && !timed {
         return;
     }
@@ -545,61 +498,27 @@ fn adjust_options(ui: &mut Ui, o: &mut ConvertOptions, sec: &Sections) {
     ui.add_space(6.0);
 }
 
-fn codec_rows(ui: &mut Ui, o: &mut ConvertOptions, enc: &Encoders, video_targets: &[String]) {
-    let has_webm = video_targets.iter().any(|t| t == "webm");
-    let has_mp4ish = video_targets.iter().any(|t| t != "webm");
+fn codec_rows(ui: &mut Ui, o: &mut ConvertOptions, enc: &Encoders, sec: &Sections) {
     theme::option_row(ui, "Codec", |ui| {
-        let mut opts = vec![(VideoCodec::H264, "H.264"), (VideoCodec::H265, "H.265"), (VideoCodec::Av1, "AV1")];
-        if has_webm {
-            opts.push((VideoCodec::Vp9, "VP9"));
-        }
-        if !has_mp4ish && has_webm && matches!(o.codec, VideoCodec::H264 | VideoCodec::H265) {
-            o.codec = VideoCodec::Vp9;
-        }
+        let opts: Vec<(VideoCodec, &str)> = sec.codecs().into_iter().map(|c| (c, c.label())).collect();
+        o.codec = sec.fit_codec(o.codec);
         theme::chips(ui, &mut o.codec, &opts);
-        let hint = match o.codec {
-            VideoCodec::H264 => "Plays everywhere",
-            VideoCodec::H265 => "Smaller files, newer devices",
-            VideoCodec::Av1 => "Smallest files, slowest on CPU",
-            VideoCodec::Vp9 => "WebM only",
-        };
-        ui.label(RichText::new(hint).small().color(theme::SUBTLE));
+        ui.label(RichText::new(convert_plan::codec_hint(o.codec)).small().color(theme::SUBTLE));
     });
-    if has_webm && has_mp4ish && matches!(o.codec, VideoCodec::H264 | VideoCodec::H265) {
+    for note in sec.codec_notes(o.codec) {
         ui.horizontal(|ui| {
             ui.add_space(150.0);
-            ui.label(RichText::new("WebM files use VP9").small().color(theme::SUBTLE));
-        });
-    }
-    if has_mp4ish && o.codec == VideoCodec::Vp9 {
-        ui.horizontal(|ui| {
-            ui.add_space(150.0);
-            ui.label(RichText::new("MP4, MKV and MOV files use H.264").small().color(theme::SUBTLE));
+            ui.label(RichText::new(note).small().color(theme::SUBTLE));
         });
     }
 
-    let gpus = enc.gpus();
     theme::option_row(ui, "Encoder", |ui| {
-        let mut opts: Vec<(Hardware, &str)> = vec![(Hardware::Cpu, "CPU")];
-        for hw in &gpus {
-            opts.push((*hw, hw.label()));
-        }
-        if !opts.iter().any(|(h, _)| *h == o.hardware) {
-            opts.push((o.hardware, o.hardware.label()));
-        }
+        let opts: Vec<(Hardware, &str)> = convert_plan::encoder_choices(enc, o.hardware)
+            .into_iter()
+            .map(|h| (h, h.label()))
+            .collect();
         theme::chips(ui, &mut o.hardware, &opts);
-        let msg = if gpus.is_empty() {
-            "No GPU encoder found".to_owned()
-        } else if o.hardware == Hardware::Cpu {
-            "GPU is much faster; CPU makes smaller files".to_owned()
-        } else if !enc.supports(o.codec, o.hardware) {
-            format!("{} can't encode {} here, so CPU is used", o.hardware.label(), o.codec.label())
-        } else if o.target_size_mb > 0.0 {
-            "Much faster; sizes are less exact than CPU's two passes".to_owned()
-        } else {
-            "Much faster, slightly larger files".to_owned()
-        };
-        ui.label(RichText::new(msg).small().color(theme::SUBTLE));
+        ui.label(RichText::new(convert_plan::encoder_note(enc, o)).small().color(theme::SUBTLE));
     });
 }
 
@@ -894,7 +813,7 @@ fn item_editor(ui: &mut Ui, idx: usize, item: &mut ConvertItem, shared: &Convert
                         .color(theme::SUBTLE),
                     );
                 });
-                let sec = Sections::of(std::iter::once(&*item));
+                let sec = Sections::of(std::iter::once(&item.file));
                 if let Some(o) = &mut item.options {
                     ui.add_space(6.0);
                     option_sections(ui, o, &sec, enc);

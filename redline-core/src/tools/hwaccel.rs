@@ -126,9 +126,19 @@ impl Encoders {
 
     #[cfg(test)]
     pub fn with(names: &[&str]) -> Self {
+        Self::from_names(names.iter().map(|s| s.to_string()))
+    }
+
+    /// Encoders found earlier by [`detect`] (their ffmpeg names), e.g. kept by another process.
+    pub fn from_names(names: impl IntoIterator<Item = String>) -> Self {
         Self {
-            working: names.iter().map(|s| s.to_string()).collect(),
+            working: names.into_iter().collect(),
         }
+    }
+
+    /// The working encoders' ffmpeg names.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.working.iter().map(String::as_str)
     }
 }
 

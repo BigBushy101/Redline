@@ -8,7 +8,7 @@ use crate::settings::Settings;
 use crate::tools::convert::{Category, ConcatRequest, ConvertOptions, ConvertRequest, classify, render_stem};
 use crate::tools::ffmpeg::is_audio_target;
 use crate::tools::filters::SubSource;
-use crate::tools::hwaccel::{self, Encoders};
+use crate::tools::hwaccel::{self, Encoders, Hardware, VideoCodec};
 
 /// A file waiting to be converted.
 #[derive(Clone, Debug)]
@@ -63,6 +63,119 @@ impl ConvertItem {
         self.category == Category::Video
             && !is_audio_target(&self.target)
             && !hwaccel::codecs_for(&self.target).is_empty()
+    }
+}
+
+/// Which option groups apply to a set of files: the Convert page shows only these.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sections {
+    pub video: bool,
+    pub audio: bool,
+    pub gif: bool,
+    pub image: bool,
+    /// Video output targets, for the codec row.
+    pub video_targets: Vec<String>,
+}
+
+impl Sections {
+    pub fn of<'a>(items: impl IntoIterator<Item = &'a ConvertItem> + Clone) -> Self {
+        let has = |f: &dyn Fn(&ConvertItem) -> bool| items.clone().into_iter().any(f);
+        let is_video = |i: &ConvertItem| i.category == Category::Video;
+        Self {
+            video: has(&|i| is_video(i) && i.target != "gif" && !is_audio_target(&i.target)),
+            audio: has(&|i| i.category == Category::Audio || is_video(i) && i.target != "gif"),
+            gif: has(&|i| is_video(i) && i.target == "gif"),
+            image: has(&|i| i.category == Category::Image),
+            video_targets: items
+                .into_iter()
+                .filter(|i| i.makes_video())
+                .map(|i| i.target.clone())
+                .collect(),
+        }
+    }
+
+    /// Rotate and crop apply.
+    pub fn picture(&self) -> bool {
+        self.video || self.gif || self.image
+    }
+
+    /// Speed and loudness apply.
+    pub fn timed(&self) -> bool {
+        self.video || self.audio
+    }
+
+    fn has_webm(&self) -> bool {
+        self.video_targets.iter().any(|t| t == "webm")
+    }
+
+    fn has_mp4ish(&self) -> bool {
+        self.video_targets.iter().any(|t| t != "webm")
+    }
+
+    /// The codecs to offer: VP9 only when some file becomes WebM.
+    pub fn codecs(&self) -> Vec<VideoCodec> {
+        let mut opts = vec![VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1];
+        if self.has_webm() {
+            opts.push(VideoCodec::Vp9);
+        }
+        opts
+    }
+
+    /// `codec`, or VP9 when every video becomes WebM and `codec` is one WebM can't hold.
+    pub fn fit_codec(&self, codec: VideoCodec) -> VideoCodec {
+        if !self.has_mp4ish() && self.has_webm() && matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
+            VideoCodec::Vp9
+        } else {
+            codec
+        }
+    }
+
+    /// Small print under the codec row when some files can't use `codec`.
+    pub fn codec_notes(&self, codec: VideoCodec) -> Vec<&'static str> {
+        let mut notes = Vec::new();
+        if self.has_webm() && self.has_mp4ish() && matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
+            notes.push("WebM files use VP9");
+        }
+        if self.has_mp4ish() && codec == VideoCodec::Vp9 {
+            notes.push("MP4, MKV and MOV files use H.264");
+        }
+        notes
+    }
+}
+
+/// One line on what a codec is good for.
+pub fn codec_hint(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "Plays everywhere",
+        VideoCodec::H265 => "Smaller files, newer devices",
+        VideoCodec::Av1 => "Smallest files, slowest on CPU",
+        VideoCodec::Vp9 => "WebM only",
+    }
+}
+
+/// The encoders to offer: CPU, the GPUs that work, and the current choice if it's neither
+/// (a setting from another machine).
+pub fn encoder_choices(enc: &Encoders, current: Hardware) -> Vec<Hardware> {
+    let mut opts = vec![Hardware::Cpu];
+    opts.extend(enc.gpus());
+    if !opts.contains(&current) {
+        opts.push(current);
+    }
+    opts
+}
+
+/// The line under the encoder row.
+pub fn encoder_note(enc: &Encoders, o: &ConvertOptions) -> String {
+    if enc.gpus().is_empty() {
+        "No GPU encoder found".to_owned()
+    } else if o.hardware == Hardware::Cpu {
+        "GPU is much faster; CPU makes smaller files".to_owned()
+    } else if !enc.supports(o.codec, o.hardware) {
+        format!("{} can't encode {} here, so CPU is used", o.hardware.label(), o.codec.label())
+    } else if o.target_size_mb > 0.0 {
+        "Much faster; sizes are less exact than CPU's two passes".to_owned()
+    } else {
+        "Much faster, slightly larger files".to_owned()
     }
 }
 
@@ -185,5 +298,35 @@ mod tests {
         let JobSpec::Concat(r) = &join.spec else { panic!() };
         assert_eq!(r.inputs.len(), 2);
         assert_eq!(r.output_stem, "a (joined)");
+    }
+
+    #[test]
+    fn sections_follow_the_files() {
+        let webm = item("a.mkv", Category::Video, "webm");
+        let mp4 = item("b.mov", Category::Video, "mp4");
+        let gif = item("c.mp4", Category::Video, "gif");
+        let song = item("d.flac", Category::Audio, "mp3");
+        let pic = item("e.png", Category::Image, "jpg");
+
+        let s = Sections::of([&webm]);
+        assert!(s.video && s.audio && !s.gif && !s.image && s.picture() && s.timed());
+        assert_eq!(s.codecs().last(), Some(&VideoCodec::Vp9));
+        assert_eq!(s.fit_codec(VideoCodec::H264), VideoCodec::Vp9, "WebM can't hold H.264");
+        assert_eq!(s.fit_codec(VideoCodec::Av1), VideoCodec::Av1);
+
+        let s = Sections::of([&webm, &mp4]);
+        assert_eq!(s.fit_codec(VideoCodec::H264), VideoCodec::H264);
+        assert_eq!(s.codec_notes(VideoCodec::H265), ["WebM files use VP9"]);
+        assert_eq!(s.codec_notes(VideoCodec::Vp9), ["MP4, MKV and MOV files use H.264"]);
+
+        let s = Sections::of([&gif, &song, &pic]);
+        assert!(!s.video && s.gif && s.audio && s.image);
+        assert_eq!(s.codecs().len(), 3, "no WebM, no VP9");
+        assert!(Sections::of([&song]).timed() && !Sections::of([&song]).picture());
+
+        let enc = Encoders::default();
+        assert_eq!(encoder_choices(&enc, Hardware::Cpu), [Hardware::Cpu]);
+        assert_eq!(encoder_choices(&enc, Hardware::Amd), [Hardware::Cpu, Hardware::Amd], "keeps another machine's pick");
+        assert_eq!(encoder_note(&enc, &ConvertOptions::default()), "No GPU encoder found");
     }
 }

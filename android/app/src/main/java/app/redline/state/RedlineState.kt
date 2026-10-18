@@ -3,12 +3,16 @@ package app.redline.state
 import android.app.Application
 import android.util.Log
 import app.redline.RedlineEngine
+import app.redline.core.ConvertChoiceListsRecord
 import app.redline.core.DownloadChoiceListsRecord
+import app.redline.core.EncodersRecord
 import app.redline.core.Engine
 import app.redline.core.HistoryRecord
 import app.redline.core.JobRecord
+import app.redline.core.JobState
 import app.redline.core.SettingsRecord
 import app.redline.core.ToolsStatusRecord
+import app.redline.core.convertChoiceLists
 import app.redline.core.downloadChoiceLists
 import app.redline.work.DownloadService
 import app.redline.work.Notifications
@@ -75,6 +79,19 @@ class RedlineState(private val app: Application) {
     var choiceLists: DownloadChoiceListsRecord? = null
         private set
 
+    /** What the Convert page's pickers offer; fixed like [choiceLists]. */
+    var convertLists: ConvertChoiceListsRecord? = null
+        private set
+
+    private val _encoders = MutableStateFlow(EncodersRecord(emptyList()))
+    /** Video encoders ffmpeg can use here; CPU only until detection (at start) finishes. */
+    val encoders: StateFlow<EncodersRecord> = _encoders.asStateFlow()
+
+    /** Copies of files picked for the Convert page. */
+    val convertInputs = ConvertInputs(RedlineEngine.convertInputsDir(app))
+    /** The copies queued, failed and cancelled jobs read, as of the last refresh. */
+    private var heldByJobs: Set<String>? = null
+
     /** Set by the app's activity tracker; finished-job notifications only go out when false. */
     @Volatile var inForeground = false
 
@@ -95,7 +112,9 @@ class RedlineState(private val app: Application) {
                     YoutubeDL.init(app)
                     FFmpeg.init(app)
                     val listener = Nudge(WeakReference(this@RedlineState))
-                    RedlineEngine.start(app) { listener.changed() } to downloadChoiceLists()
+                    val engine = RedlineEngine.start(app) { listener.changed() }
+                    convertLists = convertChoiceLists()
+                    engine to downloadChoiceLists()
                 }
             }
             result.fold(
@@ -104,6 +123,7 @@ class RedlineState(private val app: Application) {
                     _status.value = EngineStatus.Ready(engine)
                     launch { refreshLoop() }
                     launch { _settings.value = onEngine { it.settings() } }
+                    launch { _encoders.value = onEngineSlow { it.detectEncoders() } }
                     refreshTools()
                 },
                 onFailure = { e ->
@@ -145,6 +165,18 @@ class RedlineState(private val app: Application) {
         snap.history?.let { _history.value = it }
         snap.announcement?.let { if (!inForeground) Notifications.finished(app, it) }
         if (snap.active > 0) DownloadService.ensureRunning(app)
+        // Copies of converted files go once their jobs are done (or removed from the list).
+        val held = snap.queue.filter { it.state !in releasing }.flatMap { it.inputs }.toSet()
+        if (held != heldByJobs) {
+            heldByJobs = held
+            scope.launch {
+                // History says whether a conversion can run again, which needs its inputs.
+                if (convertInputs.sweep(engine) > 0) {
+                    historyStale = true
+                    requestRefresh()
+                }
+            }
+        }
     }
 
     private class Snapshot(
@@ -162,6 +194,11 @@ class RedlineState(private val app: Application) {
             if (touchesHistory) historyStale = true
             requestRefresh()
         }
+    }
+
+    /** Runs [block] in the app's scope, for work that outlives a screen. */
+    fun launchDetached(block: suspend () -> Unit) {
+        scope.launch { block() }
     }
 
     /** A quick call whose result the caller needs. Throws if the core hasn't loaded. */
@@ -198,6 +235,8 @@ class RedlineState(private val app: Application) {
 
     private companion object {
         const val TAG = "Redline"
+        /** Jobs in these states don't read their inputs again. */
+        val releasing = setOf(JobState.DONE, JobState.SKIPPED)
     }
 }
 

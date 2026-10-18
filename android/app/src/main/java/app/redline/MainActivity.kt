@@ -1,11 +1,13 @@
 package app.redline
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.core.content.IntentCompat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -13,13 +15,15 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import app.redline.ui.RedlineRoot
 import app.redline.ui.Tab
+import app.redline.ui.convert.ConvertModel
 import app.redline.ui.download.DownloadModel
 import app.redline.ui.theme.RedlineTheme
 
-/** The one activity: the bottom-bar pages, and where shared links come in. */
+/** The one activity: the bottom-bar pages, and where shared links and files come in. */
 class MainActivity : ComponentActivity() {
     private val nav: NavModel by viewModels()
     private val download: DownloadModel by viewModels()
+    private val convert: ConvertModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,7 +33,7 @@ class MainActivity : ComponentActivity() {
         val state = (application as RedlineApp).state
         setContent {
             RedlineTheme {
-                RedlineRoot(state, download, nav.tab) { nav.tab = it }
+                RedlineRoot(state, download, convert, nav.tab) { nav.tab = it }
             }
         }
     }
@@ -43,6 +47,17 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent?) {
         when {
             intent == null -> Unit
+            // Videos, songs and pictures shared from the gallery, a file manager...: Convert them.
+            isMedia(intent.type) && (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) -> {
+                val uris = if (intent.action == Intent.ACTION_SEND) {
+                    listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+                } else {
+                    IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+                }
+                if (uris.isEmpty()) return
+                nav.tab = Tab.Convert
+                convert.addUris(uris)
+            }
             intent.action == Intent.ACTION_SEND && intent.type?.startsWith("text/") == true -> {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
                 nav.tab = Tab.Download
@@ -50,6 +65,12 @@ class MainActivity : ComponentActivity() {
             }
             intent.getBooleanExtra(EXTRA_OPEN_QUEUE, false) -> nav.tab = Tab.Queue
         }
+    }
+
+    /** Whether a shared item's MIME type (e.g. video/mp4) is one Convert takes. */
+    private fun isMedia(type: String?): Boolean {
+        val top = type?.substringBefore('/') ?: return false
+        return top == "audio" || top == "video" || top == "image"
     }
 
     companion object {

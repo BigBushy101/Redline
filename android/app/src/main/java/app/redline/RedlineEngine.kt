@@ -37,6 +37,7 @@ object RedlineEngine {
         return AndroidPathsRecord(
             dataDir = context.filesDir.absolutePath,
             downloadDir = downloadDir.absolutePath,
+            convertDir = defaultConvertDir(context).absolutePath,
             python = File(nativeLibs, "libpython.so").absolutePath,
             ytdlpScript = File(base, "yt-dlp/yt-dlp").absolutePath,
             jsRuntimeName = "quickjs",
@@ -53,6 +54,13 @@ object RedlineEngine {
      */
     fun defaultDownloadDir(context: Context): File =
         File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, "Redline")
+
+    /** Converted files: ffmpeg needs a real folder, so the app's own, beside the downloads. */
+    fun defaultConvertDir(context: Context): File =
+        File(context.getExternalFilesDir(null) ?: context.filesDir, "Converted")
+
+    /** Where picked and shared files are copied for ffmpeg; each copy gets a folder of its own. */
+    fun convertInputsDir(context: Context): File = File(context.cacheDir, "convert-inputs")
 
     /**
      * Starts the engine. Keep one per process (e.g. in the Application): a second would run the

@@ -65,6 +65,8 @@ sealed interface QueueAction {
     data class RetryAnyway(val id: ULong) : QueueAction
     data class Remove(val id: ULong) : QueueAction
     data class Open(val path: String) : QueueAction
+    /** Add a finished file to the Convert page. */
+    data class Convert(val path: String) : QueueAction
     data object ClearFinished : QueueAction
     data object CancelAll : QueueAction
 }
@@ -86,7 +88,7 @@ fun QueueScreen(jobs: List<JobRecord>, onAction: (QueueAction) -> Unit, findSome
             EmptyState(
                 Icons.AutoMirrored.Rounded.QueueMusic,
                 "Your queue is empty",
-                "Downloads you start will show up here.",
+                "Downloads and conversions you start will show up here.",
             ) { PillButton("Find something to download", findSomething) }
         }
         return
@@ -231,7 +233,10 @@ private fun Actions(job: JobRecord, onAction: (QueueAction) -> Unit) {
                 button(Icons.Rounded.Refresh, "Retry", QueueAction.Retry(job.id))
                 button(Icons.Rounded.Delete, "Remove from list", QueueAction.Remove(job.id))
             }
-            JobState.DONE -> button(Icons.Rounded.Delete, "Remove from list", QueueAction.Remove(job.id))
+            JobState.DONE -> {
+                job.outputPath?.takeIf { !File(it).isDirectory }?.let { button(Icons.Rounded.SwapHoriz, "Convert", QueueAction.Convert(it)) }
+                button(Icons.Rounded.Delete, "Remove from list", QueueAction.Remove(job.id))
+            }
         }
     }
 }

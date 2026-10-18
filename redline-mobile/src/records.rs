@@ -11,10 +11,13 @@ use redline_core::history::HistoryEntry;
 use redline_core::jobs::{Job, JobSpec, JobStatus};
 use redline_core::queue_watch;
 use redline_core::settings::Settings;
+use redline_core::tools::filters::SubSource;
 use redline_core::tools::ytdlp::{
     self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DEFAULT_SUB_LANGS, DownloadOptions, FormatInfo,
     MediaInfo, Mode, NetworkOptions, PlaylistItem, SubsMode, Tags, Trim, VIDEO_QUALITIES,
 };
+
+use crate::convert::{ConvertSettingsRecord, apply_convert_settings, convert_settings_record};
 
 fn path_string(p: &Path) -> String {
     p.to_string_lossy().into_owned()
@@ -28,6 +31,9 @@ pub struct AndroidPathsRecord {
     pub data_dir: String,
     /// Where downloads go until the user picks another folder.
     pub download_dir: String,
+    /// Where converted files go. ffmpeg needs a real folder, so it's the app's own; used when
+    /// the settings don't name one yet.
+    pub convert_dir: String,
     /// `<nativeLibraryDir>/libpython.so`.
     pub python: String,
     /// `<noBackupFilesDir>/youtubedl-android/yt-dlp/yt-dlp`.
@@ -509,12 +515,35 @@ pub struct JobRecord {
     pub is_download: bool,
     /// Scheduled start, Unix seconds.
     pub not_before: Option<i64>,
+    /// The files a conversion reads; empty for downloads.
+    pub inputs: Vec<String>,
+}
+
+/// The desktop's text with its icon-font glyphs swapped for plain characters: the core words
+/// conversions "MKV <arrow> MP4" with Phosphor's arrow, which Android's fonts don't have.
+pub fn plain_text(s: &str) -> String {
+    s.replace(redline_core::format::ARROW_RIGHT, "\u{2192}")
 }
 
 fn job_url(spec: &JobSpec) -> Option<String> {
     match spec {
         JobSpec::Download(r) => Some(r.url.clone()),
         _ => None,
+    }
+}
+
+/// The files a job converts or joins, with a subtitle file it burns in.
+pub fn job_inputs(spec: &JobSpec) -> Vec<PathBuf> {
+    match spec {
+        JobSpec::Download(_) => Vec::new(),
+        JobSpec::Convert(r) => {
+            let mut files = vec![r.input.clone()];
+            if let Some(SubSource::File(f)) = &r.burn_subs {
+                files.push(f.clone());
+            }
+            files
+        }
+        JobSpec::Concat(r) => r.inputs.clone(),
     }
 }
 
@@ -543,7 +572,7 @@ pub fn job_record(job: &Job) -> JobRecord {
     JobRecord {
         id: job.id,
         title: job.title.clone(),
-        subtitle: job.subtitle.clone(),
+        subtitle: plain_text(&job.subtitle),
         state: job_state(&job.status),
         progress,
         detail,
@@ -553,6 +582,7 @@ pub fn job_record(job: &Job) -> JobRecord {
         url: job_url(&job.spec),
         is_download: job.is_download(),
         not_before: job.not_before,
+        inputs: job_inputs(&job.spec).iter().map(|p| path_string(p)).collect(),
     }
 }
 
@@ -615,18 +645,23 @@ pub struct HistoryRecord {
     /// Unix seconds.
     pub finished_at: i64,
     pub is_download: bool,
+    /// Whether "download/convert again" can work: always for downloads, and for conversions
+    /// while every input is still there (Android's copies of picked files are deleted once
+    /// converted).
+    pub can_repeat: bool,
 }
 
 pub fn history_record(index: usize, e: &HistoryEntry) -> HistoryRecord {
     HistoryRecord {
         index: index as u32,
         title: e.title.clone(),
-        subtitle: e.subtitle.clone(),
+        subtitle: plain_text(&e.subtitle),
         url: e.url().map(str::to_owned),
         output_path: e.output.as_deref().map(path_string),
         output_exists: e.output.as_deref().is_some_and(Path::exists),
         finished_at: e.finished_at,
         is_download: matches!(e.spec, JobSpec::Download(_)),
+        can_repeat: job_inputs(&e.spec).iter().all(|p| p.exists()),
     }
 }
 
@@ -645,8 +680,8 @@ pub struct NetworkRecord {
     pub retries: u32,
 }
 
-/// The settings the Download, Queue and Settings pages use. Fields for later slices
-/// (conversion, player, saved music) stay as they are when this is written back.
+/// The settings the Download, Convert, Queue and Settings pages use. Fields for later slices
+/// (player, saved music) stay as they are when this is written back.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct SettingsRecord {
     pub download_dir: String,
@@ -659,6 +694,8 @@ pub struct SettingsRecord {
     /// The Download page's remembered choices.
     pub download: DownloadOptionsRecord,
     pub network: NetworkRecord,
+    /// The Convert page's shared options, presets, file names and folder.
+    pub convert: ConvertSettingsRecord,
 }
 
 pub const MAX_CONCURRENCY: u32 = 6;
@@ -676,6 +713,7 @@ pub fn settings_record(s: &Settings) -> SettingsRecord {
             rate_limit: s.network.rate_limit.clone(),
             retries: s.network.retries,
         },
+        convert: convert_settings_record(s),
     }
 }
 
@@ -695,6 +733,7 @@ pub fn apply_settings(r: &SettingsRecord, s: &mut Settings) {
         retries: r.network.retries,
         ..s.network.clone()
     };
+    apply_convert_settings(&r.convert, s);
 }
 
 #[cfg(test)]
@@ -828,6 +867,38 @@ mod tests {
         assert_eq!(r.output_path, Some(path_string(&out)));
         assert_eq!(r.output_dir, Some("dl".to_owned()));
         assert!(!r.state.is_active());
+    }
+
+    #[test]
+    fn icon_glyphs_become_plain_text() {
+        let s = format!("MKV {} MP4", redline_core::format::ARROW_RIGHT);
+        assert_eq!(plain_text(&s), "MKV \u{2192} MP4");
+    }
+
+    #[test]
+    fn conversions_list_what_they_read() {
+        use redline_core::tools::convert::{ConcatRequest, ConvertRequest};
+        let convert = JobSpec::Convert(ConvertRequest {
+            input: "/in/1/a.mkv".into(),
+            burn_subs: Some(SubSource::File("/in/2/a.srt".into())),
+            ..Default::default()
+        });
+        assert_eq!(job_inputs(&convert), [PathBuf::from("/in/1/a.mkv"), PathBuf::from("/in/2/a.srt")]);
+        let join = JobSpec::Concat(ConcatRequest { inputs: vec!["/a.mp3".into(), "/b.mp3".into()], ..Default::default() });
+        assert_eq!(job_inputs(&join).len(), 2);
+        assert!(job_inputs(&JobSpec::Download(DownloadRequest::default())).is_empty());
+
+        let mut m = redline_core::jobs::JobManager::new();
+        m.push("a.mkv".into(), "MKV → MP4".into(), convert);
+        let entry = HistoryEntry {
+            title: "a.mkv".into(),
+            subtitle: String::new(),
+            spec: m.jobs[0].spec.clone(),
+            output: None,
+            finished_at: 0,
+        };
+        assert!(!history_record(0, &entry).can_repeat, "the copied input is gone");
+        assert_eq!(job_record(&m.jobs[0]).inputs.len(), 2);
     }
 
     #[test]

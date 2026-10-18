@@ -3,17 +3,22 @@
 //! something changed. Kotlin then pulls snapshots; nothing is pushed across but the nudge.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use redline_core::convert_plan;
 use redline_core::history::History;
 use redline_core::jobs::{JobManager, JobSpec, JobStatus};
 use redline_core::settings::Settings;
-use redline_core::tools::ToolPaths;
+use redline_core::tools::convert::Category;
+use redline_core::tools::hwaccel::{self, Encoders};
 use redline_core::tools::install;
+use redline_core::tools::{ToolPaths, ffmpeg};
 use redline_core::tools::ytdlp::{self, MediaInfo};
 
+use crate::convert::*;
 use crate::error::RedlineError;
 use crate::records::*;
 
@@ -45,6 +50,8 @@ struct State {
     lookups: VecDeque<(String, MediaInfo)>,
     /// Jobs that ended and haven't been drained.
     finished: Vec<FinishedRecord>,
+    /// Video encoders that work here (CPU only until `detect_encoders`).
+    encoders: Encoders,
 }
 
 impl State {
@@ -191,7 +198,7 @@ impl Engine {
     #[uniffi::constructor]
     pub fn new(paths: AndroidPathsRecord, listener: Arc<dyn EngineListener>) -> Result<Arc<Self>, RedlineError> {
         let tools = init(&paths).map_err(|e| RedlineError::Invalid(format!("{e:#}")))?;
-        Ok(Self::start(tools, listener))
+        Ok(Self::start(tools, listener, Some(PathBuf::from(&paths.convert_dir))))
     }
 
     /// Which tools Redline found and their readiness. Blocks while `yt-dlp --version` runs.
@@ -339,6 +346,78 @@ impl Engine {
         Ok(id)
     }
 
+    /// Finds the video encoders ffmpeg can use (the desktop does this at start). Blocks while
+    /// ffmpeg lists them. Until it has run, conversions use the CPU.
+    pub fn detect_encoders(&self) -> EncodersRecord {
+        let Some(ffmpeg) = self.state().tools.ffmpeg.clone() else {
+            return EncodersRecord::default();
+        };
+        let found = hwaccel::detect(&ffmpeg);
+        let record = EncodersRecord::from(&found);
+        self.state().encoders = found;
+        record
+    }
+
+    /// Reads files for the Convert page: their kind, size and (with ffprobe) length. Blocks
+    /// while ffprobe runs, once per video or audio file. Unsupported files come back by name.
+    pub fn convert_files(&self, paths: Vec<String>) -> ConvertFilesRecord {
+        let ffprobe = self.state().tools.ffprobe.clone();
+        convert_files(paths, |p| ffprobe.as_deref().and_then(|f| ffmpeg::probe_duration(f, p)))
+    }
+
+    /// Queues one conversion per file, in list order, as the desktop's Convert button does.
+    /// Returns the jobs' ids.
+    pub fn queue_conversions(&self, items: Vec<ConvertItemRecord>) -> Result<Vec<u64>, RedlineError> {
+        let ids = {
+            let mut st = self.state();
+            let files = convert_jobs_allowed(&st.tools, &items)?;
+            let jobs = convert_plan::requests(files, &st.settings, &st.encoders);
+            let mut ids = Vec::new();
+            for job in jobs {
+                st.jobs.push(job.title, job.subtitle, job.spec);
+                ids.extend(st.jobs.jobs.last().map(|j| j.id));
+            }
+            ids
+        };
+        self.shared.signal.poke();
+        Ok(ids)
+    }
+
+    /// "Join into one": one job playing the files one after another, in list order, in the
+    /// format [`convert_join_target`] names. Returns the job's id.
+    pub fn queue_join(&self, items: Vec<ConvertItemRecord>) -> Result<u64, RedlineError> {
+        let target = convert_join_target(items.clone())
+            .ok_or_else(|| RedlineError::Invalid("These files can't be joined into one.".into()))?;
+        let id = {
+            let mut st = self.state();
+            let files = convert_jobs_allowed(&st.tools, &items)?;
+            let job = convert_plan::join_request(files, &target, &st.settings, &st.encoders);
+            st.jobs.push(job.title, job.subtitle, job.spec);
+            st.jobs.jobs.last().map_or(0, |j| j.id)
+        };
+        self.shared.signal.poke();
+        Ok(id)
+    }
+
+    /// Deletes the folders under `root` whose files nothing needs any more: not in `keep` (the
+    /// Convert page's files and copies under way) and not read by a queued, running, failed or
+    /// cancelled job (those can still run). Returns how many it deleted.
+    pub fn sweep_convert_inputs(&self, root: String, keep: Vec<String>) -> u32 {
+        let mut in_use: Vec<PathBuf> = keep.into_iter().map(PathBuf::from).collect();
+        for job in &self.state().jobs.jobs {
+            if !matches!(job.status, JobStatus::Done(_) | JobStatus::Skipped(_)) {
+                in_use.extend(job_inputs(&job.spec));
+            }
+        }
+        let dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+            .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
+            .unwrap_or_default();
+        stale_input_dirs(&dirs, &in_use)
+            .into_iter()
+            .filter(|d| std::fs::remove_dir_all(d).is_ok())
+            .count() as u32
+    }
+
     pub fn settings(&self) -> SettingsRecord {
         settings_record(&self.state().settings)
     }
@@ -351,22 +430,28 @@ impl Engine {
 
 impl Engine {
     /// Starts the engine with `tools` (the constructor's, or fakes in tests). Expects the app's
-    /// folders to be set already.
-    fn start(tools: ToolPaths, listener: Arc<dyn EngineListener>) -> Arc<Self> {
+    /// folders to be set already. `convert_dir` is where conversions go when the settings don't
+    /// say (the desktop's "next to the original" would be the app's cache on Android).
+    fn start(tools: ToolPaths, listener: Arc<dyn EngineListener>, convert_dir: Option<PathBuf>) -> Arc<Self> {
         let signal = Arc::new(Signal::default());
         let mut jobs = JobManager::load();
         let poke = signal.clone();
         jobs.set_wake(Arc::new(move || poke.poke()));
-        let settings = Settings::load();
+        let loaded = Settings::load();
+        let mut settings = loaded.clone();
+        if settings.convert_dir.is_none() {
+            settings.convert_dir = convert_dir;
+        }
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
-                saved_settings: settings.clone(),
+                saved_settings: loaded,
                 settings,
                 tools,
                 jobs,
                 history: History::load(),
                 lookups: VecDeque::new(),
                 finished: Vec::new(),
+                encoders: Encoders::default(),
             }),
             signal,
             listener,
@@ -388,6 +473,22 @@ impl Engine {
         f(&mut self.state());
         self.shared.signal.poke();
     }
+}
+
+/// The files to convert, if the tools are there for them: images convert in-process, video and
+/// audio need ffmpeg (the desktop greys its buttons out instead).
+fn convert_jobs_allowed(
+    tools: &ToolPaths,
+    items: &[ConvertItemRecord],
+) -> Result<Vec<convert_plan::ConvertItem>, RedlineError> {
+    if items.is_empty() {
+        return Err(RedlineError::Invalid("Add files to convert first.".into()));
+    }
+    let files: Vec<_> = items.iter().map(ConvertItemRecord::to_core).collect();
+    if files.iter().any(|f| f.category != Category::Image) && !tools.ready_for_convert() {
+        return Err(RedlineError::ToolsMissing("Converting video and audio needs ffmpeg.".into()));
+    }
+    Ok(files)
 }
 
 impl Drop for Engine {
@@ -472,7 +573,7 @@ mod tests {
         let missing = dir.join("no-such-tool");
         let tools = ToolPaths { ytdlp: Some(missing.clone()), ffmpeg: Some(missing.clone()), ffprobe: Some(missing), ..Default::default() };
         let listener = Arc::new(Counter::default());
-        let engine = Engine::start(tools, listener.clone());
+        let engine = Engine::start(tools, listener.clone(), Some(dir.join("converted")));
         wait_for("the first snapshot nudge", || listener.0.load(Ordering::SeqCst) > 0);
 
         let mut settings = engine.settings();
@@ -510,8 +611,41 @@ mod tests {
         assert!(engine.queue_snapshot().iter().all(|j| j.id != id));
         assert!(matches!(engine.download_again(99), Err(RedlineError::Invalid(_))));
 
+        // Converting: a copied input in a folder of its own, as the app makes them.
+        let inputs = dir.join("convert-inputs");
+        let (used, unused) = (inputs.join("1"), inputs.join("2"));
+        std::fs::create_dir_all(&used).unwrap();
+        std::fs::create_dir_all(&unused).unwrap();
+        let clip = used.join("clip.mkv");
+        std::fs::write(&clip, b"not really a video").unwrap();
+        let files = engine.convert_files(vec![clip.to_string_lossy().into_owned()]);
+        assert_eq!(files.items.len(), 1);
+        assert_eq!(files.items[0].duration_secs, None, "ffprobe isn't there");
+        assert_eq!(engine.settings().convert.convert_dir, Some(dir.join("converted").to_string_lossy().into_owned()));
+
+        assert!(matches!(engine.queue_conversions(vec![]), Err(RedlineError::Invalid(_))));
+        assert!(matches!(engine.queue_join(files.items.clone()), Err(RedlineError::Invalid(_))), "one file can't be joined");
+        let ids = engine.queue_conversions(files.items.clone()).unwrap();
+        assert_eq!(ids.len(), 1);
+        wait_for("the conversion to fail", || {
+            engine.queue_snapshot().iter().any(|j| j.id == ids[0] && j.state == JobState::Failed)
+        });
+        let job = engine.queue_snapshot().into_iter().find(|j| j.id == ids[0]).unwrap();
+        assert_eq!(job.inputs, files.items.iter().map(|i| i.path.clone()).collect::<Vec<_>>());
+        assert!(!job.is_download);
+
+        let root = inputs.to_string_lossy().into_owned();
+        assert_eq!(engine.sweep_convert_inputs(root.clone(), vec![]), 1, "the failed job can be retried");
+        assert!(used.exists() && !unused.exists());
+        engine.remove(ids[0]);
+        assert_eq!(engine.sweep_convert_inputs(root.clone(), vec![clip.to_string_lossy().into_owned()]), 0, "still on the page");
+        assert_eq!(engine.sweep_convert_inputs(root, vec![]), 1);
+        assert!(!used.exists());
+        assert!(engine.detect_encoders().working.is_empty(), "no ffmpeg to ask");
+
         drop(engine);
         let saved = std::fs::read_to_string(dir.join("data").join("settings.json")).unwrap();
         assert!(saved.contains("\"concurrency\": 3"), "settings saved");
+        assert!(saved.contains("converted"), "the conversions folder is saved");
     }
 }
