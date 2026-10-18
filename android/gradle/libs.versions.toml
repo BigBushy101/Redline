@@ -6,7 +6,14 @@ composeBom = "2026.09.00"
 activityCompose = "1.13.0"
 lifecycle = "2.11.0"
 coroutines = "1.11.0"
+coreKtx = "1.19.1"
+# Coil 3 loads the lookup's thumbnail; its OkHttp module does the network fetch.
+coil = "3.6.3"
+# Frozen at 1.7.8 upstream (no longer in the Compose BOM); the extended set covers our nav/actions.
+materialIcons = "1.7.8"
 youtubedl = "0.18.1"
+# UniFFI's generated Kotlin calls the Rust core through JNA.
+jna = "5.19.1"
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -16,9 +23,14 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended", version.ref = "materialIcons" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 youtubedl-library = { group = "io.github.junkfood02.youtubedl-android", name = "library", version.ref = "youtubedl" }
 youtubedl-ffmpeg = { group = "io.github.junkfood02.youtubedl-android", name = "ffmpeg", version.ref = "youtubedl" }
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

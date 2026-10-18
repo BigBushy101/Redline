@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "redline-core"]
+members = [".", "redline-core", "redline-mobile"]
 
 [package]
 name = "redline"

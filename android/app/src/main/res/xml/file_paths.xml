@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Downloads live in the app's external files dir (RedlineEngine.defaultDownloadDir), or under
+     filesDir/Redline when there's no external storage. -->
+<paths>
+    <external-files-path name="downloads" path="." />
+    <files-path name="internal_downloads" path="Redline/" />
+</paths>

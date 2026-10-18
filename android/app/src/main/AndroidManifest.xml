@@ -2,9 +2,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Downloads keep running in a foreground service while the app is in the background. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- The "jobs finished" notification and the progress notification (asked at runtime on 13+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- A partial wake lock while jobs run: the service alone doesn't stop the CPU sleeping. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- extractNativeLibs: youtubedl-android executes its bundled python/ffmpeg from disk. -->
     <application
+        android:name=".RedlineApp"
         android:allowBackup="true"
         android:extractNativeLibs="true"
         android:label="@string/app_name"
@@ -13,11 +21,34 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- "Share" a link from YouTube, SoundCloud, a browser... prefills the Download page. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
+
+        <service
+            android:name=".work.DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Hands finished downloads to other apps (open/play) as content:// links. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

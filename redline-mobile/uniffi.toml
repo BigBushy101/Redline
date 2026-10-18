@@ -1,0 +1,3 @@
+[bindings.kotlin]
+# Where the generated Kotlin lives (instead of the default `uniffi.redline_mobile`).
+package_name = "app.redline.core"

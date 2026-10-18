@@ -1,0 +1,25 @@
+[package]
+name = "redline-mobile"
+version = "0.1.0"
+edition = "2024"
+description = "redline-core for the Android app, exported to Kotlin through UniFFI"
+
+[lib]
+name = "redline_mobile"
+# cdylib is what the APK loads; lib lets the bindgen binary and tests link it.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Generates the Kotlin bindings from a built library (`generate --library ...`). Behind the
+# `cli` feature so the Android library doesn't carry the generator.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+redline-core = { path = "../redline-core" }
+uniffi = "0.32.2"
+anyhow = "1"

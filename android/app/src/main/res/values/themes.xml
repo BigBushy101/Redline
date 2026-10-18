@@ -1,4 +1,8 @@
 <resources>
-    <!-- Compose draws everything; this only covers the window before the first frame. -->
-    <style name="Theme.Redline" parent="android:Theme.Material.NoActionBar" />
+    <!-- Compose draws everything; this only covers the window before the first frame
+         (Redline's dark background instead of a white flash). -->
+    <style name="Theme.Redline" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/redline_bg</item>
+        <item name="android:colorAccent">@color/redline_accent</item>
+    </style>
 </resources>
