@@ -2,8 +2,8 @@
 //! generated Kotlin (package `app.redline.core`): blocking calls for lookups and updates,
 //! snapshots for the queue and history, and an [`EngineListener`] nudge when they change.
 //!
-//! This slice covers downloading, converting and the queue. The library, the player and saved
-//! music follow as more `Engine` methods and `*Record` types in the same style.
+//! This slice covers downloading, converting, the queue, and the player with its playlists
+//! ([`Music`], from `Engine::music`). Saved music follows in the same style.
 
 uniffi::setup_scaffolding!();
 
@@ -11,10 +11,12 @@ mod convert;
 mod engine;
 mod error;
 mod format;
+mod music;
 mod records;
 
 pub use convert::*;
 pub use engine::{Engine, EngineListener};
 pub use error::RedlineError;
 pub use format::*;
+pub use music::{Music, MusicListener};
 pub use records::*;

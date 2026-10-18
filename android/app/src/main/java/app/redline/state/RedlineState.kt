@@ -79,6 +79,11 @@ class RedlineState(private val app: Application) {
     var choiceLists: DownloadChoiceListsRecord? = null
         private set
 
+    /** The player and playlists; set just before [status] turns Ready. */
+    var music: MusicState? = null
+        private set
+    @Volatile private var musicCore: app.redline.core.Music? = null
+
     /** What the Convert page's pickers offer; fixed like [choiceLists]. */
     var convertLists: ConvertChoiceListsRecord? = null
         private set
@@ -114,12 +119,15 @@ class RedlineState(private val app: Application) {
                     val listener = Nudge(WeakReference(this@RedlineState))
                     val engine = RedlineEngine.start(app) { listener.changed() }
                     convertLists = convertChoiceLists()
+                    // Loads the playlists and opens the audio output's thread; one per engine.
+                    musicCore = engine.music(MusicNudge(WeakReference(this@RedlineState)))
                     engine to downloadChoiceLists()
                 }
             }
             result.fold(
                 onSuccess = { (engine, lists) ->
                     choiceLists = lists
+                    music = musicCore?.let { MusicState(app, it) }
                     _status.value = EngineStatus.Ready(engine)
                     launch { refreshLoop() }
                     launch { _settings.value = onEngine { it.settings() } }

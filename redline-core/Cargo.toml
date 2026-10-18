@@ -12,7 +12,6 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "tga", "qoi", "avif"] }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-cpal = "0.18.2"
 rtrb = "0.4.0"
 
 # Desktop integration. Android hands Redline its folders and does the rest in Kotlin.
@@ -21,6 +20,12 @@ directories = "6"
 open = "5"
 trash = "5"
 notify-rust = "4"
+# The player's sound output. Android's goes straight to AAudio instead.
+cpal = "0.18.2"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# AAudio for the player's output (see player/aaudio.rs); the version cpal would use.
+ndk = { version = "0.9", default-features = false, features = ["audio", "api-level-26"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows media keys and the media overlay (SMTC)

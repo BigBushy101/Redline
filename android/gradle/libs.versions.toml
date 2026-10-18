@@ -14,6 +14,8 @@ materialIcons = "1.7.8"
 youtubedl = "0.18.1"
 # UniFFI's generated Kotlin calls the Rust core through JNA.
 jna = "5.19.1"
+# MediaSessionCompat and the MediaStyle notification for background playback.
+media = "1.8.0"
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -31,6 +33,7 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 youtubedl-library = { group = "io.github.junkfood02.youtubedl-android", name = "library", version.ref = "youtubedl" }
 youtubedl-ffmpeg = { group = "io.github.junkfood02.youtubedl-android", name = "ffmpeg", version.ref = "youtubedl" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+androidx-media = { group = "androidx.media", name = "media", version.ref = "media" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

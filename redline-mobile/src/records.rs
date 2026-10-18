@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 
 use redline_core::download_plan::LinkChoices;
 use redline_core::format::starts_at;
-use redline_core::history::HistoryEntry;
+use redline_core::history::{History, HistoryEntry};
 use redline_core::jobs::{Job, JobSpec, JobStatus};
+use redline_core::library::{self, NowPlaying, Playlist, Repeat, Track};
+use redline_core::player::dsp::{self, EqSettings};
+use redline_core::player::{PlayerSettings, PlayerState, Source, Status};
 use redline_core::queue_watch;
 use redline_core::settings::Settings;
+use redline_core::tools::convert::{Category, classify};
 use redline_core::tools::filters::SubSource;
 use redline_core::tools::ytdlp::{
     self, AUDIO_BITRATES, AUDIO_FORMATS, CONTAINERS, DEFAULT_SUB_LANGS, DownloadOptions, FormatInfo,
@@ -736,6 +740,373 @@ pub fn apply_settings(r: &SettingsRecord, s: &mut Settings) {
     apply_convert_settings(&r.convert, s);
 }
 
+// ---- Music ------------------------------------------------------------------------------
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackKind {
+    /// A page link (YouTube, SoundCloud…), streamed through yt-dlp when played.
+    Link,
+    /// A file on the device.
+    File,
+}
+
+/// A playlist or queue entry. Goes back to Rust as it came (`offline` and `platform` are
+/// worked out again there).
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct TrackRecord {
+    pub kind: TrackKind,
+    /// The link, or the file's path.
+    pub location: String,
+    pub title: String,
+    pub artist: Option<String>,
+    pub duration_secs: Option<f64>,
+    /// Image URL.
+    pub thumbnail: Option<String>,
+    /// When it was added, Unix seconds.
+    pub added_at: i64,
+    /// The site a link is from ("YouTube"); `None` for files.
+    pub platform: Option<String>,
+    /// A link History has a downloaded copy of, which is what plays.
+    pub offline: bool,
+}
+
+pub fn track_record(t: &Track, history: &History) -> TrackRecord {
+    let (kind, location) = match &t.source {
+        Source::Link(url) => (TrackKind::Link, url.clone()),
+        Source::Local(p) => (TrackKind::File, path_string(p)),
+    };
+    TrackRecord {
+        kind,
+        location,
+        title: t.title.clone(),
+        artist: t.artist.clone(),
+        duration_secs: t.duration,
+        thumbnail: t.thumbnail.clone(),
+        added_at: t.added_at,
+        platform: t.platform().map(|p| p.label().to_owned()),
+        offline: t.is_link() && matches!(library::playable_source(t, history), Source::Local(_)),
+    }
+}
+
+impl TrackRecord {
+    pub fn to_core(&self) -> Track {
+        Track {
+            source: match self.kind {
+                TrackKind::Link => Source::Link(self.location.trim().to_owned()),
+                TrackKind::File => Source::Local(PathBuf::from(&self.location)),
+            },
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            duration: self.duration_secs,
+            thumbnail: self.thumbnail.clone(),
+            added_at: self.added_at,
+        }
+    }
+}
+
+/// The track a History row stands for, as the desktop adds it to playlists: a download's link
+/// (which plays its file while that's there), or a conversion's output while it exists.
+pub fn history_track(entry: &HistoryEntry) -> Option<Track> {
+    let output = entry.output.as_deref().filter(|p| playable_file(p));
+    let source = match (entry.url(), output) {
+        (Some(url), _) => Source::Link(url.to_owned()),
+        (None, Some(p)) => Source::Local(p.to_path_buf()),
+        _ => return None,
+    };
+    let title = match &entry.spec {
+        JobSpec::Download(_) => entry.title.clone(),
+        _ => source.label(),
+    };
+    Some(Track::new(source, title))
+}
+
+/// An audio or video file that's there to play.
+pub fn playable_file(p: &Path) -> bool {
+    p.is_file() && matches!(classify(p), Some(Category::Audio | Category::Video))
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct PlaylistSummaryRecord {
+    pub id: u64,
+    pub name: String,
+    pub track_count: u32,
+    /// Of the tracks whose length is known.
+    pub duration_secs: f64,
+    /// The first track's picture that has one, for the cover.
+    pub thumbnail: Option<String>,
+}
+
+pub fn playlist_summary(p: &Playlist) -> PlaylistSummaryRecord {
+    PlaylistSummaryRecord {
+        id: p.id,
+        name: p.name.clone(),
+        track_count: p.tracks.len() as u32,
+        duration_secs: p.duration(),
+        thumbnail: p.tracks.iter().find_map(|t| t.thumbnail.clone()),
+    }
+}
+
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct PlaylistRecord {
+    pub id: u64,
+    pub name: String,
+    pub duration_secs: f64,
+    /// In playlist order; their positions are what `remove_track`/`move_track` take.
+    pub tracks: Vec<TrackRecord>,
+}
+
+pub fn playlist_record(p: &Playlist, history: &History) -> PlaylistRecord {
+    PlaylistRecord {
+        id: p.id,
+        name: p.name.clone(),
+        duration_secs: p.duration(),
+        tracks: p.tracks.iter().map(|t| track_record(t, history)).collect(),
+    }
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerStatus {
+    /// Nothing loaded.
+    Idle,
+    /// Looking the track up or waiting for its first audio.
+    Loading,
+    Playing,
+    Paused,
+    /// Played to the end with nothing after it.
+    Ended,
+    /// See [`PlayerSnapshotRecord::error`].
+    Error,
+}
+
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatMode {
+    Off,
+    /// Back to the top after the last track.
+    All,
+    /// The current track again, until Next is pressed.
+    One,
+}
+
+impl From<Repeat> for RepeatMode {
+    fn from(r: Repeat) -> Self {
+        match r {
+            Repeat::Off => Self::Off,
+            Repeat::All => Self::All,
+            Repeat::One => Self::One,
+        }
+    }
+}
+
+impl From<RepeatMode> for Repeat {
+    fn from(r: RepeatMode) -> Self {
+        match r {
+            RepeatMode::Off => Self::Off,
+            RepeatMode::All => Self::All,
+            RepeatMode::One => Self::One,
+        }
+    }
+}
+
+/// The player bar: what's playing, where it is, and the queue's shape.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct PlayerSnapshotRecord {
+    pub status: PlayerStatus,
+    /// Why it stopped, when `status` is `Error`.
+    pub error: Option<String>,
+    /// The tags once the track is looked up; the queue's title (or the file name) until then.
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Image URL or file path.
+    pub thumbnail: Option<String>,
+    pub position_secs: f64,
+    pub duration_secs: Option<f64>,
+    /// Waiting on the network or the decoder; nothing is heard.
+    pub buffering: bool,
+    /// Playing or about to (loading), as the play/pause button shows it.
+    pub is_playing: bool,
+    pub has_next: bool,
+    pub has_prev: bool,
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
+    /// The current track's [`QueueTrackRecord::index`].
+    pub queue_index: Option<u32>,
+    /// Where the current track is in play order, from 0 ("3 of 10").
+    pub queue_position: Option<u32>,
+    pub queue_length: u32,
+    /// The playlist the queue was started from.
+    pub playlist_id: Option<u64>,
+    /// Streaming a link (rather than a file, or a link's downloaded copy).
+    pub is_link: bool,
+    /// Counts loads, so one track's `Ended` can be told from the next's.
+    pub load_id: u64,
+    /// Changes whenever the queue's tracks, order or current track do; fetch `queue()` again
+    /// only then.
+    pub queue_version: u64,
+}
+
+pub fn player_snapshot(st: &PlayerState, now: &NowPlaying, queue_version: u64) -> PlayerSnapshotRecord {
+    let current = now.current();
+    let track = st.track.as_ref();
+    let current_index = now.current_index();
+    let label = st.source.as_ref().map(Source::label);
+    PlayerSnapshotRecord {
+        status: match st.status {
+            Status::Idle => PlayerStatus::Idle,
+            Status::Loading => PlayerStatus::Loading,
+            Status::Playing => PlayerStatus::Playing,
+            Status::Paused => PlayerStatus::Paused,
+            Status::Ended => PlayerStatus::Ended,
+            Status::Error(_) => PlayerStatus::Error,
+        },
+        error: match &st.status {
+            Status::Error(e) => Some(e.clone()),
+            _ => None,
+        },
+        // Until a track is looked up the player calls it by its URL or file name, and the
+        // queue knows better.
+        title: match (track, current) {
+            (Some(t), Some(c)) if Some(&t.title) == label.as_ref() => Some(c.title.clone()),
+            (Some(t), _) => Some(t.title.clone()),
+            (None, c) => c.map(|c| c.title.clone()),
+        },
+        artist: track.and_then(|t| t.artist.clone()).or_else(|| current.and_then(|t| t.artist.clone())),
+        album: track.and_then(|t| t.album.clone()),
+        thumbnail: track
+            .and_then(|t| t.thumbnail.clone())
+            .or_else(|| current.and_then(|t| t.thumbnail.clone())),
+        position_secs: st.position,
+        duration_secs: st.duration.or_else(|| current.and_then(|t| t.duration)),
+        buffering: st.buffering,
+        is_playing: st.is_playing(),
+        has_next: now.has_next(),
+        has_prev: now.has_prev(),
+        shuffle: now.shuffle,
+        repeat: now.repeat.into(),
+        queue_index: current_index.map(|i| i as u32),
+        queue_position: current_index.and_then(|c| now.in_order().position(|(i, _)| i == c)).map(|p| p as u32),
+        queue_length: now.tracks.len() as u32,
+        playlist_id: now.playlist,
+        is_link: matches!(st.source, Some(Source::Link(_))),
+        load_id: st.load_id,
+        queue_version,
+    }
+}
+
+/// One row of Now playing.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct QueueTrackRecord {
+    /// What `jump` and `remove_from_queue` take. Stays put when shuffle reorders the queue.
+    pub index: u32,
+    pub track: TrackRecord,
+    pub is_current: bool,
+}
+
+/// Now playing in play order.
+pub fn queue_records(now: &NowPlaying, history: &History) -> Vec<QueueTrackRecord> {
+    let current = now.current_index();
+    now.in_order()
+        .map(|(i, t)| QueueTrackRecord { index: i as u32, track: track_record(t, history), is_current: current == Some(i) })
+        .collect()
+}
+
+/// The equalizer, as the desktop's EQ panel edits it.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct EqRecord {
+    /// Off bypasses it.
+    pub enabled: bool,
+    /// dB, [`PlayerChoicesRecord::preamp_min_db`] to `preamp_max_db`.
+    pub preamp_db: f32,
+    /// dB per band, ± [`PlayerChoicesRecord::band_db`], at [`PlayerChoicesRecord::eq_freqs`].
+    pub bands_db: Vec<f32>,
+}
+
+impl From<&EqSettings> for EqRecord {
+    fn from(e: &EqSettings) -> Self {
+        Self { enabled: e.enabled, preamp_db: e.preamp_db, bands_db: e.bands_db.to_vec() }
+    }
+}
+
+impl From<&EqRecord> for EqSettings {
+    /// Out-of-range gains are clamped; missing bands are flat and extra ones ignored.
+    fn from(e: &EqRecord) -> Self {
+        let mut bands_db = [0.0; 10];
+        for (b, v) in bands_db.iter_mut().zip(&e.bands_db) {
+            *b = if v.is_finite() { v.clamp(-dsp::BAND_DB, dsp::BAND_DB) } else { 0.0 };
+        }
+        let preamp_db = if e.preamp_db.is_finite() { e.preamp_db } else { 0.0 };
+        Self { enabled: e.enabled, preamp_db: preamp_db.clamp(dsp::PREAMP_MIN_DB, dsp::PREAMP_MAX_DB), bands_db }
+    }
+}
+
+/// The player's saved controls.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct PlayerSettingsRecord {
+    /// 0 to 1.
+    pub volume: f32,
+    /// 0.5 to 2; pitch follows.
+    pub speed: f32,
+    /// Back to 1x whenever a new track loads.
+    pub reset_speed: bool,
+    pub eq: EqRecord,
+    /// The EQ preset the bands match, if any.
+    pub eq_preset: Option<String>,
+}
+
+pub fn player_settings_record(p: &PlayerSettings) -> PlayerSettingsRecord {
+    PlayerSettingsRecord {
+        volume: p.volume,
+        speed: p.speed,
+        reset_speed: p.reset_speed,
+        eq: (&p.eq).into(),
+        eq_preset: p.eq.preset().map(str::to_owned),
+    }
+}
+
+/// A named EQ curve.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct EqPresetRecord {
+    pub name: String,
+    pub preamp_db: f32,
+    pub bands_db: Vec<f32>,
+}
+
+/// What the speed and EQ controls offer, as the desktop's panels do.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct PlayerChoicesRecord {
+    pub min_speed: f32,
+    pub max_speed: f32,
+    /// The speed chips.
+    pub speeds: Vec<f32>,
+    /// Each band's centre, Hz.
+    pub eq_freqs: Vec<f32>,
+    /// Bands go from -this to +this dB.
+    pub band_db: f32,
+    pub preamp_min_db: f32,
+    pub preamp_max_db: f32,
+    pub eq_presets: Vec<EqPresetRecord>,
+}
+
+/// The desktop's speed chips.
+const SPEEDS: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+#[uniffi::export]
+pub fn player_choices() -> PlayerChoicesRecord {
+    PlayerChoicesRecord {
+        min_speed: dsp::MIN_SPEED,
+        max_speed: dsp::MAX_SPEED,
+        speeds: SPEEDS.to_vec(),
+        eq_freqs: dsp::EQ_FREQS.to_vec(),
+        band_db: dsp::BAND_DB,
+        preamp_min_db: dsp::PREAMP_MIN_DB,
+        preamp_max_db: dsp::PREAMP_MAX_DB,
+        eq_presets: dsp::EQ_PRESETS
+            .iter()
+            .map(|(name, pre, bands)| EqPresetRecord { name: (*name).to_owned(), preamp_db: *pre, bands_db: bands.to_vec() })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,5 +1304,94 @@ mod tests {
         assert_eq!(s.convert_dir, Some(PathBuf::from("conv")), "kept");
         assert_eq!(s.download.mode, Mode::Audio);
         assert_eq!(settings_record(&s), SettingsRecord { concurrency: 6, download_dir: path_string(&before), ..r });
+    }
+
+    #[test]
+    fn tracks_round_trip() {
+        let mut link = Track::new(Source::Link("https://youtu.be/abc".into()), "Song".into());
+        link.artist = Some("Band".into());
+        link.duration = Some(200.5);
+        link.thumbnail = Some("https://img/abc.jpg".into());
+        let file = Track::new(Source::Local(PathBuf::from("music").join("a.flac")), "A".into());
+        let history = History::default();
+        for t in [&link, &file] {
+            assert_eq!(&track_record(t, &history).to_core(), t);
+        }
+        let r = track_record(&link, &history);
+        assert_eq!((r.kind, r.platform.as_deref(), r.offline), (TrackKind::Link, Some("YouTube"), false));
+        let r = track_record(&file, &history);
+        assert_eq!((r.kind, r.platform, r.location), (TrackKind::File, None, path_string(&PathBuf::from("music").join("a.flac"))));
+        let padded = TrackRecord { location: "  https://youtu.be/abc ".into(), ..track_record(&link, &history) };
+        assert_eq!(padded.to_core(), link, "links are trimmed");
+    }
+
+    #[test]
+    fn offline_tracks_and_history_rows() {
+        let dir = std::env::temp_dir().join(format!("redline-mobile-offline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("song.mp3");
+        std::fs::write(&file, b"").unwrap();
+        let mut done = job(JobStatus::Done(Some(file.clone())));
+        done.title = "Downloaded".into();
+        let mut history = History::default();
+        history.record(&done);
+        let track = Track::new(Source::Link("https://x/a".into()), "Song".into());
+        assert!(track_record(&track, &history).offline, "plays from the download");
+
+        let row = history_track(&history.entries[0]).unwrap();
+        assert_eq!((row.source, row.title.as_str()), (Source::Link("https://x/a".into()), "Downloaded"));
+        let converted = HistoryEntry {
+            title: "a.mkv".into(),
+            subtitle: String::new(),
+            spec: JobSpec::Convert(Default::default()),
+            output: Some(file.clone()),
+            finished_at: 0,
+        };
+        assert_eq!(history_track(&converted).unwrap().source, Source::Local(file.clone()));
+        std::fs::remove_file(&file).unwrap();
+        assert!(history_track(&converted).is_none(), "the output is gone");
+        assert!(!track_record(&track, &history).offline, "streams again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshots_fill_in_from_the_queue() {
+        let mut now = NowPlaying::default();
+        let mut song = Track::new(Source::Link("https://x/a".into()), "Song".into());
+        song.thumbnail = Some("https://img/a.jpg".into());
+        now.start(vec![song, Track::new(Source::Local("b.mp3".into()), "B".into())], 0, Some(4));
+        let mut st = PlayerState {
+            status: Status::Loading,
+            source: Some(Source::Link("https://x/a".into())),
+            track: Some(redline_core::player::TrackInfo { title: "https://x/a".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let s = player_snapshot(&st, &now, 7);
+        assert_eq!(s.title.as_deref(), Some("Song"), "not the URL while it loads");
+        assert_eq!(s.thumbnail.as_deref(), Some("https://img/a.jpg"));
+        assert_eq!((s.status, s.is_playing, s.is_link), (PlayerStatus::Loading, true, true));
+        assert_eq!((s.queue_index, s.queue_position, s.queue_length, s.playlist_id), (Some(0), Some(0), 2, Some(4)));
+        assert!(s.has_next && !s.has_prev);
+        assert_eq!(s.queue_version, 7);
+
+        st.status = Status::Error("No sound".into());
+        st.track = Some(redline_core::player::TrackInfo { title: "Real title".into(), ..Default::default() });
+        let s = player_snapshot(&st, &now, 7);
+        assert_eq!((s.status, s.error.as_deref(), s.title.as_deref()), (PlayerStatus::Error, Some("No sound"), Some("Real title")));
+        let s = player_snapshot(&PlayerState::default(), &NowPlaying::default(), 0);
+        assert_eq!((s.status, s.title, s.queue_index), (PlayerStatus::Idle, None, None));
+        assert_eq!(Repeat::from(RepeatMode::One), Repeat::One);
+    }
+
+    #[test]
+    fn eq_and_player_choices() {
+        let eq = EqSettings::from(&EqRecord { enabled: true, preamp_db: f32::NAN, bands_db: vec![-99.0; 12] });
+        assert_eq!((eq.preamp_db, eq.bands_db), (0.0, [-dsp::BAND_DB; 10]));
+        let r = player_settings_record(&PlayerSettings::default());
+        assert_eq!((r.volume, r.speed, r.eq_preset.as_deref()), (0.8, 1.0, Some("Flat")));
+        assert_eq!(EqSettings::from(&r.eq), EqSettings::default());
+        let c = player_choices();
+        assert_eq!((c.eq_freqs.len(), c.eq_presets.len()), (10, dsp::EQ_PRESETS.len()));
+        assert!(c.speeds.contains(&1.0) && c.min_speed == 0.5 && c.max_speed == 2.0);
     }
 }

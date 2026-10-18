@@ -9,6 +9,8 @@
 //! URLs expire after a few hours. The one queued next is looked up (and its URL warmed) while
 //! the current track plays, so it starts without waiting on yt-dlp.
 
+#[cfg(target_os = "android")]
+mod aaudio;
 pub mod decode;
 pub mod dsp;
 pub mod output;

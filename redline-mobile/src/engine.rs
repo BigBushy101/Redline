@@ -1,6 +1,7 @@
 //! The engine Kotlin holds: redline-core's queue, history and settings behind one lock, with a
 //! thread that runs the queue the way the desktop's frame loop does and tells Kotlin when
 //! something changed. Kotlin then pulls snapshots; nothing is pushed across but the nudge.
+//! The music player ([`Music`]) hangs off it and shares this state.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -8,9 +9,11 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use redline_core::Wake;
 use redline_core::convert_plan;
 use redline_core::history::History;
 use redline_core::jobs::{JobManager, JobSpec, JobStatus};
+use redline_core::player::Player;
 use redline_core::settings::Settings;
 use redline_core::tools::convert::Category;
 use redline_core::tools::hwaccel::{self, Encoders};
@@ -20,6 +23,7 @@ use redline_core::tools::ytdlp::{self, MediaInfo};
 
 use crate::convert::*;
 use crate::error::RedlineError;
+use crate::music::{Music, MusicListener};
 use crate::records::*;
 
 /// Kotlin's side of the nudge.
@@ -31,7 +35,7 @@ pub trait EngineListener: Send + Sync {
 }
 
 /// Most `on_change` calls per second is 1 / this. Progress lines arrive far faster.
-const THROTTLE: Duration = Duration::from_millis(100);
+pub(crate) const THROTTLE: Duration = Duration::from_millis(100);
 /// Longest the queue thread sleeps with nothing to do. Workers and calls wake it sooner.
 const IDLE: Duration = Duration::from_secs(30);
 /// Looked-up links kept for planning their download (formats, tags, length).
@@ -40,12 +44,12 @@ const LOOKUPS: usize = 8;
 const MAX_FINISHED: usize = 200;
 
 /// The engine's copy of the desktop app's state for this slice.
-struct State {
-    settings: Settings,
+pub(crate) struct State {
+    pub(crate) settings: Settings,
     saved_settings: Settings,
-    tools: ToolPaths,
-    jobs: JobManager,
-    history: History,
+    pub(crate) tools: ToolPaths,
+    pub(crate) jobs: JobManager,
+    pub(crate) history: History,
     /// Recent lookups, newest last, by trimmed link.
     lookups: VecDeque<(String, MediaInfo)>,
     /// Jobs that ended and haven't been drained.
@@ -95,8 +99,9 @@ impl State {
 }
 
 /// Wakes the queue thread: workers poke it on progress, API calls after changing the queue.
+/// The music thread has one of its own.
 #[derive(Default)]
-struct Signal {
+pub(crate) struct Signal {
     flags: Mutex<Flags>,
     cv: Condvar,
 }
@@ -108,12 +113,12 @@ struct Flags {
 }
 
 impl Signal {
-    fn poke(&self) {
+    pub(crate) fn poke(&self) {
         self.flags.lock().unwrap().poked = true;
         self.cv.notify_one();
     }
 
-    fn stop(&self) {
+    pub(crate) fn stop(&self) {
         self.flags.lock().unwrap().stop = true;
         self.cv.notify_one();
     }
@@ -131,32 +136,75 @@ impl Signal {
     }
 }
 
-struct Shared {
-    state: Mutex<State>,
-    signal: Arc<Signal>,
+pub(crate) struct Shared {
+    pub(crate) state: Mutex<State>,
+    pub(crate) signal: Arc<Signal>,
     listener: Arc<dyn EngineListener>,
 }
 
-/// The queue thread: the desktop's frame loop without the frames. Coalesces wake-ups so
-/// Kotlin hears at most one `on_change` per [`THROTTLE`].
+impl Shared {
+    pub(crate) fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap()
+    }
+
+    /// Looks a link up with yt-dlp (blocking) and keeps the answer for planning its download.
+    /// `cached` takes a kept answer instead when there is one.
+    pub(crate) fn look_up(&self, url: &str, cached: bool) -> Result<MediaInfo, RedlineError> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err(RedlineError::Invalid("Paste a link first.".into()));
+        }
+        let (tools, net) = {
+            let st = self.state();
+            if cached && let Some(info) = st.lookup(url) {
+                return Ok(info.clone());
+            }
+            (st.tools.clone(), st.settings.network.clone())
+        };
+        if tools.ytdlp.is_none() {
+            return Err(RedlineError::ToolsMissing("Looking up links needs yt-dlp.".into()));
+        }
+        // fetch_info already adds friendly_error's hints.
+        let info = ytdlp::fetch_info(&tools, &net, url).map_err(RedlineError::failed)?;
+        self.state().remember(url.to_owned(), info.clone());
+        Ok(info)
+    }
+}
+
+/// The queue thread: the desktop's frame loop without the frames.
 fn run(shared: Arc<Shared>) {
+    // Not eager: progress lines poke far more often than anyone needs the queue pumped.
+    follow(&shared.signal, false, || shared.state().step(), || shared.listener.on_change());
+}
+
+/// Runs `step` when `signal` is poked (or when the last step asked to come back), until it's
+/// stopped. `step` returns when to come back, and whether it changed something no poke
+/// announced. Coalesces wake-ups so `notify` runs at most once per [`THROTTLE`], and once at
+/// the start for the first snapshot. While a notification is held back, pokes only run `step`
+/// if `eager`; otherwise they wait for the throttle too.
+pub(crate) fn follow(
+    signal: &Signal,
+    eager: bool,
+    mut step: impl FnMut() -> (Option<Duration>, bool),
+    mut notify: impl FnMut(),
+) {
     let mut pending = true; // Kotlin wants a first snapshot
     let mut last_notify: Option<Instant> = None;
     let mut wait = Duration::ZERO;
     let mut throttled = false;
     loop {
         // While throttled, pokes only mean "more changes"; the deadline still holds.
-        let flags = shared.signal.wait(wait, !throttled);
+        let flags = signal.wait(wait, eager || !throttled);
         if flags.stop {
             break;
         }
-        let (next, changed) = shared.state.lock().unwrap().step();
+        let (next, changed) = step();
         pending |= flags.poked || changed;
         let since = last_notify.map_or(THROTTLE, |t| t.elapsed());
         if pending && since >= THROTTLE {
             pending = false;
             last_notify = Some(Instant::now());
-            shared.listener.on_change();
+            notify();
         }
         wait = next.unwrap_or(IDLE).min(IDLE);
         throttled = pending;
@@ -172,6 +220,8 @@ fn run(shared: Arc<Shared>) {
 pub struct Engine {
     shared: Arc<Shared>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// The player, once Kotlin has asked for it.
+    music: Mutex<Option<Arc<Music>>>,
 }
 
 /// Points redline-core at the app's folders and tools.
@@ -220,22 +270,8 @@ impl Engine {
     /// Looks up a link (title, formats, playlist entries). Blocks while yt-dlp runs. The
     /// result is kept so `queue_download` of the same link can use its picks and tags.
     pub fn fetch_info(&self, url: String) -> Result<MediaInfoRecord, RedlineError> {
-        let url = url.trim().to_owned();
-        if url.is_empty() {
-            return Err(RedlineError::Invalid("Paste a link first.".into()));
-        }
-        let (tools, net) = {
-            let st = self.state();
-            (st.tools.clone(), st.settings.network.clone())
-        };
-        if tools.ytdlp.is_none() {
-            return Err(RedlineError::ToolsMissing("Looking up links needs yt-dlp.".into()));
-        }
-        // fetch_info already adds friendly_error's hints.
-        let info = ytdlp::fetch_info(&tools, &net, &url).map_err(RedlineError::failed)?;
-        let record = media_info_record(&url, &info);
-        self.state().remember(url, info);
-        Ok(record)
+        let info = self.shared.look_up(&url, false)?;
+        Ok(media_info_record(url.trim(), &info))
     }
 
     /// Queues a download the way the desktop's Download button does, and remembers the
@@ -426,13 +462,20 @@ impl Engine {
     pub fn set_settings(&self, settings: SettingsRecord) {
         self.change(|st| apply_settings(&settings, &mut st.settings));
     }
+
+    /// The music player and playlists. There's one per engine: later calls return the same
+    /// one and send its nudges to `listener` from then on (say, a recreated activity's).
+    pub fn music(&self, listener: Arc<dyn MusicListener>) -> Arc<Music> {
+        let tools = self.state().tools.clone();
+        self.music_with(listener, move |wake| Player::system(tools, wake))
+    }
 }
 
 impl Engine {
     /// Starts the engine with `tools` (the constructor's, or fakes in tests). Expects the app's
     /// folders to be set already. `convert_dir` is where conversions go when the settings don't
     /// say (the desktop's "next to the original" would be the app's cache on Android).
-    fn start(tools: ToolPaths, listener: Arc<dyn EngineListener>, convert_dir: Option<PathBuf>) -> Arc<Self> {
+    pub(crate) fn start(tools: ToolPaths, listener: Arc<dyn EngineListener>, convert_dir: Option<PathBuf>) -> Arc<Self> {
         let signal = Arc::new(Signal::default());
         let mut jobs = JobManager::load();
         let poke = signal.clone();
@@ -461,11 +504,28 @@ impl Engine {
             .name("redline-queue".into())
             .spawn(move || run(runner))
             .expect("can't start the queue thread");
-        Arc::new(Self { shared, thread: Mutex::new(Some(thread)) })
+        Arc::new(Self { shared, thread: Mutex::new(Some(thread)), music: Mutex::new(None) })
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.shared.state.lock().unwrap()
+        self.shared.state()
+    }
+
+    /// [`music`](Self::music) with the player `make_player` builds from the [`Wake`] it must
+    /// call when its state changes (tests build one with a fake decoder).
+    pub(crate) fn music_with(
+        &self,
+        listener: Arc<dyn MusicListener>,
+        make_player: impl FnOnce(Wake) -> Player,
+    ) -> Arc<Music> {
+        let mut music = self.music.lock().unwrap();
+        if let Some(m) = music.as_ref() {
+            m.set_listener(listener);
+            return m.clone();
+        }
+        let m = Music::start(self.shared.clone(), listener, make_player);
+        *music = Some(m.clone());
+        m
     }
 
     /// Changes the state and lets the queue thread act on it (start jobs, save, tell Kotlin).
@@ -493,6 +553,10 @@ fn convert_jobs_allowed(
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        // Silence first. Kotlin may still hold the Music, but it stops following anything.
+        if let Some(m) = self.music.lock().unwrap().take() {
+            m.shutdown();
+        }
         self.shared.signal.stop();
         if let Some(t) = self.thread.lock().unwrap().take()
             // Kotlin could drop the last reference from inside on_change.
@@ -512,7 +576,7 @@ impl Drop for Engine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::OnceLock;
@@ -520,7 +584,7 @@ mod tests {
 
     /// The process-wide folders every test in this crate uses, so nothing touches the real
     /// `%APPDATA%\Redline`.
-    fn test_dirs() -> PathBuf {
+    pub(crate) fn test_dirs() -> PathBuf {
         static DIR: OnceLock<PathBuf> = OnceLock::new();
         DIR.get_or_init(|| {
             let dir = std::env::temp_dir().join(format!("redline-mobile-{}", std::process::id()));
@@ -536,8 +600,15 @@ mod tests {
         .clone()
     }
 
+    /// Tests that run an engine take turns: each saves settings, history and the queue into the
+    /// shared folders, and checks what another would overwrite.
+    pub(crate) fn one_engine_at_a_time() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[derive(Default)]
-    struct Counter(AtomicUsize);
+    pub(crate) struct Counter(pub(crate) AtomicUsize);
 
     impl EngineListener for Counter {
         fn on_change(&self) {
@@ -545,7 +616,13 @@ mod tests {
         }
     }
 
-    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    impl MusicListener for Counter {
+        fn on_change(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
         let start = Instant::now();
         while !done() {
             assert!(start.elapsed() < Duration::from_secs(20), "timed out waiting for {what}");
@@ -568,6 +645,7 @@ mod tests {
 
     #[test]
     fn runs_a_download_through_the_queue() {
+        let _turn = one_engine_at_a_time();
         let dir = test_dirs();
         // Tools that don't exist: the job starts, fails, and comes out the other end.
         let missing = dir.join("no-such-tool");

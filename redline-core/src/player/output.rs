@@ -1,12 +1,17 @@
-//! Where rendered audio goes: the default sound device, or a capture buffer for tests.
+//! Where rendered audio goes: the default sound device (cpal on desktops, AAudio on Android),
+//! or a capture buffer for tests.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
+#[cfg(not(target_os = "android"))]
+use anyhow::{Context, anyhow};
+#[cfg(not(target_os = "android"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(target_os = "android"))]
 use cpal::{ErrorKind, FromSample, SampleFormat, SizedSample};
 
 use super::render::Renderer;
@@ -24,10 +29,18 @@ pub trait Output {
 pub type OpenOutput = Box<dyn FnMut() -> Result<Box<dyn Output>> + Send>;
 
 /// The system's default output device.
+#[cfg(not(target_os = "android"))]
 pub fn system() -> OpenOutput {
     Box::new(|| Ok(Box::new(CpalOutput::open()?) as Box<dyn Output>))
 }
 
+/// The system's default output device.
+#[cfg(target_os = "android")]
+pub fn system() -> OpenOutput {
+    Box::new(|| Ok(Box::new(super::aaudio::AAudioOutput::open()?) as Box<dyn Output>))
+}
+
+#[cfg(not(target_os = "android"))]
 pub struct CpalOutput {
     device: cpal::Device,
     config: cpal::SupportedStreamConfig,
@@ -35,6 +48,7 @@ pub struct CpalOutput {
     lost: Arc<AtomicBool>,
 }
 
+#[cfg(not(target_os = "android"))]
 impl CpalOutput {
     pub fn open() -> Result<Self> {
         let host = cpal::default_host();
@@ -80,6 +94,7 @@ impl CpalOutput {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Output for CpalOutput {
     fn sample_rate(&self) -> u32 {
         self.config.sample_rate()

@@ -2,8 +2,13 @@ package app.redline.ui
 
 import android.Manifest
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -32,6 +38,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,8 +54,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.redline.NavModel
+import app.redline.core.TrackRecord
 import app.redline.state.EngineStatus
+import app.redline.state.MusicState
 import app.redline.state.RedlineState
+import app.redline.ui.components.LocalOpenSettings
 import app.redline.ui.convert.ConvertMessage
 import app.redline.ui.convert.ConvertModel
 import app.redline.ui.convert.ConvertScreen
@@ -57,6 +68,12 @@ import app.redline.ui.download.DownloadModel
 import app.redline.ui.download.DownloadScreen
 import app.redline.ui.history.HistoryAction
 import app.redline.ui.history.HistoryScreen
+import app.redline.ui.player.FullPlayer
+import app.redline.ui.player.MiniPlayer
+import app.redline.ui.playlists.AddToPlaylistDialog
+import app.redline.ui.playlists.PlaylistsMessage
+import app.redline.ui.playlists.PlaylistsModel
+import app.redline.ui.playlists.PlaylistsScreen
 import app.redline.ui.queue.QueueAction
 import app.redline.ui.queue.QueueScreen
 import app.redline.ui.settings.SettingsScreen
@@ -67,19 +84,20 @@ import app.redline.work.Notifications
 import kotlinx.coroutines.launch
 
 /**
- * The pages the bottom bar switches between: the desktop sidebar's entries that this slice has,
- * in its order. Saved, Playlists and the player join in later slices.
+ * The pages: the desktop sidebar's entries that this slice has, in its order. Five fit a
+ * phone's bottom bar; Settings is reached from the gear in each page's header instead.
  */
-enum class Tab(val label: String, val icon: ImageVector) {
+enum class Tab(val label: String, val icon: ImageVector, val inBar: Boolean = true) {
     Download("Download", Icons.Rounded.Download),
     Convert("Convert", Icons.Rounded.SwapHoriz),
+    Playlists("Playlists", Icons.AutoMirrored.Rounded.PlaylistPlay),
     Queue("Queue", Icons.AutoMirrored.Rounded.QueueMusic),
     History("History", Icons.Rounded.History),
-    Settings("Settings", Icons.Rounded.Settings),
+    Settings("Settings", Icons.Rounded.Settings, inBar = false),
 }
 
 @Composable
-fun RedlineRoot(state: RedlineState, download: DownloadModel, convert: ConvertModel, tab: Tab, selectTab: (Tab) -> Unit) {
+fun RedlineRoot(state: RedlineState, download: DownloadModel, convert: ConvertModel, playlists: PlaylistsModel, nav: NavModel) {
     val status by state.status.collectAsStateWithLifecycle()
     when (val s = status) {
         EngineStatus.Initializing -> Starting()
@@ -87,7 +105,8 @@ fun RedlineRoot(state: RedlineState, download: DownloadModel, convert: ConvertMo
         is EngineStatus.Ready -> {
             LaunchedEffect(Unit) { download.onEngineReady() }
             AskForNotifications()
-            Pages(state, download, convert, tab, selectTab)
+            val music = state.music
+            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, nav)
         }
     }
 }
@@ -108,8 +127,20 @@ private fun AskForNotifications() {
 }
 
 @Composable
-private fun Pages(state: RedlineState, download: DownloadModel, convert: ConvertModel, tab: Tab, selectTab: (Tab) -> Unit) {
+private fun Pages(
+    state: RedlineState,
+    music: MusicState,
+    download: DownloadModel,
+    convert: ConvertModel,
+    playlistsModel: PlaylistsModel,
+    nav: NavModel,
+) {
+    val tab = nav.tab
+    val selectTab: (Tab) -> Unit = { nav.tab = it }
     val context = LocalContext.current
+    val playlists by music.playlists.collectAsStateWithLifecycle()
+    // A History row's track waiting for "Add to playlist…" to pick where.
+    var toAdd by remember { mutableStateOf<TrackRecord?>(null) }
     val queue by state.queue.collectAsStateWithLifecycle()
     val active by state.activeCount.collectAsStateWithLifecycle()
     val history by state.history.collectAsStateWithLifecycle()
@@ -141,6 +172,23 @@ private fun Pages(state: RedlineState, download: DownloadModel, convert: Convert
         }
     }
 
+    LaunchedEffect(playlistsModel) {
+        playlistsModel.messages.collect { m ->
+            when (m) {
+                is PlaylistsMessage.Info -> say(m.text)
+                is PlaylistsMessage.Error -> say(m.text)
+                is PlaylistsMessage.Downloading -> scope.launch {
+                    val r = snackbar.showSnackbar(
+                        "Downloading “${m.title}” for offline",
+                        actionLabel = "View queue",
+                        duration = SnackbarDuration.Short,
+                    )
+                    if (r == SnackbarResult.ActionPerformed) selectTab(Tab.Queue)
+                }
+            }
+        }
+    }
+
     LaunchedEffect(convert) {
         convert.messages.collect { m ->
             when (m) {
@@ -157,56 +205,107 @@ private fun Pages(state: RedlineState, download: DownloadModel, convert: Convert
         selectTab(Tab.Convert)
     }
 
-    Scaffold(
-        containerColor = RedlineColors.Bg,
-        snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = { BottomBar(tab, active, selectTab) },
-    ) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize()) {
-            val s = settings
-            if (s == null || lists == null || convertLists == null) {
-                Starting()
-                return@Box
-            }
-            when (tab) {
-                Tab.Download -> DownloadScreen(download, s, lists, tools, history, openSettings = { selectTab(Tab.Settings) })
-                Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = { selectTab(Tab.Settings) })
-                Tab.Queue -> QueueScreen(
-                    queue,
-                    onAction = { a ->
-                        when (a) {
-                            is QueueAction.Cancel -> state.act { it.cancel(a.id) }
-                            is QueueAction.Retry -> state.act { it.retry(a.id) }
-                            is QueueAction.RetryAnyway -> state.act { it.retryIgnoringArchive(a.id) }
-                            is QueueAction.Remove -> state.act { it.remove(a.id) }
-                            QueueAction.ClearFinished -> state.act { it.clearFinished() }
-                            QueueAction.CancelAll -> state.act { it.cancelAll() }
-                            is QueueAction.Open -> openFile(context, a.path)?.let(::say)
-                            is QueueAction.Convert -> convertFile(a.path)
-                        }
-                    },
-                    findSomething = { selectTab(Tab.Download) },
-                )
-                Tab.History -> HistoryScreen(history) { a ->
-                    when (a) {
-                        is HistoryAction.Open -> openFile(context, a.path)?.let(::say)
-                        is HistoryAction.Convert -> convertFile(a.path)
-                        is HistoryAction.Remove -> state.act(touchesHistory = true) { it.removeHistory(a.index) }
-                        HistoryAction.Clear -> state.act(touchesHistory = true) { it.clearHistory() }
-                        is HistoryAction.Again -> scope.launch {
-                            try {
-                                state.onEngine { it.downloadAgain(a.index) }
-                                state.act { }
-                                selectTab(Tab.Queue)
-                            } catch (e: app.redline.core.RedlineException) {
-                                say(e.message ?: "Couldn't queue that again.")
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = RedlineColors.Bg,
+            snackbarHost = { SnackbarHost(snackbar) },
+            bottomBar = {
+                Column(Modifier.background(RedlineColors.Black)) {
+                    MiniPlayer(music) { nav.playerOpen = true }
+                    BottomBar(tab, active, selectTab)
+                }
+            },
+        ) { padding ->
+            Box(Modifier.padding(padding).fillMaxSize()) {
+                val s = settings
+                if (s == null || lists == null || convertLists == null) {
+                    Starting()
+                    return@Box
+                }
+                val openSettings = { selectTab(Tab.Settings) }
+                CompositionLocalProvider(LocalOpenSettings provides openSettings.takeIf { tab != Tab.Settings }) {
+                    when (tab) {
+                        Tab.Download -> DownloadScreen(download, s, lists, tools, history, openSettings = openSettings)
+                        Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = openSettings)
+                        Tab.Playlists -> PlaylistsScreen(playlistsModel, music, playlists, history)
+                        Tab.Queue -> QueueScreen(
+                            queue,
+                            onAction = { a ->
+                                when (a) {
+                                    is QueueAction.Cancel -> state.act { it.cancel(a.id) }
+                                    is QueueAction.Retry -> state.act { it.retry(a.id) }
+                                    is QueueAction.RetryAnyway -> state.act { it.retryIgnoringArchive(a.id) }
+                                    is QueueAction.Remove -> state.act { it.remove(a.id) }
+                                    QueueAction.ClearFinished -> state.act { it.clearFinished() }
+                                    QueueAction.CancelAll -> state.act { it.cancelAll() }
+                                    is QueueAction.Open -> openFile(context, a.path)?.let(::say)
+                                    is QueueAction.Convert -> convertFile(a.path)
+                                }
+                            },
+                            findSomething = { selectTab(Tab.Download) },
+                        )
+                        Tab.History -> HistoryScreen(history) { a ->
+                            when (a) {
+                                is HistoryAction.Open -> openFile(context, a.path)?.let(::say)
+                                is HistoryAction.Convert -> convertFile(a.path)
+                                is HistoryAction.Remove -> state.act(touchesHistory = true) { it.removeHistory(a.index) }
+                                HistoryAction.Clear -> state.act(touchesHistory = true) { it.clearHistory() }
+                                is HistoryAction.Again -> scope.launch {
+                                    try {
+                                        state.onEngine { it.downloadAgain(a.index) }
+                                        state.act { }
+                                        selectTab(Tab.Queue)
+                                    } catch (e: app.redline.core.RedlineException) {
+                                        say(e.message ?: "Couldn't queue that again.")
+                                    }
+                                }
+                                is HistoryAction.Play -> scope.launch {
+                                    try {
+                                        music.onMusic { it.playHistory(a.index) }
+                                        music.act { }
+                                    } catch (e: app.redline.core.RedlineException) {
+                                        say(e.message ?: "Couldn't play that.")
+                                    }
+                                }
+                                is HistoryAction.AddToPlaylist -> scope.launch {
+                                    val track = music.onMusic { it.trackForHistory(a.index) }
+                                    if (track == null) say("There's nothing to play there any more.") else toAdd = track
+                                }
                             }
+                        }
+                        Tab.Settings -> {
+                            // Not in the bottom bar: Back returns to the page it was opened from.
+                            BackHandler { selectTab(nav.backFromSettings) }
+                            SettingsScreen(state, s, tools, lists)
                         }
                     }
                 }
-                Tab.Settings -> SettingsScreen(state, s, tools, lists)
             }
         }
+        // The full player covers everything, the bottom bar included.
+        AnimatedVisibility(
+            visible = nav.playerOpen,
+            enter = slideInVertically { it },
+            exit = slideOutVertically { it },
+        ) {
+            FullPlayer(music) { nav.playerOpen = false }
+        }
+    }
+    toAdd?.let { track ->
+        AddToPlaylistDialog(
+            playlists,
+            onPick = { id ->
+                music.editPlaylists { it.addTracks(id, listOf(track)) }
+                say("Added to ${playlists.firstOrNull { it.id == id }?.name ?: "the playlist"}")
+            },
+            onNew = { name ->
+                scope.launch {
+                    music.editPlaylistsNow { m -> m.addTracks(m.createPlaylist(name.trim()), listOf(track)) }
+                    say("Added to a new playlist")
+                }
+            },
+            onDismiss = { toAdd = null },
+        )
     }
 }
 
@@ -215,7 +314,7 @@ private fun Pages(state: RedlineState, download: DownloadModel, convert: Convert
 private fun BottomBar(tab: Tab, active: Int, selectTab: (Tab) -> Unit) {
     val accent = LocalAccent.current
     NavigationBar(containerColor = RedlineColors.Black) {
-        for (t in Tab.entries) {
+        for (t in Tab.entries.filter { it.inBar }) {
             NavigationBarItem(
                 selected = t == tab,
                 onClick = { selectTab(t) },

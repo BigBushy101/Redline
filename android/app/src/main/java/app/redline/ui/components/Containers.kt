@@ -11,11 +11,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -26,6 +36,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import app.redline.ui.theme.LocalAccent
 import app.redline.ui.theme.RedlineColors
+import app.redline.util.artModel
+import coil3.compose.AsyncImage
 
 /** Side padding of every page. */
 val PagePadding = 16.dp
@@ -37,18 +49,29 @@ val PagePadding = 16.dp
 @Composable
 fun PageHeader(eyebrow: String, title: String, subtitle: String, modifier: Modifier = Modifier) {
     val tint = LocalAccent.current.headerTint
-    Column(
+    val openSettings = LocalOpenSettings.current
+    Box(
         modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(tint, RedlineColors.Bg)))
-            .padding(start = PagePadding, end = PagePadding, top = 28.dp, bottom = 16.dp),
+            .background(Brush.verticalGradient(listOf(tint, RedlineColors.Bg))),
     ) {
-        Eyebrow(eyebrow)
-        Text(title, style = MaterialTheme.typography.displaySmall, color = RedlineColors.Text)
-        Spacer(Modifier.height(4.dp))
-        Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = RedlineColors.Muted)
+        Column(Modifier.padding(start = PagePadding, end = PagePadding, top = 28.dp, bottom = 16.dp)) {
+            Eyebrow(eyebrow)
+            Text(title, style = MaterialTheme.typography.displaySmall, color = RedlineColors.Text)
+            Spacer(Modifier.height(4.dp))
+            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = RedlineColors.Muted)
+        }
+        // Settings left the bottom bar for this gear, in the top corner of every page but its own.
+        if (openSettings != null) {
+            IconButton(onClick = openSettings, modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 4.dp)) {
+                Icon(Icons.Rounded.Settings, contentDescription = "Settings", tint = RedlineColors.Text)
+            }
+        }
     }
 }
+
+/** Opens Settings from a page header's gear; null hides the gear (on Settings itself). */
+val LocalOpenSettings = compositionLocalOf<(() -> Unit)?> { null }
 
 /** Small bold uppercase label (theme.rs `eyebrow`). */
 @Composable
@@ -91,6 +114,29 @@ fun ArtTile(icon: ImageVector, tint: Color, size: Dp = 44.dp) {
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(size * 0.5f))
+    }
+}
+
+/**
+ * A track's or playlist's picture (theme.rs `cover`): the image when there is one and it loads,
+ * else the [ArtTile] with [icon].
+ */
+@Composable
+fun Cover(thumbnail: String?, icon: ImageVector, size: Dp = 44.dp, tint: Color = RedlineColors.Muted) {
+    val model = remember(thumbnail) { artModel(thumbnail) }
+    var failed by remember(thumbnail) { mutableStateOf(false) }
+    if (model == null || failed) {
+        ArtTile(icon, tint, size)
+        return
+    }
+    Box(Modifier.size(size).background(RedlineColors.Elevated, RoundedCornerShape(4.dp))) {
+        AsyncImage(
+            model = model,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            onError = { failed = true },
+            modifier = Modifier.size(size).clip(RoundedCornerShape(4.dp)),
+        )
     }
 }
 

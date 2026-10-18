@@ -17,6 +17,7 @@ import app.redline.ui.RedlineRoot
 import app.redline.ui.Tab
 import app.redline.ui.convert.ConvertModel
 import app.redline.ui.download.DownloadModel
+import app.redline.ui.playlists.PlaylistsModel
 import app.redline.ui.theme.RedlineTheme
 
 /** The one activity: the bottom-bar pages, and where shared links and files come in. */
@@ -24,6 +25,7 @@ class MainActivity : ComponentActivity() {
     private val nav: NavModel by viewModels()
     private val download: DownloadModel by viewModels()
     private val convert: ConvertModel by viewModels()
+    private val playlists: PlaylistsModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -33,7 +35,7 @@ class MainActivity : ComponentActivity() {
         val state = (application as RedlineApp).state
         setContent {
             RedlineTheme {
-                RedlineRoot(state, download, convert, nav.tab) { nav.tab = it }
+                RedlineRoot(state, download, convert, playlists, nav)
             }
         }
     }
@@ -64,6 +66,7 @@ class MainActivity : ComponentActivity() {
                 download.shared(text)
             }
             intent.getBooleanExtra(EXTRA_OPEN_QUEUE, false) -> nav.tab = Tab.Queue
+            intent.getBooleanExtra(EXTRA_OPEN_PLAYER, false) -> nav.playerOpen = true
         }
     }
 
@@ -76,21 +79,44 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** Set by the notifications: open on the Queue page. */
         const val EXTRA_OPEN_QUEUE = "app.redline.OPEN_QUEUE"
+        /** Set by the player's notification: show the full player. */
+        const val EXTRA_OPEN_PLAYER = "app.redline.OPEN_PLAYER"
     }
 }
 
-/** The selected page, surviving rotation and process death. */
+/** The selected page and whether the full player is up, surviving rotation and process death. */
 class NavModel(private val saved: SavedStateHandle) : ViewModel() {
-    private var current by mutableStateOf(saved.get<String>(KEY)?.let { name -> Tab.entries.firstOrNull { it.name == name } } ?: Tab.Download)
+    private var current by mutableStateOf(saved.get<String>(KEY)?.let(::tabNamed) ?: Tab.Download)
+    private var before by mutableStateOf(saved.get<String>(KEY_BACK)?.let(::tabNamed) ?: Tab.Download)
+    private var player by mutableStateOf(saved.get<Boolean>(KEY_PLAYER) ?: false)
 
     var tab: Tab
         get() = current
         set(value) {
+            // Settings isn't in the bottom bar; Back from it returns to the page it was opened on.
+            if (value == Tab.Settings && current != Tab.Settings) {
+                before = current
+                saved[KEY_BACK] = current.name
+            }
             current = value
             saved[KEY] = value.name
         }
 
+    /** The page Settings was opened from. */
+    val backFromSettings: Tab get() = before
+
+    var playerOpen: Boolean
+        get() = player
+        set(value) {
+            player = value
+            saved[KEY_PLAYER] = value
+        }
+
+    private fun tabNamed(name: String) = Tab.entries.firstOrNull { it.name == name }
+
     private companion object {
         const val KEY = "tab"
+        const val KEY_BACK = "tab-before-settings"
+        const val KEY_PLAYER = "player-open"
     }
 }
