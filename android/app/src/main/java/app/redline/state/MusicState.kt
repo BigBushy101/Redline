@@ -72,7 +72,7 @@ class MusicState(private val app: Application, val music: Music) {
     val savedOverview: StateFlow<SavedOverviewRecord?> = _savedOverview.asStateFlow()
 
     /** Copies of files picked for playlists. */
-    val imported = ImportedMusic(RedlineEngine.importedMusicDir(app))
+    val imported = ImportedMusic(RedlineEngine.importedMusicDir(app)) { LocalFiles.load(app) }
 
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
     private var queueVersion: ULong? = null
@@ -80,6 +80,9 @@ class MusicState(private val app: Application, val music: Music) {
     private var settingsEpoch = 0
 
     init {
+        // The phone's volume buttons set the volume; there's no slider to undo a low one an
+        // older version saved.
+        act { it.setVolume(1f) }
         scope.launch { for (unit in refreshes) refresh() }
         requestRefresh()
         reloadPlaylists()

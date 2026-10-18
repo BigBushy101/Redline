@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Link
@@ -19,6 +20,7 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -30,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -43,6 +46,7 @@ import app.redline.ui.theme.RedlineColors
 import app.redline.ui.theme.color
 import app.redline.ui.theme.icon
 import app.redline.ui.theme.label
+import app.redline.util.art
 
 /**
  * One track (tracks.rs `track_row`): number, art, title, artist and where it plays from, length
@@ -76,7 +80,7 @@ fun TrackRow(
             }
         }
         Spacer(Modifier.width(6.dp))
-        Cover(track.thumbnail, if (track.kind == TrackKind.LINK) Icons.Rounded.Link else Icons.Rounded.MusicNote, size = 44.dp)
+        Cover(track.art, if (track.kind == TrackKind.LINK) Icons.Rounded.Link else Icons.Rounded.MusicNote, size = 44.dp)
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text(
@@ -148,6 +152,37 @@ private fun TagLine(tag: String) {
         Icon(Icons.Rounded.RemoveCircleOutline, null, tint = LocalAccent.current.hover, modifier = Modifier.size(12.dp))
         Spacer(Modifier.width(3.dp))
         Text(tag, style = MaterialTheme.typography.bodySmall, color = LocalAccent.current.hover, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** What Library rows can send a song to, provided by the app's root. */
+class TrackActions(
+    /** Opens Convert with the song's file. */
+    val convert: (TrackRecord) -> Unit,
+    /** Asks which playlist, then adds it. */
+    val addToPlaylist: (TrackRecord) -> Unit,
+)
+
+val LocalTrackActions = staticCompositionLocalOf<TrackActions?> { null }
+
+/**
+ * A Library row's "Add to playlist…" (unless the page has its own, [playlist] false) and
+ * "Convert", which only songs that are files get: file tracks, and links downloaded for offline.
+ */
+@Composable
+fun LibraryMenuItems(track: TrackRecord, close: () -> Unit, playlist: Boolean = true) {
+    val actions = LocalTrackActions.current ?: return
+    if (playlist) {
+        MenuItem("Add to playlist…", Icons.AutoMirrored.Rounded.PlaylistAdd) {
+            close()
+            actions.addToPlaylist(track)
+        }
+    }
+    if (track.kind == TrackKind.FILE || track.offline) {
+        MenuItem("Convert", Icons.Rounded.SwapHoriz) {
+            close()
+            actions.convert(track)
+        }
     }
 }
 

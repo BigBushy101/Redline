@@ -4,13 +4,17 @@ import android.app.Activity
 import android.app.Application
 import android.os.Bundle
 import app.redline.state.RedlineState
+import app.redline.util.AudioCoverFetcher
 import app.redline.work.Notifications
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
 
 /**
  * Owns the one [RedlineState] (and through it the one Rust `Engine`) for the whole process, so
  * the queue keeps running across activity restarts and while the download service is alive.
  */
-class RedlineApp : Application() {
+class RedlineApp : Application(), SingletonImageLoader.Factory {
     lateinit var state: RedlineState
         private set
 
@@ -22,6 +26,15 @@ class RedlineApp : Application() {
         // Unpacks Python on the first run (seconds): RedlineState does it off the main thread.
         state.start()
     }
+
+    /** Coil's one loader, which also reads the cover art inside song files. */
+    override fun newImageLoader(context: PlatformContext): ImageLoader =
+        ImageLoader.Builder(context)
+            .components {
+                add(AudioCoverFetcher.Factory())
+                add(AudioCoverFetcher.Key())
+            }
+            .build()
 }
 
 /**

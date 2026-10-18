@@ -88,6 +88,7 @@ import app.redline.ui.components.EmptyState
 import app.redline.ui.components.Eyebrow
 import app.redline.ui.components.GhostButton
 import app.redline.ui.components.InputField
+import app.redline.ui.components.LibraryMenuItems
 import app.redline.ui.components.MenuItem
 import app.redline.ui.components.PageHeader
 import app.redline.ui.components.PagePadding
@@ -359,6 +360,7 @@ private fun PlatformPage(model: SavedModel, page: SavedPlatformPageRecord, curre
                         close()
                         model.queue(t)
                     }
+                    LibraryMenuItems(t, close)
                     if (t.canGoOffline) {
                         MenuItem("Download for offline", Icons.Rounded.Download) {
                             close()
@@ -610,6 +612,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.savedTracks(
                     close()
                     model.queue(track)
                 }
+                LibraryMenuItems(track, close)
             }
             if (track.canGoOffline) {
                 MenuItem("Download for offline", Icons.Rounded.Download) {

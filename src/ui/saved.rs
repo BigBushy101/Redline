@@ -10,7 +10,8 @@ use redline_core::player::Source;
 use redline_core::download_plan::PlannedDownload;
 use redline_core::saved::{self, CollectionId, SaveOutcome, SavedTrack};
 
-use super::tracks::{RowAction, RowState, list_header, search_box, track_row};
+use super::playlists::{AddTarget, add_menu, add_to, playlist_names};
+use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
 use crate::app::{App, Page};
 use crate::format::fmt_duration;
 use crate::task::Task;
@@ -28,6 +29,8 @@ enum Tab {
 /// A link being looked up before it's saved.
 struct Lookup {
     url: String,
+    /// Saving alongside a download: no toasts unless saving fails.
+    quiet: bool,
     task: Task<Result<MediaInfo, String>>,
 }
 
@@ -68,11 +71,24 @@ impl SavedPage {
 
 /// Looks up a link in the background and saves it once that's done.
 pub fn start_save(app: &mut App, url: &str) {
+    start_save_with(app, url, false);
+}
+
+/// Looks a link up and saves it, saying nothing unless saving fails; for links downloaded on
+/// the Download page without a lookup.
+pub fn start_save_quietly(app: &mut App, url: &str) {
+    start_save_with(app, url, true);
+}
+
+fn start_save_with(app: &mut App, url: &str, quiet: bool) {
     let url = url.trim().to_owned();
     if url.is_empty() {
         return;
     }
     if app.tools.ytdlp.is_none() {
+        if quiet {
+            return;
+        }
         app.toast("Saving links needs yt-dlp. Set it up in Settings.");
         return;
     }
@@ -80,6 +96,7 @@ pub fn start_save(app: &mut App, url: &str) {
     app.saved_page.error = None;
     app.saved_page.lookups.push(Lookup {
         url,
+        quiet,
         task: Task::spawn(&app.wake, move || {
             ytdlp::fetch_titled(&tools, &net, &fetch, &|_| false).map_err(|e| format!("{e:#}"))
         }),
@@ -88,14 +105,28 @@ pub fn start_save(app: &mut App, url: &str) {
 
 /// Saves a link that's already been looked up, and says what happened.
 pub fn save_info(app: &mut App, info: &MediaInfo, url: &str) {
+    save_info_with(app, info, url, false);
+}
+
+/// Saves a link being downloaded, so it lands in Saved too; only a failure is shown. A
+/// collection saved before is refreshed, but its new songs aren't queued for offline (the
+/// download is getting them).
+pub fn save_info_quietly(app: &mut App, info: &MediaInfo, url: &str) {
+    save_info_with(app, info, url, true);
+}
+
+fn save_info_with(app: &mut App, info: &MediaInfo, url: &str, quiet: bool) {
     match app.saved.save_link(info, url) {
         Ok(out) => {
+            if quiet {
+                return;
+            }
             if let SaveOutcome::Refreshed { id, sync, .. } = &out {
                 keep_new_offline(app, *id, &sync.added);
             }
             app.toast(out.message());
         }
-        Err(e) => app.toast(format!("{e:#}")),
+        Err(e) => app.toast(format!("Couldn't save it to Saved: {e:#}")),
     }
 }
 
@@ -172,7 +203,9 @@ pub fn poll(app: &mut App) {
         };
         let lookup = app.saved_page.lookups.remove(i);
         match result {
-            Ok(info) => save_info(app, &info, &lookup.url),
+            Ok(info) => save_info_with(app, &info, &lookup.url, lookup.quiet),
+            // A download's own lookup failing shows on the download.
+            Err(_) if lookup.quiet => {}
             Err(e) => {
                 app.toast(e.lines().next().unwrap_or("Couldn't look that link up").to_owned());
                 app.saved_page.error = Some(e);
@@ -502,6 +535,19 @@ fn row_state<'a>(app: &App, t: &Track, tag: Option<&'a str>) -> RowState<'a> {
     }
 }
 
+/// Puts one saved song in a playlist or the queue, from the row's menu.
+fn add_song(app: &mut App, target: AddTarget, t: &Track) {
+    add_to(app, target, vec![t.clone()]);
+    app.toast(format!("Added “{}”", t.title));
+}
+
+/// Opens Convert with a song's downloaded file.
+fn convert_song(app: &mut App, t: &Track) {
+    if let Some(file) = library::local_file(t, &app.history) {
+        app.convert_file(file);
+    }
+}
+
 fn queue_offline(app: &mut App, t: &Track) {
     if let Some(job) = library::offline_download(t, &app.settings) {
         app.jobs.push(job.title, job.subtitle, job.spec);
@@ -527,7 +573,9 @@ fn songs_table(ui: &mut Ui, app: &mut App, p: Platform) {
     }
     let query = app.saved_page.search.trim().to_lowercase();
     list_header(ui);
+    let names = playlist_names(&app.library);
     let mut action = None;
+    let mut add = None;
     for (idx, t) in tracks.iter().enumerate() {
         if !query.is_empty() && !t.matches(&query) {
             continue;
@@ -542,11 +590,18 @@ fn songs_table(ui: &mut Ui, app: &mut App, p: Platform) {
             if !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked() {
                 a = Some(RowAction::Offline(idx));
             }
-            a
+            if let Some(target) = add_menu(ui, &names) {
+                add = Some((target, idx));
+            }
+            convert_button(ui, idx, offline).or(a)
         });
         action = action.or(row);
     }
+    if let Some((target, i)) = add {
+        add_song(app, target, &tracks[i]);
+    }
     match action {
+        Some(RowAction::Convert(i)) => convert_song(app, &tracks[i]),
         Some(RowAction::Play(i)) => app.play_tracks(tracks, i, None),
         Some(RowAction::Remove(i)) => {
             app.saved.remove_song(&tracks[i].key());
@@ -581,7 +636,9 @@ fn saved_table(ui: &mut Ui, app: &mut App, list: &[SavedTrack], p: Platform) {
     let query = app.saved_page.search.trim().to_lowercase();
     let tag = format!("Removed from {}", p.label());
     list_header(ui);
+    let names = playlist_names(&app.library);
     let mut action = None;
+    let mut add = None;
     for (idx, st) in list.iter().enumerate() {
         let t = &st.track;
         if !query.is_empty() && !t.matches(&query) {
@@ -589,13 +646,22 @@ fn saved_table(ui: &mut Ui, app: &mut App, list: &[SavedTrack], p: Platform) {
         }
         let state = row_state(app, t, st.removed_upstream.then_some(tag.as_str()));
         let offline = state.offline;
+        let has_file = offline || !t.is_link();
         let row = track_row(ui, idx, t, state, |ui| {
-            (t.is_link() && !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked())
-                .then_some(RowAction::Offline(idx))
+            let a = (t.is_link() && !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked())
+                .then_some(RowAction::Offline(idx));
+            if let Some(target) = add_menu(ui, &names) {
+                add = Some((target, idx));
+            }
+            convert_button(ui, idx, has_file).or(a)
         });
         action = action.or(row);
     }
+    if let Some((target, i)) = add {
+        add_song(app, target, &list[i].track);
+    }
     match action {
+        Some(RowAction::Convert(i)) => convert_song(app, &list[i].track),
         Some(RowAction::Play(i)) => play_saved(app, list, i, false),
         Some(RowAction::Offline(i)) => queue_offline(app, &list[i].track),
         _ => {}

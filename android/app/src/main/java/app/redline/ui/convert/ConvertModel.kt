@@ -23,6 +23,9 @@ import app.redline.core.applyConvertPreset
 import app.redline.core.classifyFileName
 import app.redline.core.newConvertPreset
 import app.redline.state.EngineStatus
+import app.redline.state.LocalFiles
+import app.redline.util.documentPath
+import app.redline.util.isAudioPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -87,6 +90,7 @@ class ConvertModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             skipped = emptyList()
             val copies = mutableListOf<Pair<File, File>>() // folder, file
+            val picked = mutableMapOf<String, Uri>() // copy's path, where it came from
             val skippedNow = mutableListOf<String>()
             for (uri in uris) {
                 val (name, size, named) = withContext(Dispatchers.IO) { describe(uri) }
@@ -115,7 +119,12 @@ class ConvertModel(app: Application) : AndroidViewModel(app) {
                 } finally {
                     imports = imports.filter { it !== import }
                 }
-                if (ok) copies += dir to file else inputs.release(listOf(dir))
+                if (ok) {
+                    copies += dir to file
+                    picked[file.absolutePath] = uri
+                } else {
+                    inputs.release(listOf(dir))
+                }
             }
             skipped = skippedNow
             if (copies.isNotEmpty()) {
@@ -135,24 +144,61 @@ class ConvertModel(app: Application) : AndroidViewModel(app) {
                         inputs.release(listOf(dir))
                     }
                 }
+                for (item in added) {
+                    val uri = picked[item.path] ?: continue
+                    if (isAudioPath(item.path)) keepInLocal(uri, File(item.path))
+                }
             }
             sweep()
         }
     }
 
-    /** Files already in Redline's folders (finished downloads and conversions): no copy needed. */
-    fun addPaths(paths: List<String>) {
+    /**
+     * Files already in Redline's folders (finished downloads and conversions): no copy needed.
+     * The songs among them are kept in Local too, unless they came from the Library
+     * ([keepInLocal] false), where they are already.
+     */
+    fun addPaths(paths: List<String>, keepInLocal: Boolean = true) {
         val fresh = paths.filter { p -> items.none { it.path == p } }
         if (fresh.isEmpty()) return
         viewModelScope.launch {
             skipped = emptyList()
             try {
-                read(fresh)
+                val added = read(fresh)
+                if (keepInLocal) LocalFiles.add(getApplication(), added.map { it.path })
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 _messages.send(ConvertMessage.Error(e.message ?: e.toString()))
             }
+        }
+    }
+
+    /**
+     * Keeps a picked song in the Library's Local section: where it really is when that's a
+     * readable file, else a lasting copy in [app.redline.state.ImportedMusic] (the Convert
+     * page's own [copy] goes once the job is done).
+     */
+    private suspend fun keepInLocal(uri: Uri, copy: File) {
+        val app = getApplication<Application>()
+        val original = withContext(Dispatchers.IO) { documentPath(app, uri) }
+        if (original != null) {
+            LocalFiles.add(app, listOf(original))
+            return
+        }
+        val imported = state.music?.imported ?: return
+        val dest = imported.newFile(copy.name)
+        try {
+            withContext(Dispatchers.IO) { copy.copyTo(dest, overwrite = true) }
+            LocalFiles.add(app, listOf(dest.absolutePath))
+        } catch (e: CancellationException) {
+            dest.delete()
+            throw e
+        } catch (e: Exception) {
+            dest.delete()
+            _messages.send(ConvertMessage.Error("Couldn't keep ${copy.name} in Local: ${e.message ?: e}"))
+        } finally {
+            imported.release(listOf(dest))
         }
     }
 

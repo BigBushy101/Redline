@@ -242,7 +242,7 @@ fn drop_zone(ui: &mut Ui, app: &mut App) {
             .add_filter("Media files", ALL_EXTS)
             .pick_files()
     {
-        app.convert.add_paths(files);
+        app.add_to_convert(files);
     }
 }
 

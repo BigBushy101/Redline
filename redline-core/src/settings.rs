@@ -110,6 +110,8 @@ pub struct Settings {
     pub refresh_saved_on_start: bool,
     /// Folders the Local library lists songs from.
     pub local_folders: Vec<PathBuf>,
+    /// Single songs kept in Local because they were added on the Convert page.
+    pub local_files: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -134,6 +136,7 @@ impl Default for Settings {
             player: PlayerSettings::default(),
             refresh_saved_on_start: true,
             local_folders: crate::local::default_folders(),
+            local_files: Vec::new(),
         }
     }
 }

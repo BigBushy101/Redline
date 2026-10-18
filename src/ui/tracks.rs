@@ -17,6 +17,8 @@ pub enum RowAction {
     Remove(usize),
     Offline(usize),
     Save(usize),
+    /// Open Convert with the row's file.
+    Convert(usize),
     /// The platform glyph in the source column was clicked.
     OpenPlatform(Platform),
 }
@@ -60,6 +62,11 @@ pub fn list_header(ui: &mut Ui) {
     let (sep, _) = ui.allocate_exact_size(vec2(w, 1.0), Sense::hover());
     ui.painter().rect_filled(sep, 0.0, egui::Color32::from_gray(0x2A));
     ui.add_space(4.0);
+}
+
+/// The Convert button for a row whose song is a file; `None` (no button) for streams.
+pub fn convert_button(ui: &mut Ui, idx: usize, has_file: bool) -> Option<RowAction> {
+    (has_file && theme::icon_button(ui, icons::ARROWS_LEFT_RIGHT, "Convert").clicked()).then_some(RowAction::Convert(idx))
 }
 
 /// How a row is drawn, apart from the track itself.

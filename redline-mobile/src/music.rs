@@ -590,6 +590,13 @@ impl Music {
         self.records(&library::scan(&tools, &paths))
     }
 
+    /// The file a track plays from, for sending it to Convert: a file track, or a link that's
+    /// been downloaded. `None` for a stream.
+    pub fn local_file(&self, track: TrackRecord) -> Option<String> {
+        let st = self.inner.engine.state();
+        library::local_file(&track.to_core(), &st.history).map(|p| p.to_string_lossy().into_owned())
+    }
+
     /// A History row as a track to add to a playlist: a download's link (which plays its
     /// file while that's there), or a conversion's output. `None` if there's nothing to play.
     pub fn track_for_history(&self, index: u32) -> Option<TrackRecord> {

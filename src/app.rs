@@ -225,6 +225,22 @@ impl App {
         self.play_tracks(vec![Track::new(source, title)], 0, None);
     }
 
+    /// Puts files on the Convert page; the songs among them are kept in Local too.
+    pub fn add_to_convert(&mut self, paths: Vec<std::path::PathBuf>) {
+        for p in &paths {
+            if p.is_file() && redline_core::local::is_audio(p) && !self.settings.local_files.contains(p) {
+                self.settings.local_files.push(p.clone());
+            }
+        }
+        self.convert.add_paths(paths);
+    }
+
+    /// Opens Convert with a library song's file.
+    pub fn convert_file(&mut self, path: std::path::PathBuf) {
+        self.convert.add_paths([path]);
+        self.page = Page::Convert;
+    }
+
     /// Replaces Now playing with `tracks` and starts at `start`.
     pub fn play_tracks(&mut self, tracks: Vec<Track>, start: usize, playlist: Option<PlaylistId>) {
         self.now.start(tracks, start, playlist);
@@ -444,7 +460,7 @@ impl App {
         if self.page == Page::Playlists && ui::playlists::drop_files(self, dropped.clone()) {
             return;
         }
-        self.convert.add_paths(dropped);
+        self.add_to_convert(dropped);
         self.page = Page::Convert;
     }
 }

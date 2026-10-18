@@ -175,6 +175,8 @@ pub struct Probe {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub has_audio: bool,
+    /// An embedded picture (album art).
+    pub has_cover: bool,
 }
 
 fn parse_probe(json: &[u8]) -> Option<Probe> {
@@ -194,12 +196,18 @@ fn parse_probe(json: &[u8]) -> Option<Probe> {
     let has_audio = v["streams"]
         .as_array()
         .is_some_and(|s| s.iter().any(|s| s["codec_type"] == "audio"));
+    // Cover art in a tagged file shows up as a one-frame video stream marked attached_pic.
+    let has_cover = v["streams"].as_array().is_some_and(|s| {
+        s.iter()
+            .any(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64() == Some(1))
+    });
     Some(Probe {
         duration: format["duration"].as_str().and_then(|d| d.parse().ok()),
         title: tag("title"),
         artist: tag("artist").or_else(|| tag("album_artist")),
         album: tag("album"),
         has_audio,
+        has_cover,
     })
 }
 
@@ -286,5 +294,8 @@ mod tests {
         assert_eq!(p.artist.as_deref(), Some("Band"));
         assert_eq!(p.album, None);
         assert!(p.has_audio);
+        assert!(!p.has_cover, "a real video stream isn't cover art");
+        let art = br#"{"streams":[{"codec_type":"audio"},{"codec_type":"video","disposition":{"attached_pic":1}}],"format":{}}"#;
+        assert!(parse_probe(art).unwrap().has_cover);
     }
 }

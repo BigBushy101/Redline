@@ -11,7 +11,7 @@ description = "Download media with yt-dlp and convert local files, in a Spotify-
 redline-core = { path = "redline-core" }
 # pinned to 0.36 to match egui-phosphor 0.14
 eframe = "0.36"
-egui_extras = { version = "0.36", features = ["http", "image"] }
+egui_extras = { version = "0.36", features = ["http", "image", "file"] }
 egui-phosphor = "0.14"
 rfd = "0.17"
 open = "5"

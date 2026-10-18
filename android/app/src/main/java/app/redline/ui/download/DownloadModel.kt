@@ -29,7 +29,8 @@ import kotlin.math.min
 
 /** What the Download page tells the user in a snackbar. */
 sealed interface DownloadMessage {
-    data class Queued(val title: String) : DownloadMessage
+    /** The download of [url] is queued; it's saved to the Library too. */
+    data class Queued(val title: String, val url: String) : DownloadMessage
     data class Error(val text: String) : DownloadMessage
 }
 
@@ -160,7 +161,7 @@ class DownloadModel(app: Application) : AndroidViewModel(app) {
             try {
                 state.onEngine { it.queueDownload(choices) }
                 state.act { } // refresh the queue now rather than at the next nudge
-                _messages.send(DownloadMessage.Queued(current?.title ?: link))
+                _messages.send(DownloadMessage.Queued(current?.title ?: link, link))
                 url = ""
                 resetLink()
             } catch (e: CancellationException) {

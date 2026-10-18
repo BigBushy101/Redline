@@ -3,11 +3,11 @@ package app.redline.ui.local
 import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,7 +18,10 @@ import androidx.lifecycle.viewModelScope
 import app.redline.RedlineApp
 import app.redline.core.TrackKind
 import app.redline.core.TrackRecord
+import app.redline.state.LocalFiles
 import app.redline.state.MusicState
+import app.redline.util.isAudioPath
+import app.redline.util.treePath
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -48,6 +51,9 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
     /** Folders searched, as paths. */
     var folders by mutableStateOf(loadFolders())
         private set
+    /** Songs added on the Convert page, listed whatever folder they're in ([LocalFiles]). */
+    var files by mutableStateOf(LocalFiles.load(app))
+        private set
     var tracks by mutableStateOf<List<TrackRecord>>(emptyList())
         private set
     var scanning by mutableStateOf(false)
@@ -60,6 +66,26 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
     val messages = _messages.receiveAsFlow()
 
     private var scan: Job? = null
+
+    /** The Convert page adds files straight to [LocalFiles]; this picks them up. */
+    private val filesWatch = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == LocalFiles.KEY_FILES) {
+            val now = LocalFiles.load(getApplication())
+            if (now != files) {
+                files = now
+                rescan()
+            }
+        }
+    }
+
+    init {
+        // Held weakly by the preferences, so the model keeps it.
+        LocalFiles.prefs(app).registerOnSharedPreferenceChangeListener(filesWatch)
+    }
+
+    override fun onCleared() {
+        LocalFiles.prefs(getApplication()).unregisterOnSharedPreferenceChangeListener(filesWatch)
+    }
 
     /** After the permission prompt, or coming back to the page. */
     fun permissionChanged() {
@@ -77,15 +103,31 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
         }
         scan?.cancel()
         val dirs = folders
+        val added = files
         scanning = true
         scan = viewModelScope.launch {
-            val found = withContext(Dispatchers.IO) { query(dirs) }
-            tracks = found
+            val indexed = withContext(Dispatchers.IO) { query(dirs, added) }
+            // Added files the media index doesn't know (app-private copies, folders it skips):
+            // ffprobe reads their tags.
+            val known = indexed.map { it.location }.toSet()
+            val rest = added.filter { it !in known && File(it).isFile }
+            val probed = if (rest.isEmpty()) emptyList() else music?.onMusicSlow { it.scanFiles(rest) }.orEmpty()
+            tracks = indexed + probed
             scanning = false
         }
     }
 
-    /** A folder from the system picker; `null` if it isn't on the phone's own storage. */
+    /** Whether [path] is listed because it was added, rather than for its folder. */
+    fun isAdded(path: String): Boolean {
+        val roots = folders.map { it.trimEnd('/') + "/" }
+        return path in files && roots.none { path.startsWith(it) }
+    }
+
+    fun removeFile(path: String) = LocalFiles.remove(getApplication(), path)
+
+    fun clearFiles() = LocalFiles.clear(getApplication())
+
+    /** A folder from the system picker; refused if it isn't on the phone's own storage. */
     fun addFolder(tree: Uri) {
         val path = treePath(tree)
         if (path == null) {
@@ -148,9 +190,10 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
     // ---- The media index ----------------------------------------------------------------
 
     @Suppress("DEPRECATION") // DATA is still the file's path, and still readable.
-    private fun query(dirs: List<String>): List<TrackRecord> {
+    private fun query(dirs: List<String>, added: List<String>): List<TrackRecord> {
         val roots = dirs.map { it.trimEnd('/') + "/" }
-        if (roots.isEmpty()) return emptyList()
+        val addedSet = added.toSet()
+        if (roots.isEmpty() && addedSet.isEmpty()) return emptyList()
         val cols = arrayOf(
             MediaStore.Audio.Media.DATA,
             MediaStore.Audio.Media.TITLE,
@@ -167,8 +210,8 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
         resolver.query(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, cols, where, null, "${MediaStore.Audio.Media.DATA} ASC")?.use { c ->
             while (c.moveToNext()) {
                 val path = c.getString(0) ?: continue
-                if (roots.none { path.startsWith(it) } || !seen.add(path)) continue
-                if (path.substringAfterLast('.', "").lowercase() !in AUDIO) continue
+                if ((roots.none { path.startsWith(it) } && path !in addedSet) || !seen.add(path)) continue
+                if (!isAudioPath(path)) continue
                 if (!File(path).isFile) continue
                 val name = path.substringAfterLast('/').substringBeforeLast('.')
                 out += TrackRecord(
@@ -187,25 +230,8 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
         return out
     }
 
-    /** The path of a folder from the system picker, on internal storage or an SD card. */
-    private fun treePath(tree: Uri): String? {
-        if (tree.authority != "com.android.externalstorage.documents") return null
-        val id = runCatching { DocumentsContract.getTreeDocumentId(tree) }.getOrNull() ?: return null
-        val volume = id.substringBefore(':')
-        val rel = id.substringAfter(':', "").trim('/')
-        val root = if (volume.equals("primary", ignoreCase = true)) {
-            Environment.getExternalStorageDirectory().absolutePath
-        } else {
-            "/storage/$volume"
-        }
-        return if (rel.isEmpty()) root else "$root/$rel"
-    }
-
     companion object {
         private const val KEY_FOLDERS = "folders"
-
-        /** What the core's player takes (redline-core's `classify` Audio). */
-        private val AUDIO = setOf("mp3", "m4a", "aac", "flac", "wav", "ogg", "opus", "wma", "aiff", "aif", "alac")
 
         fun defaultFolder(): String =
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC).absolutePath

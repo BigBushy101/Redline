@@ -9,7 +9,7 @@ use redline_core::player::Source;
 
 use crate::app::App;
 use crate::format::fmt_duration;
-use super::tracks::{RowAction, RowState, list_header, search_box, track_row};
+use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
 use crate::task::Task;
 use crate::theme;
 use crate::tools::ytdlp;
@@ -271,8 +271,9 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             ..Default::default()
         };
         let saved = t.is_link() && app.saved.contains(&t.key());
+        let has_file = matches!(local, Source::Local(_));
         let row = track_row(ui, idx, t, state, |ui| {
-            let mut a = None;
+            let mut a = convert_button(ui, idx, has_file);
             if theme::icon_button(ui, icons::X, "Remove from playlist").clicked() {
                 a = Some(RowAction::Remove(idx));
             }
@@ -307,6 +308,11 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             }
         }
         Some(RowAction::Save(i)) => super::saved::save_track(app, &tracks[i]),
+        Some(RowAction::Convert(i)) => {
+            if let Some(file) = library::local_file(&tracks[i], &app.history) {
+                app.convert_file(file);
+            }
+        }
         Some(RowAction::OpenPlatform(p)) => app.page = crate::app::Page::Saved(Some(p)),
         None => {}
     }

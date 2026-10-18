@@ -9,15 +9,16 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
- * The copies of files picked for playlists (ffmpeg can't read a content:// link), in the app's
- * own Music folder [dir]. A copy stays while a playlist, Now playing or History uses it; the
- * core knows which. It's also *held* from the moment its name is claimed until its tracks are in
+ * The copies of files picked for playlists (ffmpeg can't read a content:// link), or added on
+ * the Convert page from somewhere Local can't read, in the app's own Music folder [dir]. A copy
+ * stays while a playlist, Now playing or History uses it (the core knows which), or while
+ * [keep] lists it (Local's added files). It's also *held* from the moment its name is claimed until its tracks are in
  * the playlist. [sweep] deletes the rest, and only ever files right in [dir].
  *
  * Claiming, releasing and sweeping take the same lock, so a sweep never sees a copy between its
  * creation and its hold, like [ConvertInputs].
  */
-class ImportedMusic(val dir: File) {
+class ImportedMusic(val dir: File, private val keep: () -> Collection<String> = { emptyList() }) {
     private val lock = Mutex()
     private val held = mutableSetOf<String>()
 
@@ -48,7 +49,7 @@ class ImportedMusic(val dir: File) {
     /** Deletes the copies nothing needs any more; returns how many. */
     suspend fun sweep(music: Music): Int = withContext(NonCancellable) {
         lock.withLock {
-            withContext(Dispatchers.IO) { music.sweepImported(dir.absolutePath, held.toList()).toInt() }
+            withContext(Dispatchers.IO) { music.sweepImported(dir.absolutePath, held.toList() + keep()).toInt() }
         }
     }
 }

@@ -978,7 +978,12 @@ pub fn player_snapshot(st: &PlayerState, now: &NowPlaying, queue_version: u64) -
         album: track.and_then(|t| t.album.clone()),
         thumbnail: track
             .and_then(|t| t.thumbnail.clone())
-            .or_else(|| current.and_then(|t| t.thumbnail.clone())),
+            .or_else(|| current.and_then(|t| t.thumbnail.clone()))
+            // A song file with no picture of its own: the app reads the art out of the file.
+            .or_else(|| match &st.source {
+                Some(Source::Local(p)) => Some(path_string(p)),
+                _ => None,
+            }),
         position_secs: st.position,
         duration_secs: st.duration.or_else(|| current.and_then(|t| t.duration)),
         buffering: st.buffering,

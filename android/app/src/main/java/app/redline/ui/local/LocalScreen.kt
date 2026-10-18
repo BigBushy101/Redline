@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.LibraryMusic
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QueuePlayNext
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -56,6 +58,7 @@ import app.redline.state.MusicState
 import app.redline.ui.components.EmptyState
 import app.redline.ui.components.GhostButton
 import app.redline.ui.components.InputField
+import app.redline.ui.components.LibraryMenuItems
 import app.redline.ui.components.MenuItem
 import app.redline.ui.components.PageHeader
 import app.redline.ui.components.PagePadding
@@ -160,6 +163,13 @@ fun LocalScreen(model: LocalModel, music: MusicState, playlists: List<PlaylistSu
                     close()
                     adding = t
                 }
+                LibraryMenuItems(t, close, playlist = false)
+                if (model.isAdded(t.location)) {
+                    MenuItem("Remove from Local", Icons.Rounded.RemoveCircleOutline) {
+                        close()
+                        model.removeFile(t.location)
+                    }
+                }
             }
         }
     }
@@ -173,7 +183,7 @@ fun LocalScreen(model: LocalModel, music: MusicState, playlists: List<PlaylistSu
     }
 }
 
-/** The folders searched, each removable, then Add folder (and back to Music). */
+/** The folders searched, each removable, the files added on Convert, then Add folder (and back to Music). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun Folders(model: LocalModel, addFolder: () -> Unit) {
@@ -196,6 +206,20 @@ private fun Folders(model: LocalModel, addFolder: () -> Unit) {
                     )
                     IconButton(onClick = { model.removeFolder(dir) }, modifier = Modifier.size(36.dp)) {
                         Icon(Icons.Rounded.Close, "Stop listing $dir", tint = RedlineColors.Muted, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+            val added = model.files.size
+            if (added > 0) {
+                Row(
+                    Modifier.background(RedlineColors.Card, CircleShape).padding(start = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Rounded.AudioFile, null, tint = RedlineColors.Muted, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Added files: $added", style = MaterialTheme.typography.labelLarge, color = RedlineColors.Text, maxLines = 1)
+                    IconButton(onClick = model::clearFiles, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Rounded.Close, "Clear the files added on Convert", tint = RedlineColors.Muted, modifier = Modifier.size(16.dp))
                     }
                 }
             }

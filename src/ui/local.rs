@@ -6,9 +6,10 @@ use eframe::egui::{self, Frame, Margin, RichText, Spinner, Ui, vec2};
 use egui_phosphor::regular as icons;
 use redline_core::library::Track;
 use redline_core::local;
+use redline_core::player::Source;
 
 use super::playlists::{add_menu, add_to, playlist_names};
-use super::tracks::{RowAction, RowState, list_header, search_box, track_row};
+use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
 use crate::app::App;
 use crate::format::fmt_duration;
 use crate::task::Task;
@@ -18,8 +19,9 @@ use crate::theme;
 pub struct LocalPage {
     pub tracks: Vec<Track>,
     scan: Option<Task<Vec<Track>>>,
-    /// The folders `tracks` (or the scan under way) came from; a change scans again.
-    scanned: Option<Vec<PathBuf>>,
+    /// The folders and added files `tracks` (or the scan under way) came from; a change
+    /// scans again.
+    scanned: Option<(Vec<PathBuf>, Vec<PathBuf>)>,
     search: String,
 }
 
@@ -31,10 +33,11 @@ pub fn poll(app: &mut App) {
         page.tracks = tracks;
         page.scan = None;
     }
-    if page.scan.is_none() && page.scanned.as_ref() != Some(&app.settings.local_folders) {
-        let (tools, folders) = (app.tools.clone(), app.settings.local_folders.clone());
-        page.scanned = Some(folders.clone());
-        page.scan = Some(Task::spawn(&app.wake, move || local::scan(&tools, &folders)));
+    let want = (app.settings.local_folders.clone(), app.settings.local_files.clone());
+    if page.scan.is_none() && page.scanned.as_ref() != Some(&want) {
+        let tools = app.tools.clone();
+        page.scanned = Some(want.clone());
+        page.scan = Some(Task::spawn(&app.wake, move || local::scan(&tools, &want.0, &want.1)));
     }
 }
 
@@ -86,7 +89,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let names = playlist_names(&app.library);
     let mut action = None;
     let mut add = None;
+    let mut forget = None;
     let w = ui.available_width();
+    let folders = &app.settings.local_folders;
     for (idx, t) in app.local_page.tracks.iter().enumerate() {
         if !query.is_empty() && !t.matches(&query) {
             continue;
@@ -100,16 +105,37 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             playing: current.as_ref() == Some(&t.source),
             ..Default::default()
         };
+        let added = match &t.source {
+            Source::Local(p) => {
+                app.settings.local_files.contains(p) && !folders.iter().any(|f| p.starts_with(f))
+            }
+            Source::Link(_) => false,
+        };
         let row = track_row(ui, idx, t, state, |ui| {
+            if added && theme::icon_button(ui, icons::X, "Remove from Local").clicked() {
+                forget = Some(idx);
+            }
             if let Some(target) = add_menu(ui, &names) {
                 add = Some((target, idx));
             }
-            None
+            convert_button(ui, idx, true)
         });
         action = action.or(row);
     }
-    if let Some(RowAction::Play(i)) = action {
-        app.play_list(app.local_page.tracks.clone(), i, false);
+    match action {
+        Some(RowAction::Play(i)) => app.play_list(app.local_page.tracks.clone(), i, false),
+        Some(RowAction::Convert(i)) => {
+            if let Source::Local(p) = &app.local_page.tracks[i].source {
+                app.convert_file(p.clone());
+            }
+        }
+        _ => {}
+    }
+    if let Some(i) = forget
+        && let Source::Local(p) = &app.local_page.tracks[i].source
+    {
+        let p = p.clone();
+        app.settings.local_files.retain(|f| *f != p);
     }
     if let Some((target, i)) = add {
         let track = app.local_page.tracks[i].clone();
@@ -119,9 +145,11 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     }
 }
 
-/// The folders searched, each with a remove button, and Add folder.
+/// The folders searched, each with a remove button, the files added on Convert, and Add
+/// folder.
 fn folders(ui: &mut Ui, app: &mut App) {
     let mut remove = None;
+    let mut clear = false;
     ui.horizontal_wrapped(|ui| {
         ui.label(theme::muted(format!("{}  From", icons::FOLDER_SIMPLE)));
         for (i, dir) in app.settings.local_folders.iter().enumerate() {
@@ -145,6 +173,23 @@ fn folders(ui: &mut Ui, app: &mut App) {
         {
             app.settings.local_folders.push(dir);
         }
+        let added = app.settings.local_files.len();
+        if added > 0 {
+            Frame::new()
+                .fill(theme::CARD)
+                .corner_radius(255)
+                .inner_margin(Margin { left: 12, right: 4, top: 2, bottom: 2 })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let label = format!("{}  Added files: {added}", icons::FILE_AUDIO);
+                        ui.label(theme::strong(label))
+                            .on_hover_text("Songs added on the Convert page");
+                        if theme::icon_button(ui, icons::X, "Clear the added files").clicked() {
+                            clear = true;
+                        }
+                    });
+                });
+        }
         let defaults = local::default_folders();
         if app.settings.local_folders != defaults
             && !defaults.is_empty()
@@ -155,6 +200,9 @@ fn folders(ui: &mut Ui, app: &mut App) {
     });
     if let Some(i) = remove {
         app.settings.local_folders.remove(i);
+    }
+    if clear {
+        app.settings.local_files.clear();
     }
 }
 

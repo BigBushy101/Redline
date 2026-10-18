@@ -172,6 +172,27 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
         }
     }
 
+    /**
+     * Saves a link being downloaded, so it's in Saved under its platform too. Nothing is said
+     * unless saving fails; saving it again is a no-op.
+     */
+    fun saveQuietly(url: String) {
+        val link = url.trim()
+        if (link.isEmpty() || link in saving) return
+        val music = music ?: return
+        saving = saving + link
+        viewModelScope.launch {
+            try {
+                music.onMusicSlow { it.saveLink(link) }
+                music.act { } // Saved changed
+            } catch (e: RedlineException) {
+                _messages.send(SavedMessage.Error("Couldn't save it to Saved: ${e.message ?: "the lookup failed"}"))
+            } finally {
+                saving = saving - link
+            }
+        }
+    }
+
     // ---- Collections --------------------------------------------------------------------
 
     fun refresh(id: ULong) = refreshing { it.refreshCollection(id) }

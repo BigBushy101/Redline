@@ -61,6 +61,8 @@ import app.redline.state.MusicState
 import app.redline.state.RedlineState
 import app.redline.ui.components.LocalOpenSettings
 import app.redline.ui.convert.ConvertMessage
+import app.redline.ui.components.LocalTrackActions
+import app.redline.ui.components.TrackActions
 import app.redline.ui.convert.ConvertModel
 import app.redline.ui.convert.ConvertScreen
 import app.redline.ui.download.DownloadMessage
@@ -155,7 +157,7 @@ private fun Pages(
     val selectTab: (Tab) -> Unit = { nav.tab = it }
     val context = LocalContext.current
     val playlists by music.playlists.collectAsStateWithLifecycle()
-    // A History row's track waiting for "Add to playlist…" to pick where.
+    // A History or Library row's track waiting for "Add to playlist…" to pick where.
     var toAdd by remember { mutableStateOf<TrackRecord?>(null) }
     val queue by state.queue.collectAsStateWithLifecycle()
     val active by state.activeCount.collectAsStateWithLifecycle()
@@ -177,6 +179,7 @@ private fun Pages(
             when (m) {
                 is DownloadMessage.Error -> say(m.text)
                 is DownloadMessage.Queued -> scope.launch {
+                    savedModel.saveQuietly(m.url)
                     val r = snackbar.showSnackbar(
                         "Added “${m.title}” to your queue",
                         actionLabel = "View queue",
@@ -253,6 +256,25 @@ private fun Pages(
         selectTab(Tab.Convert)
     }
 
+    // What Library rows send songs to: Convert (a song's file, already in the Library, so not
+    // added to Local again) and the "Add to playlist…" dialog below.
+    val trackActions = remember(music) {
+        TrackActions(
+            convert = { t ->
+                scope.launch {
+                    val path = music.onMusic { it.localFile(t) }
+                    if (path == null) {
+                        say("That song isn't a file on this phone.")
+                    } else {
+                        convert.addPaths(listOf(path), keepInLocal = false)
+                        nav.tab = Tab.Convert
+                    }
+                }
+            },
+            addToPlaylist = { toAdd = it },
+        )
+    }
+
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = RedlineColors.Bg,
@@ -284,16 +306,18 @@ private fun Pages(
                             isSaving = savedModel::isSaving,
                         )
                         Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = openSettings)
-                        Tab.Library -> LibraryScreen(
-                            section = nav.librarySection,
-                            onSection = { nav.librarySection = it },
-                            saved = savedModel,
-                            playlistsModel = playlistsModel,
-                            local = localModel,
-                            music = music,
-                            playlists = playlists,
-                            history = history,
-                        )
+                        Tab.Library -> CompositionLocalProvider(LocalTrackActions provides trackActions) {
+                            LibraryScreen(
+                                section = nav.librarySection,
+                                onSection = { nav.librarySection = it },
+                                saved = savedModel,
+                                playlistsModel = playlistsModel,
+                                local = localModel,
+                                music = music,
+                                playlists = playlists,
+                                history = history,
+                            )
+                        }
                         Tab.Queue -> QueueScreen(
                             queue,
                             onAction = { a ->

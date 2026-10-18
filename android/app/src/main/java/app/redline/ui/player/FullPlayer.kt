@@ -22,8 +22,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.VolumeDown
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Link
@@ -72,6 +70,7 @@ import app.redline.ui.components.Eyebrow
 import app.redline.ui.components.PagePadding
 import app.redline.ui.theme.LocalAccent
 import app.redline.ui.theme.RedlineColors
+import app.redline.util.art
 
 /**
  * The whole player over the app: the desktop's player bar, its speed and EQ popups and the
@@ -113,7 +112,6 @@ fun FullPlayer(music: MusicState, close: () -> Unit) {
             item {
                 Column(Modifier.padding(horizontal = PagePadding), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     settings?.let { p ->
-                        VolumeCard(p.volume, music::setVolume)
                         SpeedCard(p, music.choices, music)
                         EqCard(p, music.choices, music::setEq)
                     }
@@ -265,23 +263,6 @@ private fun Transport(s: PlayerSnapshotRecord, music: MusicState) {
     }
 }
 
-@Composable
-private fun VolumeCard(volume: Float, set: (Float) -> Unit) {
-    PlayerCard {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.AutoMirrored.Rounded.VolumeDown, null, tint = RedlineColors.Muted)
-            Slider(
-                value = volume,
-                onValueChange = set,
-                valueRange = 0f..1f,
-                colors = sliderColors(),
-                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-            )
-            Icon(Icons.AutoMirrored.Rounded.VolumeUp, null, tint = RedlineColors.Muted)
-        }
-    }
-}
-
 /** Up next (playlists.rs `now_playing`): tap to play from there, × to take it out. */
 @Composable
 private fun QueueRow(q: QueueTrackRecord, jump: () -> Unit, remove: () -> Unit) {
@@ -293,7 +274,7 @@ private fun QueueRow(q: QueueTrackRecord, jump: () -> Unit, remove: () -> Unit) 
             .padding(start = PagePadding, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Cover(t.thumbnail, if (t.kind == TrackKind.LINK) Icons.Rounded.Link else Icons.Rounded.MusicNote, size = 40.dp)
+        Cover(t.art, if (t.kind == TrackKind.LINK) Icons.Rounded.Link else Icons.Rounded.MusicNote, size = 40.dp)
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text(t.title, style = MaterialTheme.typography.titleSmall, color = RedlineColors.Text, maxLines = 1, overflow = TextOverflow.Ellipsis)

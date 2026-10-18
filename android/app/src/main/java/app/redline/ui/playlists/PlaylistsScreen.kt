@@ -81,6 +81,7 @@ import app.redline.ui.components.EmptyState
 import app.redline.ui.components.Eyebrow
 import app.redline.ui.components.GhostButton
 import app.redline.ui.components.InputField
+import app.redline.ui.components.LibraryMenuItems
 import app.redline.ui.components.MenuItem
 import app.redline.ui.components.PageHeader
 import app.redline.ui.components.PagePadding
@@ -385,6 +386,7 @@ private fun PlaylistTrackRow(index: Int, track: TrackRecord, count: Int, playing
         MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) { pick(TrackAction.Queue) }
         if (track.canGoOffline) MenuItem("Download for offline", Icons.Rounded.Download) { pick(TrackAction.Offline) }
         if (track.kind == TrackKind.LINK && !saved) MenuItem("Save to Saved", Icons.Rounded.BookmarkBorder) { pick(TrackAction.Save) }
+        LibraryMenuItems(track, close, playlist = false)
         if (index > 0) MenuItem("Move up", Icons.Rounded.KeyboardArrowUp) { pick(TrackAction.Up) }
         if (index + 1 < count) MenuItem("Move down", Icons.Rounded.KeyboardArrowDown) { pick(TrackAction.Down) }
         MenuItem("Remove from playlist", Icons.Rounded.RemoveCircleOutline) { pick(TrackAction.Remove) }

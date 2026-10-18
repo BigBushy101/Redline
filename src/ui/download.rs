@@ -255,12 +255,14 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     schedule_row(ui, &mut page.schedule);
     ui.add_space(12.0);
     let mut save = None;
+    let mut downloaded = None;
     ui.horizontal(|ui| {
         if theme::pill_button(ui, &format!("{}  Download", icons::DOWNLOAD_SIMPLE), ready).clicked() {
             let trim = trim.ok().flatten();
             let job = page.link.plan(&url, trim, &app.settings);
             let title = job.title.clone();
             app.jobs.push_at(job.title, job.subtitle, job.spec, page.schedule.not_before());
+            downloaded = Some(page.link.info.clone());
             page.toast = Some((title, now));
             page.url.clear();
             page.reset_link();
@@ -296,6 +298,12 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     });
     if let Some(info) = save {
         super::saved::save_info(app, &info, &url);
+    }
+    // What's downloaded is kept in Saved too, under its platform.
+    match downloaded {
+        Some(Some(info)) => super::saved::save_info_quietly(app, &info, &url),
+        Some(None) => super::saved::start_save_quietly(app, &url),
+        None => {}
     }
 }
 

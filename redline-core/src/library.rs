@@ -228,17 +228,81 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) {
 /// Tracks for local files, with titles and artists from their tags where ffprobe finds
 /// them. Slow for big folders; run it off the UI thread.
 pub fn scan(tools: &ToolPaths, paths: &[PathBuf]) -> Vec<Track> {
-    media_files(paths)
-        .into_iter()
-        .map(|file| {
-            let probe = tools.ffprobe.as_deref().and_then(|p| decode::probe(p, &file)).unwrap_or_default();
-            let source = Source::Local(file);
-            let mut t = Track::new(source.clone(), probe.title.unwrap_or_else(|| source.label()));
-            t.artist = probe.artist;
-            t.duration = probe.duration;
-            t
-        })
-        .collect()
+    media_files(paths).iter().map(|file| track_for_file(tools, file)).collect()
+}
+
+/// A track for one local file: title and artist from its tags, and its cover art.
+pub fn track_for_file(tools: &ToolPaths, file: &Path) -> Track {
+    let probe = tools.ffprobe.as_deref().and_then(|p| decode::probe(p, file)).unwrap_or_default();
+    let source = Source::Local(file.to_path_buf());
+    let mut t = Track::new(source.clone(), probe.title.unwrap_or_else(|| source.label()));
+    t.artist = probe.artist;
+    t.duration = probe.duration;
+    t.thumbnail = cover_for(tools, file, probe.has_cover);
+    t
+}
+
+/// Where a file's extracted cover art is kept.
+pub fn covers_dir() -> PathBuf {
+    settings::data_dir().join("covers")
+}
+
+/// A `file://` image for a local song: a cover picture next to it, else its embedded art
+/// pulled out with ffmpeg into [`covers_dir`]. Android reads the art itself when it shows it.
+#[cfg(not(target_os = "android"))]
+fn cover_for(tools: &ToolPaths, file: &Path, embedded: bool) -> Option<String> {
+    let uri = |p: &Path| Some(format!("file://{}", p.display()));
+    if let Some(dir) = file.parent() {
+        for name in ["cover.jpg", "folder.jpg", "front.jpg", "cover.png", "folder.png"] {
+            let p = dir.join(name);
+            if p.is_file() {
+                return uri(&p);
+            }
+        }
+    }
+    let ffmpeg = tools.ffmpeg.as_deref().filter(|_| embedded)?;
+    let out = covers_dir().join(cover_name(file));
+    std::fs::create_dir_all(covers_dir()).ok()?;
+    let ok = crate::tools::command(ffmpeg)
+        .args(["-y", "-v", "error", "-i"])
+        .arg(file)
+        .args(["-an", "-map", "0:v:0", "-frames:v", "1", "-vf", "scale='min(600,iw)':-2", "-q:v", "3"])
+        .arg(&out)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if ok && out.is_file() { uri(&out) } else { None }
+}
+
+#[cfg(target_os = "android")]
+fn cover_for(_tools: &ToolPaths, _file: &Path, _embedded: bool) -> Option<String> {
+    None
+}
+
+/// The extracted cover's file name, one per song path.
+fn cover_name(file: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    file.hash(&mut h);
+    format!("{:016x}.jpg", h.finish())
+}
+
+/// Removes the extracted cover of a song that's gone; cover pictures beside songs are left.
+pub fn forget_cover(track: &Track) {
+    if let Some(p) = track.thumbnail.as_deref().and_then(|t| t.strip_prefix("file://")) {
+        let p = Path::new(p);
+        if p.starts_with(covers_dir()) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// The file a track plays from, for sending it to Convert: a local song, or a link that's
+/// been downloaded.
+pub fn local_file(track: &Track, history: &History) -> Option<PathBuf> {
+    match playable_source(track, history) {
+        Source::Local(p) if p.is_file() => Some(p),
+        _ => None,
+    }
 }
 
 /// Tracks for a looked-up link: every entry of a playlist, or the one video.
@@ -633,6 +697,41 @@ mod tests {
         assert_eq!(r.options.mode, Mode::Audio);
         assert!(!r.options.playlist);
         assert!(offline_download(&Track::new(Source::Local("a.mp3".into()), "a".into()), &settings).is_none());
+    }
+
+    /// Opt-in: needs the real ffmpeg (`cargo test -- --ignored`).
+    #[test]
+    #[ignore]
+    fn pulls_out_embedded_cover_art() {
+        let tools = crate::tools::e2e::ensure_tools();
+        let dir = crate::tools::e2e::scratch("cover");
+        let (art, song, bare) = (dir.join("art.png"), dir.join("song.mp3"), dir.join("bare.mp3"));
+        let ffmpeg = tools.ffmpeg.clone().unwrap();
+        let run = |args: &[&str]| {
+            let ok = crate::tools::command(&ffmpeg).args(["-y", "-v", "error"]).args(args).status().unwrap();
+            assert!(ok.success(), "{args:?}");
+        };
+        run(&["-f", "lavfi", "-i", "color=red:s=64x64", "-frames:v", "1", art.to_str().unwrap()]);
+        run(&["-f", "lavfi", "-i", "sine=d=1", bare.to_str().unwrap()]);
+        run(&[
+            "-i", bare.to_str().unwrap(), "-i", art.to_str().unwrap(), "-map", "0", "-map", "1", "-c:a", "copy",
+            "-disposition:v", "attached_pic", song.to_str().unwrap(),
+        ]);
+        std::fs::remove_file(&art).unwrap();
+
+        let t = track_for_file(&tools, &song);
+        let cover = t.thumbnail.as_deref().and_then(|u| u.strip_prefix("file://")).expect("a cover");
+        assert!(Path::new(cover).starts_with(covers_dir()));
+        let img = image::open(cover).unwrap();
+        assert_eq!((img.width(), img.height()), (64, 64));
+        assert_eq!(track_for_file(&tools, &bare).thumbnail, None, "no art, no cover");
+        forget_cover(&t);
+        assert!(!Path::new(cover).exists());
+
+        std::fs::write(dir.join("folder.jpg"), b"").unwrap();
+        let beside = track_for_file(&tools, &bare).thumbnail.unwrap();
+        assert!(beside.ends_with("folder.jpg"), "{beside}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
