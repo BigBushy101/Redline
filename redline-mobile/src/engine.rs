@@ -63,7 +63,7 @@ impl State {
         self.lookups.iter().rev().find(|(u, _)| u == url).map(|(_, i)| i)
     }
 
-    fn remember(&mut self, url: String, info: MediaInfo) {
+    pub(crate) fn remember(&mut self, url: String, info: MediaInfo) {
         self.lookups.retain(|(u, _)| *u != url);
         if self.lookups.len() == LOOKUPS {
             self.lookups.pop_front();
@@ -123,6 +123,12 @@ impl Signal {
         self.cv.notify_one();
     }
 
+    /// Whether it was told to stop: work that outlives a step (a saved collection's refresh)
+    /// checks this before going on.
+    pub(crate) fn stopped(&self) -> bool {
+        self.flags.lock().unwrap().stop
+    }
+
     /// Waits up to `timeout` (for a stop, or a poke if `pokes`), and takes the poke.
     fn wait(&self, timeout: Duration, pokes: bool) -> Flags {
         let flags = self.flags.lock().unwrap();
@@ -150,6 +156,17 @@ impl Shared {
     /// Looks a link up with yt-dlp (blocking) and keeps the answer for planning its download.
     /// `cached` takes a kept answer instead when there is one.
     pub(crate) fn look_up(&self, url: &str, cached: bool) -> Result<MediaInfo, RedlineError> {
+        self.look_up_with(url, cached, false)
+    }
+
+    /// [`look_up`](Self::look_up), naming untitled playlist entries too (SoundCloud's flat
+    /// listings have none), as the desktop does before saving a link. A kept answer is taken
+    /// as it is.
+    pub(crate) fn look_up_titled(&self, url: &str) -> Result<MediaInfo, RedlineError> {
+        self.look_up_with(url, true, true)
+    }
+
+    fn look_up_with(&self, url: &str, cached: bool, titled: bool) -> Result<MediaInfo, RedlineError> {
         let url = url.trim();
         if url.is_empty() {
             return Err(RedlineError::Invalid("Paste a link first.".into()));
@@ -165,7 +182,12 @@ impl Shared {
             return Err(RedlineError::ToolsMissing("Looking up links needs yt-dlp.".into()));
         }
         // fetch_info already adds friendly_error's hints.
-        let info = ytdlp::fetch_info(&tools, &net, url).map_err(RedlineError::failed)?;
+        let info = if titled {
+            ytdlp::fetch_titled(&tools, &net, url, &|_| false)
+        } else {
+            ytdlp::fetch_info(&tools, &net, url)
+        }
+        .map_err(RedlineError::failed)?;
         self.state().remember(url.to_owned(), info.clone());
         Ok(info)
     }

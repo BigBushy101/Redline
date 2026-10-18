@@ -57,6 +57,9 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
         private set
     var adding by mutableStateOf<List<Adding>>(emptyList())
         private set
+    /** The open playlist's links that are in Saved, as last read. */
+    var savedLinks by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     private val _messages = Channel<PlaylistsMessage>(Channel.BUFFERED)
     val messages = _messages.receiveAsFlow()
@@ -81,10 +84,18 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
         val id = openId ?: return
         val music = music ?: return
         viewModelScope.launch {
-            val p = music.onMusic { it.playlist(id) }
+            val (p, saved) = music.onMusic { m ->
+                val p = m.playlist(id)
+                p to p?.tracks.orEmpty().filter { it.kind == TrackKind.LINK && m.isSaved(it.location) }.map { it.location }.toSet()
+            }
             if (openId != id) return@launch
             // Deleted elsewhere: back to the list.
-            if (p == null) close() else detail = p
+            if (p == null) {
+                close()
+            } else {
+                detail = p
+                savedLinks = saved
+            }
         }
     }
 
@@ -125,6 +136,16 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
 
     fun remove(id: ULong, index: Int) {
         music?.editPlaylists { it.removeTrack(id, index.toUInt()) }
+    }
+
+    /** "Save to Saved": the link as a single song (the desktop's bookmark on playlist rows). */
+    fun saveTrack(track: TrackRecord) {
+        val music = music ?: return
+        viewModelScope.launch {
+            val message = music.onMusic { it.saveTrack(track) }
+            music.act { } // Saved changed: refresh, which re-reads this playlist's saved links
+            _messages.send(PlaylistsMessage.Info(message))
+        }
     }
 
     fun downloadForOffline(track: TrackRecord) {

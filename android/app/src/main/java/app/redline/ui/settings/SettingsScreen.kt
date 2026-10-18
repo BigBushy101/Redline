@@ -117,6 +117,12 @@ fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsSt
                     { v -> update { it.copy(skipDownloaded = v) } },
                     hint = "Great for playlists: only new items are fetched",
                 )
+                ToggleRow(
+                    "Refresh saved collections on launch",
+                    settings.refreshSavedOnStart,
+                    { v -> update { it.copy(refreshSavedOnStart = v) } },
+                    hint = "Ones not refreshed in the last 12 hours, one at a time in the background",
+                )
             }
 
             DefaultsCard(settings, lists, update)

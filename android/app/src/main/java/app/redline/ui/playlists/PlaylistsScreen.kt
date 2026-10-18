@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
@@ -30,9 +29,8 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
@@ -40,16 +38,12 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material.icons.rounded.MusicNote
-import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -65,7 +59,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -87,10 +80,12 @@ import app.redline.ui.components.EmptyState
 import app.redline.ui.components.Eyebrow
 import app.redline.ui.components.GhostButton
 import app.redline.ui.components.InputField
+import app.redline.ui.components.MenuItem
 import app.redline.ui.components.PageHeader
 import app.redline.ui.components.PagePadding
 import app.redline.ui.components.PillButton
 import app.redline.ui.components.SectionCard
+import app.redline.ui.components.TrackRow
 import app.redline.ui.theme.LocalAccent
 import app.redline.ui.theme.RedlineColors
 
@@ -110,8 +105,10 @@ fun PlaylistsScreen(
 ) {
     val version by music.playlistsVersion.collectAsStateWithLifecycle()
     val id = model.openId
-    // Re-read after edits, and when History changes which links have a downloaded copy.
-    LaunchedEffect(id, version, history) { model.reload() }
+    val savedVersion by music.savedVersion.collectAsStateWithLifecycle()
+    // Re-read after edits, when History changes which links have a downloaded copy, and when
+    // Saved changes which are saved.
+    LaunchedEffect(id, version, history, savedVersion) { model.reload() }
     if (id == null) {
         PlaylistList(model, playlists)
     } else {
@@ -220,16 +217,18 @@ private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: P
             }
         }
         itemsIndexed(p.tracks, key = { i, t -> "$i:${t.location}" }) { i, t ->
-            TrackRow(
+            PlaylistTrackRow(
                 index = i,
                 track = t,
                 count = p.tracks.size,
                 playing = t.location == current,
+                saved = t.location in model.savedLinks,
                 onAction = { a ->
                     when (a) {
                         TrackAction.Play -> model.play(p.id, start = i)
                         TrackAction.Queue -> model.queue(t)
                         TrackAction.Offline -> model.downloadForOffline(t)
+                        TrackAction.Save -> model.saveTrack(t)
                         TrackAction.Up -> model.move(p.id, i, i - 1)
                         TrackAction.Down -> model.move(p.id, i, i + 1)
                         TrackAction.Remove -> model.remove(p.id, i)
@@ -310,8 +309,9 @@ private fun DetailHeader(
     }
 }
 
+/** Outlined Shuffle pill beside Play (also on Saved's collections). */
 @Composable
-private fun ShuffleButton(enabled: Boolean, onClick: () -> Unit) {
+fun ShuffleButton(enabled: Boolean, onClick: () -> Unit) {
     androidx.compose.material3.OutlinedButton(
         onClick = onClick,
         enabled = enabled,
@@ -368,94 +368,22 @@ private fun AddBar(model: PlaylistsModel, id: ULong) {
     }
 }
 
-private enum class TrackAction { Play, Queue, Offline, Up, Down, Remove }
+private enum class TrackAction { Play, Queue, Offline, Save, Up, Down, Remove }
 
-/** One track (tracks.rs `track_row`): number, art, title, artist and where it plays from, length, menu. */
+/** One track, with the playlist's menu (playlists.rs's row buttons). */
 @Composable
-private fun TrackRow(index: Int, track: TrackRecord, count: Int, playing: Boolean, onAction: (TrackAction) -> Unit) {
-    val accent = LocalAccent.current
-    var menu by remember { mutableStateOf(false) }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .background(if (playing) RedlineColors.Elevated else RedlineColors.Bg)
-            .clickable { onAction(TrackAction.Play) }
-            .padding(start = PagePadding, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.widthIn(min = 28.dp), contentAlignment = Alignment.Center) {
-            if (playing) {
-                Icon(Icons.AutoMirrored.Rounded.VolumeUp, "Playing", tint = accent.base, modifier = Modifier.size(18.dp))
-            } else {
-                Text("${index + 1}", style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted)
-            }
+private fun PlaylistTrackRow(index: Int, track: TrackRecord, count: Int, playing: Boolean, saved: Boolean, onAction: (TrackAction) -> Unit) {
+    TrackRow(index, track, playing, onClick = { onAction(TrackAction.Play) }) { close ->
+        fun pick(a: TrackAction) {
+            close()
+            onAction(a)
         }
-        Spacer(Modifier.width(6.dp))
-        Cover(track.thumbnail, if (track.kind == TrackKind.LINK) Icons.Rounded.Link else Icons.Rounded.MusicNote, size = 44.dp)
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                track.title,
-                style = MaterialTheme.typography.titleSmall,
-                color = if (playing) accent.hover else RedlineColors.Text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            SourceLine(track)
-        }
-        track.durationSecs?.let {
-            Spacer(Modifier.width(8.dp))
-            Text(fmtDuration(it), style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted)
-        }
-        Box {
-            IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "Track options", tint = RedlineColors.Muted) }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = RedlineColors.Elevated) {
-                fun pick(a: TrackAction) {
-                    menu = false
-                    onAction(a)
-                }
-                MenuItem("Play", Icons.Rounded.PlayArrow) { pick(TrackAction.Play) }
-                MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) { pick(TrackAction.Queue) }
-                if (track.canGoOffline) MenuItem("Download for offline", Icons.Rounded.Download) { pick(TrackAction.Offline) }
-                if (index > 0) MenuItem("Move up", Icons.Rounded.KeyboardArrowUp) { pick(TrackAction.Up) }
-                if (index + 1 < count) MenuItem("Move down", Icons.Rounded.KeyboardArrowDown) { pick(TrackAction.Down) }
-                MenuItem("Remove from playlist", Icons.Rounded.RemoveCircleOutline) { pick(TrackAction.Remove) }
-            }
-        }
+        MenuItem("Play", Icons.Rounded.PlayArrow) { pick(TrackAction.Play) }
+        MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) { pick(TrackAction.Queue) }
+        if (track.canGoOffline) MenuItem("Download for offline", Icons.Rounded.Download) { pick(TrackAction.Offline) }
+        if (track.kind == TrackKind.LINK && !saved) MenuItem("Save to Saved", Icons.Rounded.BookmarkBorder) { pick(TrackAction.Save) }
+        if (index > 0) MenuItem("Move up", Icons.Rounded.KeyboardArrowUp) { pick(TrackAction.Up) }
+        if (index + 1 < count) MenuItem("Move down", Icons.Rounded.KeyboardArrowDown) { pick(TrackAction.Down) }
+        MenuItem("Remove from playlist", Icons.Rounded.RemoveCircleOutline) { pick(TrackAction.Remove) }
     }
-}
-
-/** "Artist · ✓ Downloaded", "Artist · 🌐 YouTube", "Artist · On this phone". */
-@Composable
-private fun SourceLine(track: TrackRecord) {
-    val (icon, label) = when {
-        track.kind == TrackKind.FILE -> Icons.Rounded.PhoneAndroid to "On this phone"
-        track.offline -> Icons.Rounded.CheckCircle to "Downloaded"
-        else -> Icons.Rounded.Public to (track.platform ?: "Stream")
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        val artist = track.artist?.takeIf { it.isNotBlank() }
-        if (artist != null) {
-            Text(
-                "$artist · ",
-                style = MaterialTheme.typography.bodySmall,
-                color = RedlineColors.Muted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-        }
-        Icon(icon, null, tint = if (track.offline) LocalAccent.current.base else RedlineColors.Muted, modifier = Modifier.size(12.dp))
-        Spacer(Modifier.width(3.dp))
-        Text(label, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted, maxLines = 1)
-    }
-}
-
-@Composable
-private fun MenuItem(text: String, icon: ImageVector, onClick: () -> Unit) {
-    DropdownMenuItem(
-        text = { Text(text, style = MaterialTheme.typography.bodyMedium) },
-        leadingIcon = { Icon(icon, null, tint = RedlineColors.Muted) },
-        onClick = onClick,
-    )
 }

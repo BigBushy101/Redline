@@ -18,6 +18,7 @@ import app.redline.ui.Tab
 import app.redline.ui.convert.ConvertModel
 import app.redline.ui.download.DownloadModel
 import app.redline.ui.playlists.PlaylistsModel
+import app.redline.ui.saved.SavedModel
 import app.redline.ui.theme.RedlineTheme
 
 /** The one activity: the bottom-bar pages, and where shared links and files come in. */
@@ -26,6 +27,7 @@ class MainActivity : ComponentActivity() {
     private val download: DownloadModel by viewModels()
     private val convert: ConvertModel by viewModels()
     private val playlists: PlaylistsModel by viewModels()
+    private val saved: SavedModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,7 +37,7 @@ class MainActivity : ComponentActivity() {
         val state = (application as RedlineApp).state
         setContent {
             RedlineTheme {
-                RedlineRoot(state, download, convert, playlists, nav)
+                RedlineRoot(state, download, convert, playlists, saved, nav)
             }
         }
     }
@@ -84,11 +86,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** The selected page and whether the full player is up, surviving rotation and process death. */
+/**
+ * The selected page, the Library's section and whether the full player is up, surviving
+ * rotation and process death.
+ */
 class NavModel(private val saved: SavedStateHandle) : ViewModel() {
     private var current by mutableStateOf(saved.get<String>(KEY)?.let(::tabNamed) ?: Tab.Download)
     private var before by mutableStateOf(saved.get<String>(KEY_BACK)?.let(::tabNamed) ?: Tab.Download)
     private var player by mutableStateOf(saved.get<Boolean>(KEY_PLAYER) ?: false)
+    private var showSaved by mutableStateOf(saved.get<Boolean>(KEY_LIBRARY_SAVED) ?: true)
 
     var tab: Tab
         get() = current
@@ -112,11 +118,21 @@ class NavModel(private val saved: SavedStateHandle) : ViewModel() {
             saved[KEY_PLAYER] = value
         }
 
-    private fun tabNamed(name: String) = Tab.entries.firstOrNull { it.name == name }
+    /** The Library shows Saved (else Playlists). */
+    var librarySaved: Boolean
+        get() = showSaved
+        set(value) {
+            showSaved = value
+            saved[KEY_LIBRARY_SAVED] = value
+        }
+
+    // Library was Playlists before Saved came; a page saved then still opens it.
+    private fun tabNamed(name: String) = if (name == "Playlists") Tab.Library else Tab.entries.firstOrNull { it.name == name }
 
     private companion object {
         const val KEY = "tab"
         const val KEY_BACK = "tab-before-settings"
         const val KEY_PLAYER = "player-open"
+        const val KEY_LIBRARY_SAVED = "library-saved"
     }
 }

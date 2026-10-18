@@ -20,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.History
@@ -70,6 +71,8 @@ sealed interface HistoryAction {
     data class Play(val index: UInt) : HistoryAction
     /** "Add to playlist…": the caller asks which one. */
     data class AddToPlaylist(val index: UInt) : HistoryAction
+    /** Save the link to Saved (a playlist as a collection). */
+    data class Save(val url: String) : HistoryAction
     data object Clear : HistoryAction
 }
 
@@ -180,6 +183,7 @@ private fun EntryRow(entry: HistoryRecord, onAction: (HistoryAction) -> Unit) {
                     )
                 }
                 if (playable) item("Add to playlist…", Icons.AutoMirrored.Rounded.PlaylistAdd, HistoryAction.AddToPlaylist(entry.index))
+                entry.url?.let { item("Save", Icons.Rounded.BookmarkBorder, HistoryAction.Save(it)) }
                 if (output != null && !java.io.File(output).isDirectory) item("Convert", Icons.Rounded.SwapHoriz, HistoryAction.Convert(output))
                 // A conversion of a picked file can't run again: its copy is gone once it's done.
                 if (entry.canRepeat) {

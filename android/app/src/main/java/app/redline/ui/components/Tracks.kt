@@ -1,0 +1,162 @@
+package app.redline.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.RemoveCircleOutline
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import app.redline.core.TrackKind
+import app.redline.core.TrackRecord
+import app.redline.core.fmtDuration
+import app.redline.ui.theme.LocalAccent
+import app.redline.ui.theme.RedlineColors
+import app.redline.ui.theme.color
+import app.redline.ui.theme.icon
+import app.redline.ui.theme.label
+
+/**
+ * One track (tracks.rs `track_row`): number, art, title, artist and where it plays from, length
+ * and a menu, whose items [menu] adds (it gets the call that closes the menu). A [tag] (Saved's
+ * "Removed from YouTube") takes the place of where it plays from, and greys the row.
+ */
+@Composable
+fun TrackRow(
+    index: Int,
+    track: TrackRecord,
+    playing: Boolean,
+    onClick: () -> Unit,
+    tag: String? = null,
+    menu: @Composable (close: () -> Unit) -> Unit,
+) {
+    val accent = LocalAccent.current
+    var open by remember { mutableStateOf(false) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(if (playing) RedlineColors.Elevated else RedlineColors.Bg)
+            .clickable(onClick = onClick)
+            .padding(start = PagePadding, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.widthIn(min = 28.dp), contentAlignment = Alignment.Center) {
+            if (playing) {
+                Icon(Icons.AutoMirrored.Rounded.VolumeUp, "Playing", tint = accent.base, modifier = Modifier.size(18.dp))
+            } else {
+                Text("${index + 1}", style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted)
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Cover(track.thumbnail, if (track.kind == TrackKind.LINK) Icons.Rounded.Link else Icons.Rounded.MusicNote, size = 44.dp)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                track.title,
+                style = MaterialTheme.typography.titleSmall,
+                color = when {
+                    playing -> accent.hover
+                    tag != null -> RedlineColors.Muted
+                    else -> RedlineColors.Text
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (tag != null) TagLine(tag) else SourceLine(track)
+        }
+        track.durationSecs?.let {
+            Spacer(Modifier.width(8.dp))
+            Text(fmtDuration(it), style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted)
+        }
+        Box {
+            IconButton(onClick = { open = true }) { Icon(Icons.Rounded.MoreVert, "Track options", tint = RedlineColors.Muted) }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }, containerColor = RedlineColors.Elevated) {
+                menu { open = false }
+            }
+        }
+    }
+}
+
+/**
+ * "Artist · ✓ Downloaded", "Artist · ▶ YouTube", "Artist · On this phone". A stream shows its
+ * platform's icon in its color, as the desktop's track rows do.
+ */
+@Composable
+private fun SourceLine(track: TrackRecord) {
+    val platform = track.platform
+    val (icon, label) = when {
+        track.kind == TrackKind.FILE -> Icons.Rounded.PhoneAndroid to "On this phone"
+        track.offline -> Icons.Rounded.CheckCircle to "Downloaded"
+        platform != null -> platform.icon to platform.label
+        else -> Icons.Rounded.Link to "Stream"
+    }
+    val tint = when {
+        track.offline -> LocalAccent.current.base
+        platform != null -> platform.color
+        else -> RedlineColors.Muted
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        val artist = track.artist?.takeIf { it.isNotBlank() }
+        if (artist != null) {
+            Text(
+                "$artist · ",
+                style = MaterialTheme.typography.bodySmall,
+                color = RedlineColors.Muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+        }
+        Icon(icon, null, tint = tint, modifier = Modifier.size(12.dp))
+        Spacer(Modifier.width(3.dp))
+        Text(label, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted, maxLines = 1)
+    }
+}
+
+/** The row's tag in place of its source, e.g. "⊖ Removed from YouTube". */
+@Composable
+private fun TagLine(tag: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Rounded.RemoveCircleOutline, null, tint = LocalAccent.current.hover, modifier = Modifier.size(12.dp))
+        Spacer(Modifier.width(3.dp))
+        Text(tag, style = MaterialTheme.typography.bodySmall, color = LocalAccent.current.hover, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** A menu entry with a muted icon. */
+@Composable
+fun MenuItem(text: String, icon: ImageVector, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(text, style = MaterialTheme.typography.bodyMedium) },
+        leadingIcon = { Icon(icon, null, tint = RedlineColors.Muted) },
+        onClick = onClick,
+    )
+}

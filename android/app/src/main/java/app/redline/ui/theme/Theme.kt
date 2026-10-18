@@ -37,7 +37,7 @@ object RedlineColors {
 
 /**
  * The highlight set: buttons, toggles, progress, the selected tab and the page header tint.
- * Redline red everywhere for now; the Saved pages will tint it per platform ([fromBase]).
+ * Redline red, except on a platform's Saved pages, which take its color (Platforms.kt, [WithAccent]).
  */
 @Immutable
 data class Accent(val base: Color, val hover: Color, val pressed: Color, val headerTint: Color) {
@@ -131,5 +131,17 @@ private val shapes = Shapes(
 fun RedlineTheme(accent: Accent = Accent.Redline, content: @Composable () -> Unit) {
     CompositionLocalProvider(LocalAccent provides accent) {
         MaterialTheme(colorScheme = colors(accent), typography = typography, shapes = shapes, content = content)
+    }
+}
+
+/**
+ * Paints [content] with [accent] (theme.rs `with_accent`): Redline's own widgets read
+ * [LocalAccent], Material's built-in ones (progress, switches, text selection) the color
+ * scheme, so both change. Only this subtree: the mini player and the bottom bar stay red.
+ */
+@Composable
+fun WithAccent(accent: Accent, content: @Composable () -> Unit) {
+    CompositionLocalProvider(LocalAccent provides accent) {
+        MaterialTheme(colorScheme = colors(accent), typography = MaterialTheme.typography, shapes = MaterialTheme.shapes, content = content)
     }
 }

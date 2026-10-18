@@ -83,6 +83,8 @@ fun DownloadScreen(
     tools: ToolsStatusRecord?,
     history: List<HistoryRecord>,
     openSettings: () -> Unit,
+    onSave: (String) -> Unit,
+    isSaving: (String) -> Boolean,
 ) {
     val focus = LocalFocusManager.current
     Column(
@@ -156,6 +158,21 @@ fun DownloadScreen(
                 enabled = ready,
                 modifier = Modifier.fillMaxWidth(),
             )
+            // As on the desktop: once looked up, the link can go to Saved instead (a playlist
+            // as a collection that stays in step with the original).
+            if (info != null && !model.fetching) {
+                val saving = isSaving(info.url)
+                GhostButton(
+                    when {
+                        saving -> "Saving…"
+                        info.isPlaylist -> "Save playlist to Saved"
+                        else -> "Save to Saved"
+                    },
+                    { onSave(info.url) },
+                    enabled = !saving,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             Spacer(Modifier.height(24.dp))
         }
     }

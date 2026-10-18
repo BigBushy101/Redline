@@ -16,11 +16,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.Badge
@@ -68,14 +68,16 @@ import app.redline.ui.download.DownloadModel
 import app.redline.ui.download.DownloadScreen
 import app.redline.ui.history.HistoryAction
 import app.redline.ui.history.HistoryScreen
+import app.redline.ui.library.LibraryScreen
 import app.redline.ui.player.FullPlayer
 import app.redline.ui.player.MiniPlayer
 import app.redline.ui.playlists.AddToPlaylistDialog
 import app.redline.ui.playlists.PlaylistsMessage
 import app.redline.ui.playlists.PlaylistsModel
-import app.redline.ui.playlists.PlaylistsScreen
 import app.redline.ui.queue.QueueAction
 import app.redline.ui.queue.QueueScreen
+import app.redline.ui.saved.SavedMessage
+import app.redline.ui.saved.SavedModel
 import app.redline.ui.settings.SettingsScreen
 import app.redline.ui.theme.LocalAccent
 import app.redline.ui.theme.RedlineColors
@@ -84,20 +86,28 @@ import app.redline.work.Notifications
 import kotlinx.coroutines.launch
 
 /**
- * The pages: the desktop sidebar's entries that this slice has, in its order. Five fit a
- * phone's bottom bar; Settings is reached from the gear in each page's header instead.
+ * The pages: the desktop sidebar's entries, in its order. Five fit a phone's bottom bar, so
+ * Saved and Playlists share Library, and Settings is reached from the gear in each page's
+ * header instead.
  */
 enum class Tab(val label: String, val icon: ImageVector, val inBar: Boolean = true) {
     Download("Download", Icons.Rounded.Download),
     Convert("Convert", Icons.Rounded.SwapHoriz),
-    Playlists("Playlists", Icons.AutoMirrored.Rounded.PlaylistPlay),
+    Library("Library", Icons.Rounded.LibraryMusic),
     Queue("Queue", Icons.AutoMirrored.Rounded.QueueMusic),
     History("History", Icons.Rounded.History),
     Settings("Settings", Icons.Rounded.Settings, inBar = false),
 }
 
 @Composable
-fun RedlineRoot(state: RedlineState, download: DownloadModel, convert: ConvertModel, playlists: PlaylistsModel, nav: NavModel) {
+fun RedlineRoot(
+    state: RedlineState,
+    download: DownloadModel,
+    convert: ConvertModel,
+    playlists: PlaylistsModel,
+    saved: SavedModel,
+    nav: NavModel,
+) {
     val status by state.status.collectAsStateWithLifecycle()
     when (val s = status) {
         EngineStatus.Initializing -> Starting()
@@ -106,7 +116,7 @@ fun RedlineRoot(state: RedlineState, download: DownloadModel, convert: ConvertMo
             LaunchedEffect(Unit) { download.onEngineReady() }
             AskForNotifications()
             val music = state.music
-            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, nav)
+            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, saved, nav)
         }
     }
 }
@@ -133,6 +143,7 @@ private fun Pages(
     download: DownloadModel,
     convert: ConvertModel,
     playlistsModel: PlaylistsModel,
+    savedModel: SavedModel,
     nav: NavModel,
 ) {
     val tab = nav.tab
@@ -189,6 +200,29 @@ private fun Pages(
         }
     }
 
+    LaunchedEffect(savedModel) {
+        savedModel.messages.collect { m ->
+            when (m) {
+                is SavedMessage.Info -> say(m.text)
+                is SavedMessage.Error -> say(m.text)
+                is SavedMessage.Downloading -> scope.launch {
+                    val r = snackbar.showSnackbar(m.text, actionLabel = "View queue", duration = SnackbarDuration.Short)
+                    if (r == SnackbarResult.ActionPerformed) selectTab(Tab.Queue)
+                }
+                // Saved from anywhere (History, Download, the Saved pages): View opens where it went.
+                is SavedMessage.Saved -> scope.launch {
+                    val r = snackbar.showSnackbar(m.text, actionLabel = "View", duration = SnackbarDuration.Short)
+                    if (r == SnackbarResult.ActionPerformed) {
+                        nav.librarySaved = true
+                        selectTab(Tab.Library)
+                        savedModel.openPlatform(m.platform)
+                        m.collection?.let(savedModel::openCollection)
+                    }
+                }
+            }
+        }
+    }
+
     LaunchedEffect(convert) {
         convert.messages.collect { m ->
             when (m) {
@@ -225,9 +259,26 @@ private fun Pages(
                 val openSettings = { selectTab(Tab.Settings) }
                 CompositionLocalProvider(LocalOpenSettings provides openSettings.takeIf { tab != Tab.Settings }) {
                     when (tab) {
-                        Tab.Download -> DownloadScreen(download, s, lists, tools, history, openSettings = openSettings)
+                        Tab.Download -> DownloadScreen(
+                            download,
+                            s,
+                            lists,
+                            tools,
+                            history,
+                            openSettings = openSettings,
+                            onSave = savedModel::saveLink,
+                            isSaving = savedModel::isSaving,
+                        )
                         Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = openSettings)
-                        Tab.Playlists -> PlaylistsScreen(playlistsModel, music, playlists, history)
+                        Tab.Library -> LibraryScreen(
+                            showSaved = nav.librarySaved,
+                            onShowSaved = { nav.librarySaved = it },
+                            saved = savedModel,
+                            playlistsModel = playlistsModel,
+                            music = music,
+                            playlists = playlists,
+                            history = history,
+                        )
                         Tab.Queue -> QueueScreen(
                             queue,
                             onAction = { a ->
@@ -267,6 +318,7 @@ private fun Pages(
                                         say(e.message ?: "Couldn't play that.")
                                     }
                                 }
+                                is HistoryAction.Save -> savedModel.saveLink(a.url)
                                 is HistoryAction.AddToPlaylist -> scope.launch {
                                     val track = music.onMusic { it.trackForHistory(a.index) }
                                     if (track == null) say("There's nothing to play there any more.") else toAdd = track

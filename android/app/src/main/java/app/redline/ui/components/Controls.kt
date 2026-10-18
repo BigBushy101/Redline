@@ -112,6 +112,34 @@ fun <T> Chips(value: T, options: List<Pair<T, String>>, onSelect: (T) -> Unit, m
     }
 }
 
+/**
+ * Two or three equal segments in a dark pill, the selected one white like [Chips]'s: switches
+ * between sections of one page (the Library's Saved | Playlists).
+ */
+@Composable
+fun <T> SegmentedSwitch(value: T, options: List<Pair<T, String>>, onSelect: (T) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .background(RedlineColors.Black.copy(alpha = 0.4f), CircleShape)
+            .padding(3.dp),
+    ) {
+        for ((option, label) in options) {
+            val selected = option == value
+            Box(
+                Modifier
+                    .weight(1f)
+                    .background(if (selected) RedlineColors.Text else Color.Transparent, CircleShape)
+                    .clickable { onSelect(option) }
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, style = MaterialTheme.typography.labelLarge, color = if (selected) RedlineColors.Black else RedlineColors.Text)
+            }
+        }
+    }
+}
+
 /** A switch with its label and an optional small hint (theme.rs `toggle`). */
 @Composable
 fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit, hint: String? = null, enabled: Boolean = true) {

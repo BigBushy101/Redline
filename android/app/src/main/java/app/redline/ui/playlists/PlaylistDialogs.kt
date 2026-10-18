@@ -42,9 +42,16 @@ import app.redline.ui.components.InputField
 import app.redline.ui.theme.LocalAccent
 import app.redline.ui.theme.RedlineColors
 
-/** Asks for a playlist's name: creating one ("New playlist") or renaming it. */
+/** Asks for a name: creating a playlist ("New playlist"), or renaming one or a saved collection. */
 @Composable
-fun NameDialog(title: String, initial: String, confirm: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+fun NameDialog(
+    title: String,
+    initial: String,
+    confirm: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+    placeholder: String = "Playlist name",
+) {
     var name by rememberSaveable { mutableStateOf(initial) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
@@ -61,7 +68,7 @@ fun NameDialog(title: String, initial: String, confirm: String, onConfirm: (Stri
                 name,
                 { name = it },
                 modifier = Modifier.focusRequester(focus),
-                placeholder = "Playlist name",
+                placeholder = placeholder,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { done() }),
             )

@@ -6,6 +6,7 @@
 //!
 //! It shares the engine's state: History (offline copies play from their file), the player's
 //! and network settings (saved by the engine's thread) and the job queue (offline downloads).
+//! Saved music ([`crate::saved`]) lives here too, since it plays through the same queue.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,12 +17,14 @@ use redline_core::Wake;
 use redline_core::history::History;
 use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
 use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source, dsp};
+use redline_core::saved::Saved;
 use redline_core::tools::ToolPaths;
 use redline_core::tools::ytdlp::NetworkOptions;
 
 use crate::engine::{Shared, Signal, State, follow};
 use crate::error::RedlineError;
 use crate::records::*;
+use crate::saved::Syncs;
 
 /// Kotlin's side of the player's nudge.
 #[uniffi::export(with_foreign)]
@@ -36,10 +39,16 @@ pub trait MusicListener: Send + Sync {
 /// Previous goes back to the start of the track once it's this many seconds in.
 const RESTART_AFTER: f64 = 3.0;
 
-/// The desktop app's player fields: the playlists, the queue, and what the player was told.
+/// The desktop app's player fields: the playlists, Saved, the queue, and what the player was
+/// told.
 #[derive(Default)]
-struct Controller {
+pub(crate) struct Controller {
     library: Library,
+    pub(crate) saved: Saved,
+    /// Bumped whenever Saved or its refreshes change, so Kotlin re-reads only then.
+    pub(crate) saved_version: u64,
+    /// Saved collections waiting to be refreshed, and the one being refreshed.
+    pub(crate) syncs: Syncs,
     now: NowPlaying,
     /// Bumped whenever the queue's tracks, order or current track change.
     queue_version: u64,
@@ -126,12 +135,12 @@ impl Controller {
     }
 
     /// Replaces Now playing with `tracks` and starts at `start`.
-    fn play_tracks(&mut self, p: &Player, h: &History, tracks: Vec<Track>, start: usize, playlist: Option<PlaylistId>) {
+    pub(crate) fn play_tracks(&mut self, p: &Player, h: &History, tracks: Vec<Track>, start: usize, playlist: Option<PlaylistId>) {
         self.now.start(tracks, start, playlist);
         self.load_current(p, h);
     }
 
-    fn play_from(&mut self, p: &Player, h: &History, tracks: Vec<Track>, start: usize, shuffle: bool, playlist: Option<PlaylistId>) {
+    pub(crate) fn play_from(&mut self, p: &Player, h: &History, tracks: Vec<Track>, start: usize, shuffle: bool, playlist: Option<PlaylistId>) {
         let start = if shuffle && !tracks.is_empty() {
             // Shuffle from a random first track, not always the top one.
             self.now.shuffle = true;
@@ -154,17 +163,17 @@ impl Controller {
     }
 }
 
-struct Inner {
-    engine: Arc<Shared>,
-    player: Player,
+pub(crate) struct Inner {
+    pub(crate) engine: Arc<Shared>,
+    pub(crate) player: Player,
     ctl: Mutex<Controller>,
     /// Wakes the follower: the player when its state changes, calls after changing things.
-    signal: Arc<Signal>,
+    pub(crate) signal: Arc<Signal>,
     listener: Mutex<Arc<dyn MusicListener>>,
 }
 
 impl Inner {
-    fn ctl(&self) -> MutexGuard<'_, Controller> {
+    pub(crate) fn ctl(&self) -> MutexGuard<'_, Controller> {
         self.ctl.lock().unwrap()
     }
 
@@ -180,6 +189,7 @@ impl Inner {
             changed
         };
         ctl.library.save_if_dirty();
+        ctl.saved.save_if_dirty();
         drop(ctl);
         if settings_changed {
             // The engine's thread saves settings.
@@ -195,7 +205,7 @@ impl Inner {
     }
 
     /// Changes the queue with the player and History at hand, then lets the follower act on it.
-    fn queue<R>(&self, f: impl FnOnce(&mut Controller, &Player, &History) -> R) -> R {
+    pub(crate) fn queue<R>(&self, f: impl FnOnce(&mut Controller, &Player, &History) -> R) -> R {
         let r = {
             let mut ctl = self.ctl();
             let st = self.engine.state();
@@ -213,7 +223,7 @@ impl Inner {
     }
 
     /// Changes the playlists; the follower saves them.
-    fn library<R>(&self, f: impl FnOnce(&mut Library) -> R) -> R {
+    pub(crate) fn library<R>(&self, f: impl FnOnce(&mut Library) -> R) -> R {
         let r = f(&mut self.ctl().library);
         self.signal.poke();
         r
@@ -228,7 +238,7 @@ impl Inner {
 /// The music player, Now playing and the playlists. Get it from [`crate::Engine::music`].
 #[derive(uniffi::Object)]
 pub struct Music {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -246,7 +256,7 @@ impl Music {
         let inner = Arc::new(Inner {
             engine,
             player,
-            ctl: Mutex::new(Controller { library: Library::load(), ..Default::default() }),
+            ctl: Mutex::new(Controller { library: Library::load(), saved: Saved::load(), ..Default::default() }),
             signal,
             listener: Mutex::new(listener),
         });
@@ -257,6 +267,7 @@ impl Music {
             // once, not when the next notification is due.
             .spawn(move || follow(&runner.signal, true, || runner.step(), || runner.notify()))
             .expect("can't start the music thread");
+        inner.refresh_on_launch();
         Arc::new(Self { inner, thread: Mutex::new(Some(thread)) })
     }
 
@@ -265,8 +276,8 @@ impl Music {
         self.inner.signal.poke();
     }
 
-    /// Stops playback and the follower, and saves the playlists. Calls still work afterwards,
-    /// but nothing follows them.
+    /// Stops playback, the follower and Saved's refreshes, and saves the playlists and Saved.
+    /// Calls still work afterwards, but nothing follows them.
     pub(crate) fn shutdown(&self) {
         self.inner.signal.stop();
         if let Some(t) = self.thread.lock().unwrap().take()
@@ -276,10 +287,12 @@ impl Music {
             let _ = t.join();
         }
         self.inner.player.send(Command::Stop);
-        self.inner.ctl().library.save_if_dirty();
+        let mut ctl = self.inner.ctl();
+        ctl.library.save_if_dirty();
+        ctl.saved.save_if_dirty();
     }
 
-    fn records(&self, tracks: &[Track]) -> Vec<TrackRecord> {
+    pub(crate) fn records(&self, tracks: &[Track]) -> Vec<TrackRecord> {
         let st = self.inner.engine.state();
         tracks.iter().map(|t| track_record(t, &st.history)).collect()
     }
@@ -551,7 +564,7 @@ impl Music {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Cursor;
     use std::sync::atomic::Ordering;
@@ -611,15 +624,20 @@ mod tests {
             title: format!("Song {n}"),
             duration_secs: Some(60.0),
             thumbnail: Some(format!("https://img/{n}.jpg")),
-            platform: Some("YouTube".into()),
+            platform: Some(crate::saved::Platform::YouTube),
             ..file("x")
         }
     }
 
     /// An engine with no tools, and its player on the fake decoder at `speedup`x real time.
     fn music(speedup: f32) -> (Arc<Engine>, Arc<Music>, Arc<Counter>) {
+        music_with_tools(ToolPaths::default(), speedup)
+    }
+
+    /// [`music`] with an engine that has `tools` (the player still uses the fake decoder).
+    pub(crate) fn music_with_tools(tools: ToolPaths, speedup: f32) -> (Arc<Engine>, Arc<Music>, Arc<Counter>) {
         let dir = test_dirs();
-        let engine = Engine::start(ToolPaths::default(), Arc::new(Counter::default()), Some(dir.join("converted")));
+        let engine = Engine::start(tools, Arc::new(Counter::default()), Some(dir.join("converted")));
         let listener = Arc::new(Counter::default());
         let capture = Capture::new(8000, speedup);
         let music = engine.music_with(listener.clone(), |wake| {

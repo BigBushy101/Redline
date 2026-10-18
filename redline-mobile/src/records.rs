@@ -684,8 +684,8 @@ pub struct NetworkRecord {
     pub retries: u32,
 }
 
-/// The settings the Download, Convert, Queue and Settings pages use. Fields for later slices
-/// (player, saved music) stay as they are when this is written back.
+/// The settings the Download, Convert, Queue, Saved and Settings pages use. The player's are
+/// [`PlayerSettingsRecord`]; the rest stay as they are when this is written back.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct SettingsRecord {
     pub download_dir: String,
@@ -700,6 +700,8 @@ pub struct SettingsRecord {
     pub network: NetworkRecord,
     /// The Convert page's shared options, presets, file names and folder.
     pub convert: ConvertSettingsRecord,
+    /// Refresh saved collections not refreshed in the last 12 hours when Redline starts.
+    pub refresh_saved_on_start: bool,
 }
 
 pub const MAX_CONCURRENCY: u32 = 6;
@@ -718,6 +720,7 @@ pub fn settings_record(s: &Settings) -> SettingsRecord {
             retries: s.network.retries,
         },
         convert: convert_settings_record(s),
+        refresh_saved_on_start: s.refresh_saved_on_start,
     }
 }
 
@@ -729,6 +732,7 @@ pub fn apply_settings(r: &SettingsRecord, s: &mut Settings) {
     s.concurrency = r.concurrency.clamp(1, MAX_CONCURRENCY) as usize;
     s.skip_downloaded = r.skip_downloaded;
     s.notify = r.notify;
+    s.refresh_saved_on_start = r.refresh_saved_on_start;
     s.download = (&r.download).into();
     s.network = NetworkOptions {
         cookies_file: r.network.cookies_file.as_deref().filter(|f| !f.trim().is_empty()).map(PathBuf::from),
@@ -764,8 +768,8 @@ pub struct TrackRecord {
     pub thumbnail: Option<String>,
     /// When it was added, Unix seconds.
     pub added_at: i64,
-    /// The site a link is from ("YouTube"); `None` for files.
-    pub platform: Option<String>,
+    /// The site a link is from, for its icon and color; `None` for files.
+    pub platform: Option<crate::saved::Platform>,
     /// A link History has a downloaded copy of, which is what plays.
     pub offline: bool,
 }
@@ -783,7 +787,7 @@ pub fn track_record(t: &Track, history: &History) -> TrackRecord {
         duration_secs: t.duration,
         thumbnail: t.thumbnail.clone(),
         added_at: t.added_at,
-        platform: t.platform().map(|p| p.label().to_owned()),
+        platform: t.platform().map(Into::into),
         offline: t.is_link() && matches!(library::playable_source(t, history), Source::Local(_)),
     }
 }
@@ -1295,6 +1299,7 @@ mod tests {
         r.download_dir = "  ".into();
         r.network.proxy = "socks5://h:1".into();
         r.download.mode = DownloadMode::Audio;
+        r.refresh_saved_on_start = false;
         let before = s.download_dir.clone();
         apply_settings(&r, &mut s);
         assert_eq!(s.concurrency, 6);
@@ -1303,6 +1308,7 @@ mod tests {
         assert_eq!(s.network.cookies_browser.as_deref(), Some("firefox"), "kept");
         assert_eq!(s.convert_dir, Some(PathBuf::from("conv")), "kept");
         assert_eq!(s.download.mode, Mode::Audio);
+        assert!(!s.refresh_saved_on_start);
         assert_eq!(settings_record(&s), SettingsRecord { concurrency: 6, download_dir: path_string(&before), ..r });
     }
 
@@ -1318,7 +1324,7 @@ mod tests {
             assert_eq!(&track_record(t, &history).to_core(), t);
         }
         let r = track_record(&link, &history);
-        assert_eq!((r.kind, r.platform.as_deref(), r.offline), (TrackKind::Link, Some("YouTube"), false));
+        assert_eq!((r.kind, r.platform, r.offline), (TrackKind::Link, Some(crate::saved::Platform::YouTube), false));
         let r = track_record(&file, &history);
         assert_eq!((r.kind, r.platform, r.location), (TrackKind::File, None, path_string(&PathBuf::from("music").join("a.flac"))));
         let padded = TrackRecord { location: "  https://youtu.be/abc ".into(), ..track_record(&link, &history) };

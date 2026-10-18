@@ -307,6 +307,10 @@ impl Saved {
         if tracks.is_empty() {
             bail!("This playlist has nothing playable in it.");
         }
+        // A playlist can list a video twice; sync_plan keeps the first, so saving does too,
+        // or the first refresh would "lose" a song.
+        let mut keys = HashSet::new();
+        let tracks: Vec<Track> = tracks.into_iter().filter(|t| keys.insert(t.key())).collect();
         let id = self.collections.iter().map(|c| c.id).max().unwrap_or(0) + 1;
         let extractor_platform = match Platform::of(url) {
             Platform::Other => info.extractor.as_deref().map(Platform::from_extractor),
@@ -688,6 +692,18 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn saving_drops_repeats_like_refresh_does() {
+        let mut s = Saved::default();
+        let url = "https://www.youtube.com/playlist?list=PL1";
+        let out = s.save_link(&playlist_info("Mix", &["a", "b", "a", "c"]), url).unwrap();
+        assert_eq!(out.message(), "Saved 3 songs from Mix");
+        let ids: Vec<String> = s.collections[0].tracks.iter().map(|t| t.track.title.clone()).collect();
+        assert_eq!(ids, ["A", "B", "C"]);
+        let sync = sync_plan(&s.collections[0], &library::tracks_from_info(url, &playlist_info("Mix", &["a", "b", "a", "c"]))).unwrap();
+        assert!(sync.added.is_empty() && sync.removed.is_empty(), "{sync:?}");
     }
 
     #[test]

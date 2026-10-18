@@ -704,26 +704,46 @@ fn parse_info(json: &[u8]) -> Result<MediaInfo> {
     })
 }
 
+/// The settings [`friendly_error`] points to. Android has no tools installer or browser
+/// cookies (its yt-dlp, Python and QuickJS ship with the app), only a cookies.txt file.
+#[cfg(not(target_os = "android"))]
+mod advice {
+    pub const JS_RUNTIME: &str = "YouTube needs a JavaScript runtime. Install Deno from Settings > Tools.";
+    pub const COOKIES_UNREADABLE: &str = "Redline couldn't read the browser's cookies. Close the browser and try again, \
+                                          or switch to Firefox or a cookies.txt file in Settings > Network & sign-in.";
+    pub const BOT_CHECK: &str = "Or sign in with browser cookies in Settings > Network & sign-in.";
+    pub const SIGN_IN: &str = "This needs a signed-in account. Turn on browser cookies in Settings > Network & sign-in.";
+}
+
+#[cfg(target_os = "android")]
+mod advice {
+    pub const JS_RUNTIME: &str = "YouTube needs a JavaScript runtime, and the one built into Redline didn't work. \
+                                  Reinstalling Redline may fix it.";
+    pub const COOKIES_UNREADABLE: &str = "Redline couldn't read the cookies.txt file. Choose it again in Settings > Network & sign-in.";
+    pub const BOT_CHECK: &str = "Or sign in with a cookies.txt from a signed-in browser in Settings > Network & sign-in.";
+    pub const SIGN_IN: &str = "This needs a signed-in account. Choose a cookies.txt from a signed-in browser \
+                               in Settings > Network & sign-in.";
+}
+
 /// Adds a hint to errors whose cause isn't obvious from yt-dlp's wording.
 pub fn friendly_error(msg: &str) -> String {
     let lower = msg.to_lowercase();
-    if lower.contains("js runtime") || lower.contains("javascript runtime") || lower.contains("n challenge") {
-        format!("{msg}\n\nYouTube needs a JavaScript runtime. Install Deno from Settings > Tools.")
+    // yt-dlp's wording (curly or straight apostrophe) is all `--cookies` flags and wiki links,
+    // and Android shows an error's first line, so this one is replaced rather than appended
+    // to. The replacement still matches, so applying this twice changes nothing.
+    if lower.contains("confirm you") && lower.contains("not a bot") {
+        format!(
+            "YouTube wants to confirm you're not a bot. This network has made too many requests; \
+             try again later.\n\n{}",
+            advice::BOT_CHECK
+        )
+    } else if lower.contains("js runtime") || lower.contains("javascript runtime") || lower.contains("n challenge") {
+        format!("{msg}\n\n{}", advice::JS_RUNTIME)
     } else if lower.contains("could not copy") && lower.contains("cookie")
         || lower.contains("failed to decrypt")
         || lower.contains("cookie") && lower.contains("permission denied")
     {
-        format!(
-            "{msg}\n\nRedline couldn't read the browser's cookies. Close the browser and try again, \
-             or switch to Firefox or a cookies.txt file in Settings > Network & sign-in."
-        )
-    } else if lower.contains("sign in to confirm you're not a bot")
-        || lower.contains("sign in to confirm you’re not a bot")
-    {
-        format!(
-            "{msg}\n\nYouTube is rate-limiting this network. Try again later, or sign in with \
-             browser cookies in Settings > Network & sign-in."
-        )
+        format!("{msg}\n\n{}", advice::COOKIES_UNREADABLE)
     } else if lower.contains("sign in to confirm your age")
         || lower.contains("age-restricted")
         || lower.contains("private video")
@@ -731,7 +751,7 @@ pub fn friendly_error(msg: &str) -> String {
         || lower.contains("login required")
         || lower.contains("requires authentication")
     {
-        format!("{msg}\n\nThis needs a signed-in account. Turn on browser cookies in Settings > Network & sign-in.")
+        format!("{msg}\n\n{}", advice::SIGN_IN)
     } else if lower.contains("unsupported url") {
         "That link isn't from a supported site.".to_owned()
     } else {
@@ -1199,6 +1219,22 @@ mod tests {
         assert!(has_pair(&n.args(), "--cookies", "c.txt"));
         assert!(friendly_error("ERROR: Could not copy Chrome cookie database").contains("Firefox"));
         assert!(friendly_error("Sign in to confirm your age").contains("cookies"));
+    }
+
+    #[test]
+    fn bot_check_error_leads_with_plain_words() {
+        // As yt-dlp words it, after run_json drops the `ERROR:`.
+        let raw = "[youtube] 6ueeeG0TBjs: Sign in to confirm you\u{2019}re not a bot. Use --cookies-from-browser \
+                   or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  \
+                   for how to manually pass cookies.";
+        let msg = friendly_error(raw);
+        let first = msg.lines().next().unwrap();
+        assert!(first.starts_with("YouTube wants to confirm you're not a bot."), "{msg}");
+        assert!(first.contains("try again later"), "{msg}");
+        assert!(!msg.contains("--cookies") && !msg.contains("https://"), "{msg}");
+        assert!(msg.contains("Settings > Network & sign-in"), "{msg}");
+        assert!(friendly_error(&raw.replace('\u{2019}', "'")) == msg, "straight apostrophe");
+        assert_eq!(friendly_error(&msg), msg, "the player may apply it again");
     }
 
     #[test]

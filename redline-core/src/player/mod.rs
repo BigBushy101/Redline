@@ -479,13 +479,9 @@ impl Engine {
                         });
                         self.start_stream(start);
                     }
-                    Err(e) => {
-                        let msg = match &cur.source {
-                            Source::Link(_) => ytdlp::friendly_error(&e),
-                            Source::Local(_) => e,
-                        };
-                        self.fail(msg)
-                    }
+                    // A link's error already has friendly_error's hint (resolve_stream adds
+                    // it); adding it here too printed some hints twice.
+                    Err(e) => self.fail(e),
                 }
             }
             Msg::DecodeEnded(id, result) => {

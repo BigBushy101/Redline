@@ -3,7 +3,7 @@
 //! snapshots for the queue and history, and an [`EngineListener`] nudge when they change.
 //!
 //! This slice covers downloading, converting, the queue, and the player with its playlists
-//! ([`Music`], from `Engine::music`). Saved music follows in the same style.
+//! ([`Music`], from `Engine::music`), and Saved music ([`saved`], also on `Music`).
 
 uniffi::setup_scaffolding!();
 
@@ -13,6 +13,7 @@ mod error;
 mod format;
 mod music;
 mod records;
+mod saved;
 
 pub use convert::*;
 pub use engine::{Engine, EngineListener};
@@ -20,3 +21,4 @@ pub use error::RedlineError;
 pub use format::*;
 pub use music::{Music, MusicListener};
 pub use records::*;
+pub use saved::*;

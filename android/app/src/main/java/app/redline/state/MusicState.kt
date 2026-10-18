@@ -11,6 +11,7 @@ import app.redline.core.PlayerStatus
 import app.redline.core.PlaylistSummaryRecord
 import app.redline.core.QueueTrackRecord
 import app.redline.core.RepeatMode
+import app.redline.core.SavedOverviewRecord
 import app.redline.core.playerChoices
 import app.redline.work.PlaybackService
 import kotlinx.coroutines.CoroutineScope
@@ -26,7 +27,7 @@ import kotlinx.coroutines.withContext
 import java.lang.ref.WeakReference
 
 /**
- * The app's copy of the player, Now playing and the playlists, pulled from the core's [Music]
+ * The app's copy of the player, Now playing, the playlists and Saved, pulled from the core's [Music]
  * whenever it nudges (up to ten times a second while playing). App-scoped like [RedlineState],
  * which makes it once the core has loaded, so the playback service and the screens share it.
  */
@@ -61,6 +62,14 @@ class MusicState(private val app: Application, val music: Music) {
     /** Bumped after every playlist edit, so an open playlist knows to read itself again. */
     val playlistsVersion: StateFlow<Int> = _playlistsVersion.asStateFlow()
 
+    private val _savedVersion = MutableStateFlow(0UL)
+    /** Changes whenever Saved or one of its refreshes does, so open Saved pages read again. */
+    val savedVersion: StateFlow<ULong> = _savedVersion.asStateFlow()
+
+    private val _savedOverview = MutableStateFlow<SavedOverviewRecord?>(null)
+    /** The platforms with something saved, for the Saved overview. */
+    val savedOverview: StateFlow<SavedOverviewRecord?> = _savedOverview.asStateFlow()
+
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
     private var queueVersion: ULong? = null
     /** Counts the settings changes made here; a read that started before one is stale. */
@@ -80,11 +89,22 @@ class MusicState(private val app: Application, val music: Music) {
     private suspend fun refresh() {
         val known = queueVersion
         val epoch = settingsEpoch
+        val savedKnown = _savedOverview.value?.version
         val pulled = withContext(musicThread) {
             val s = music.snapshot()
-            Triple(s, if (s.queueVersion != known) music.queue() else null, music.playerSettings())
+            Pulled(
+                s,
+                if (s.queueVersion != known) music.queue() else null,
+                music.playerSettings(),
+                // Saved is only read again when it changed (a refresh nudges as it starts and ends).
+                if (music.savedVersion() != savedKnown) music.savedOverview() else null,
+            )
         }
-        val (snap, queue, settings) = pulled
+        val (snap, queue, settings, saved) = pulled
+        if (saved != null) {
+            _savedOverview.value = saved
+            _savedVersion.value = saved.version
+        }
         _snapshot.value = snap
         if (queue != null) {
             _queue.value = queue
@@ -94,6 +114,13 @@ class MusicState(private val app: Application, val music: Music) {
         if (epoch == settingsEpoch && settings != _settings.value) _settings.value = settings
         if (snap.isPlaying) PlaybackService.ensureRunning(app)
     }
+
+    private data class Pulled(
+        val snapshot: PlayerSnapshotRecord,
+        val queue: List<QueueTrackRecord>?,
+        val settings: PlayerSettingsRecord,
+        val saved: SavedOverviewRecord?,
+    )
 
     /** Runs a quick call in order behind the others, then refreshes. */
     fun act(call: (Music) -> Unit) {
