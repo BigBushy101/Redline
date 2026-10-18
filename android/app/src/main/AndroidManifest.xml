@@ -11,12 +11,18 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- A partial wake lock while jobs run: the service alone doesn't stop the CPU sleeping. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- The Library's Local section lists the songs on the phone and plays them where they are. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <!-- extractNativeLibs: youtubedl-android executes its bundled python/ffmpeg from disk. -->
     <application
         android:name=".RedlineApp"
         android:allowBackup="true"
         android:extractNativeLibs="true"
+        android:requestLegacyExternalStorage="true"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.Redline">

@@ -108,6 +108,8 @@ pub struct Settings {
     pub player: PlayerSettings,
     /// Refresh saved collections not synced in the last 12 hours when Redline starts.
     pub refresh_saved_on_start: bool,
+    /// Folders the Local library lists songs from.
+    pub local_folders: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -131,6 +133,7 @@ impl Default for Settings {
             notify: true,
             player: PlayerSettings::default(),
             refresh_saved_on_start: true,
+            local_folders: crate::local::default_folders(),
         }
     }
 }

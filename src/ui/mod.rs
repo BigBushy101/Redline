@@ -1,6 +1,7 @@
 pub mod convert;
 pub mod download;
 pub mod history;
+pub mod local;
 pub mod now_bar;
 pub mod player_panels;
 pub mod playlists;

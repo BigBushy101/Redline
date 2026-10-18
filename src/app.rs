@@ -28,6 +28,8 @@ pub enum Page {
     /// The overview, or one platform's page.
     Saved(Option<Platform>),
     Playlists,
+    /// Songs in the folders picked for it.
+    Local,
     Queue,
     History,
     Settings,
@@ -52,6 +54,7 @@ pub struct App {
     pub playlists_page: ui::playlists::PlaylistsPage,
     pub saved: Saved,
     pub saved_page: ui::saved::SavedPage,
+    pub local_page: ui::local::LocalPage,
     /// A short message at the bottom of the window, and when it was shown.
     toast: Option<(String, std::time::Instant)>,
     /// What the player bar works through: a playlist or ad-hoc picks.
@@ -115,6 +118,7 @@ impl App {
             playlists_page: Default::default(),
             saved: Saved::load(),
             saved_page: Default::default(),
+            local_page: Default::default(),
             toast: None,
             now: NowPlaying::default(),
             seen_advances: 0,
@@ -390,6 +394,7 @@ impl App {
                         Page::Convert => ui::convert::show(ui, self),
                         Page::Saved(p) => ui::saved::show(ui, self, p),
                         Page::Playlists => ui::playlists::show(ui, self),
+                        Page::Local => ui::local::show(ui, self),
                         Page::Queue => ui::queue::show(ui, self),
                         Page::History => ui::history::show(ui, self),
                         Page::Settings => ui::settings::show(ui, self),
@@ -459,6 +464,7 @@ impl eframe::App for App {
         self.media_keys_frame(ctx);
         self.playlists_page.poll(&mut self.library);
         ui::saved::poll(self);
+        ui::local::poll(self);
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());
             self.player.send(Command::SetNetwork(self.settings.network.clone()));

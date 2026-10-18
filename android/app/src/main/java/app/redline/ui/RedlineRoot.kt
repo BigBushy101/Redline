@@ -69,6 +69,9 @@ import app.redline.ui.download.DownloadScreen
 import app.redline.ui.history.HistoryAction
 import app.redline.ui.history.HistoryScreen
 import app.redline.ui.library.LibraryScreen
+import app.redline.ui.library.LibrarySection
+import app.redline.ui.local.LocalMessage
+import app.redline.ui.local.LocalModel
 import app.redline.ui.player.FullPlayer
 import app.redline.ui.player.MiniPlayer
 import app.redline.ui.playlists.AddToPlaylistDialog
@@ -106,6 +109,7 @@ fun RedlineRoot(
     convert: ConvertModel,
     playlists: PlaylistsModel,
     saved: SavedModel,
+    local: LocalModel,
     nav: NavModel,
 ) {
     val status by state.status.collectAsStateWithLifecycle()
@@ -116,7 +120,7 @@ fun RedlineRoot(
             LaunchedEffect(Unit) { download.onEngineReady() }
             AskForNotifications()
             val music = state.music
-            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, saved, nav)
+            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, saved, local, nav)
         }
     }
 }
@@ -144,6 +148,7 @@ private fun Pages(
     convert: ConvertModel,
     playlistsModel: PlaylistsModel,
     savedModel: SavedModel,
+    localModel: LocalModel,
     nav: NavModel,
 ) {
     val tab = nav.tab
@@ -213,12 +218,21 @@ private fun Pages(
                 is SavedMessage.Saved -> scope.launch {
                     val r = snackbar.showSnackbar(m.text, actionLabel = "View", duration = SnackbarDuration.Short)
                     if (r == SnackbarResult.ActionPerformed) {
-                        nav.librarySaved = true
+                        nav.librarySection = LibrarySection.Saved
                         selectTab(Tab.Library)
                         savedModel.openPlatform(m.platform)
                         m.collection?.let(savedModel::openCollection)
                     }
                 }
+            }
+        }
+    }
+
+    LaunchedEffect(localModel) {
+        localModel.messages.collect { m ->
+            when (m) {
+                is LocalMessage.Info -> say(m.text)
+                is LocalMessage.Error -> say(m.text)
             }
         }
     }
@@ -271,10 +285,11 @@ private fun Pages(
                         )
                         Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = openSettings)
                         Tab.Library -> LibraryScreen(
-                            showSaved = nav.librarySaved,
-                            onShowSaved = { nav.librarySaved = it },
+                            section = nav.librarySection,
+                            onSection = { nav.librarySection = it },
                             saved = savedModel,
                             playlistsModel = playlistsModel,
+                            local = localModel,
                             music = music,
                             playlists = playlists,
                             history = history,
