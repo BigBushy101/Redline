@@ -26,3 +26,11 @@ strip = true
 # rav1e (AVIF encoder) is painfully slow unoptimized
 [profile.dev.package."*"]
 opt-level = 2
+
+# The Android app's debug build (android/app/build.gradle.kts builds with it): the dev profile
+# without debuginfo, which made libredline_mobile.so ~150 MB per ABI (line tables alone, 56 MB).
+# The symbol table stays, so a backtrace still names its functions, and a panic's message
+# carries its file and line either way.
+[profile.android-dev]
+inherits = "dev"
+debug = false

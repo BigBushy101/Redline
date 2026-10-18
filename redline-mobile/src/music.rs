@@ -8,7 +8,8 @@
 //! and network settings (saved by the engine's thread) and the job queue (offline downloads).
 //! Saved music ([`crate::saved`]) lives here too, since it plays through the same queue.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -158,6 +159,18 @@ impl Controller {
             self.play_tracks(p, h, tracks, 0, None);
         } else {
             self.now.append(tracks);
+            self.queue_changed();
+        }
+    }
+
+    /// Puts tracks right after the current one, starting Now playing if nothing's queued.
+    fn play_next(&mut self, p: &Player, h: &History, tracks: Vec<Track>) {
+        if self.now.is_empty() {
+            self.play_tracks(p, h, tracks, 0, None);
+        } else {
+            self.now.insert_next(tracks);
+            // What follows the current track changed: hand the player its new next one.
+            self.sent_next = None;
             self.queue_changed();
         }
     }
@@ -457,6 +470,13 @@ impl Music {
         self.inner.queue(|c, p, h| c.queue_tracks(p, h, tracks));
     }
 
+    /// Puts tracks right after the current one ("Play next"), starting Now playing if it's
+    /// empty.
+    pub fn play_next(&self, tracks: Vec<TrackRecord>) {
+        let tracks = tracks.iter().map(TrackRecord::to_core).collect();
+        self.inner.queue(|c, p, h| c.play_next(p, h, tracks));
+    }
+
     /// Plays one file on its own.
     pub fn play_file(&self, path: String) {
         let source = Source::Local(PathBuf::from(path));
@@ -520,6 +540,39 @@ impl Music {
         self.inner.library(|l| l.move_track(id, from as usize, to as usize));
     }
 
+    // ---- Copied files ----
+
+    /// Deletes the files right in `dir` (the app's own folder that picked files are copied
+    /// into for playlists) that nothing plays any more: not in a playlist, Now playing,
+    /// History or `keep` (copies under way). Folders in it and anything outside it are left
+    /// alone. Returns how many files it deleted.
+    pub fn sweep_imported(&self, dir: String, keep: Vec<String>) -> u32 {
+        let dir = PathBuf::from(dir);
+        if !dir.is_absolute() {
+            return 0;
+        }
+        let mut in_use: HashSet<PathBuf> = keep.into_iter().map(PathBuf::from).collect();
+        {
+            let ctl = self.inner.ctl();
+            if ctl.library.is_unreadable() {
+                // The playlists may well point at every one of them.
+                return 0;
+            }
+            let st = self.inner.engine.state();
+            let tracks = ctl.library.playlists.iter().flat_map(|p| &p.tracks).chain(&ctl.now.tracks);
+            for t in tracks {
+                if let Source::Local(path) = &t.source {
+                    in_use.insert(path.clone());
+                }
+            }
+            in_use.extend(st.history.entries.iter().filter_map(|e| e.output.clone()));
+        }
+        unused_files(&dir, &in_use)
+            .into_iter()
+            .filter(|f| std::fs::remove_file(f).is_ok())
+            .count() as u32
+    }
+
     // ---- Making tracks ----
 
     /// The tracks a link stands for: every entry of a playlist, or the one video. Blocks while
@@ -561,6 +614,21 @@ impl Music {
         self.inner.engine.signal.poke();
         Ok(id)
     }
+}
+
+/// The files right in `dir` that aren't in `in_use`, compared by their real paths (a link to
+/// the same file, like /sdcard for /storage/emulated/0, still counts as in use).
+fn unused_files(dir: &Path, in_use: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let in_use: HashSet<PathBuf> = in_use.iter().map(|p| real(p)).collect();
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        // Not following links: only a regular file of the folder's own.
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.path())
+        .filter(|p| !in_use.contains(p) && !in_use.contains(&real(p)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -734,6 +802,59 @@ pub(crate) mod tests {
 
         drop(engine);
         until(&music, "the engine's end to stop the player", |s| s.status == PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn play_next_through_the_api() {
+        let _turn = one_engine_at_a_time();
+        let (engine, music, _) = music(1.0);
+        music.set_shuffle(false);
+        music.play_next(vec![file("long")]);
+        let s = until(&music, "an empty queue to start", |s| s.title.as_deref() == Some("Tone long"));
+        let v = s.queue_version;
+        music.queue_tracks(vec![file("a"), file("b")]);
+        music.play_next(vec![file("c"), file("d")]);
+        let s = music.snapshot();
+        assert!(s.queue_version > v);
+        assert_eq!((s.queue_index, s.queue_position, s.queue_length), (Some(0), Some(0), 5));
+        assert_eq!(music.queue().iter().map(|q| q.track.title.as_str()).collect::<Vec<_>>(), ["LONG", "C", "D", "A", "B"]);
+        // The player was handed the new next track: skipping lands on it.
+        music.next();
+        until(&music, "the track played next", |s| s.title.as_deref() == Some("Tone c"));
+        music.stop();
+        drop(music);
+        drop(engine);
+    }
+
+    #[test]
+    fn sweeping_copied_files() {
+        let _turn = one_engine_at_a_time();
+        let (engine, music, _) = music(1.0);
+        let dir = test_dirs().join("imported");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        for f in ["listed.mp3", "queued.mp3", "copying.mp3", "orphan.mp3", "folder/inner.mp3"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let track = |name: &str| TrackRecord { location: path(name), ..file(name) };
+
+        let id = music.create_playlist("Phone".into());
+        music.add_tracks(id, vec![track("listed.mp3"), track("orphan.mp3")]);
+        music.play_tracks(vec![track("queued.mp3")], 0);
+        let keep = vec![path("copying.mp3")];
+        assert_eq!(music.sweep_imported(path(""), keep.clone()), 0, "everything's used");
+
+        music.remove_track(id, 1);
+        assert_eq!(music.sweep_imported(path(""), keep.clone()), 1);
+        assert!(!dir.join("orphan.mp3").exists() && dir.join("listed.mp3").exists());
+        music.delete_playlist(id);
+        music.stop();
+        assert_eq!(music.sweep_imported(path(""), keep), 2, "the playlist's and the queue's");
+        assert!(dir.join("copying.mp3").exists() && dir.join("folder/inner.mp3").exists());
+        assert_eq!(music.sweep_imported("relative".into(), vec![]), 0);
+        drop(music);
+        drop(engine);
     }
 
     #[test]

@@ -254,6 +254,11 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
         music?.act { it.playTracks(songs, index.toUInt()) }
     }
 
+    fun playNext(track: TrackRecord) {
+        music?.act { it.playNext(listOf(track)) }
+        viewModelScope.launch { _messages.send(SavedMessage.Info("“${track.title}” plays next")) }
+    }
+
     fun queue(track: TrackRecord) {
         music?.act { it.queueTracks(listOf(track)) }
         viewModelScope.launch { _messages.send(SavedMessage.Info("Added “${track.title}” to the queue")) }

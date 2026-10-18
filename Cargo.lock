@@ -3772,6 +3772,7 @@ dependencies = [
  "cpal",
  "directories",
  "image",
+ "libc",
  "ndk",
  "notify-rust",
  "open",

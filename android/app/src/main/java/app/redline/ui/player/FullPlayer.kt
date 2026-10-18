@@ -95,13 +95,16 @@ fun FullPlayer(music: MusicState, close: () -> Unit) {
         Modifier
             .fillMaxSize()
             .background(RedlineColors.Bg)
+            // The tint runs up behind the status bar...
+            .background(Brush.verticalGradient(0f to accent.headerTint, 0.6f to RedlineColors.Bg))
             // Swallow taps so the pages underneath don't get them.
             .clickable(interactionSource = null, indication = null) {},
     ) {
         LazyColumn(
             Modifier
                 .fillMaxSize()
-                .background(Brush.verticalGradient(0f to accent.headerTint, 0.6f to RedlineColors.Bg))
+                // ...but the page scrolls out of sight below it, not under the clock.
+                .statusBarsPadding()
                 .navigationBarsPadding(),
             contentPadding = PaddingValues(bottom = 32.dp),
         ) {
@@ -131,7 +134,6 @@ private fun TopBar(s: PlayerSnapshotRecord, music: MusicState, close: () -> Unit
     Row(
         Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
             .padding(horizontal = 4.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

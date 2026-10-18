@@ -46,6 +46,8 @@ android {
         jniLibs {
             // The library runs python/ffmpeg out of nativeLibraryDir, so the .so files
             // must be extracted to disk at install time (matches extractNativeLibs="true").
+            // That also keeps them compressed in the APK; the alternative stores them
+            // uncompressed and runs nothing.
             useLegacyPackaging = true
         }
     }
@@ -153,7 +155,9 @@ abstract class CargoNdkTask : DefaultTask() {
                     addAll(listOf("cargo", "ndk"))
                     abis.get().forEach { addAll(listOf("-t", it)) }
                     addAll(listOf("-P", minSdk.get().toString(), "-o", out.absolutePath, "build", "-p", "redline-mobile"))
-                    if (release.get()) add("--release")
+                    // Debug builds use the workspace's android-dev profile: dev without the
+                    // debuginfo that made the library ~150 MB per ABI (see Cargo.toml).
+                    addAll(if (release.get()) listOf("--release") else listOf("--profile", "android-dev"))
                 }
             )
         }

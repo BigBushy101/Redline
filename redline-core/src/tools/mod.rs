@@ -150,7 +150,8 @@ fn find(name: &str, override_path: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// A `Command` that won't flash a console window on Windows, with the tools' extra environment
-/// (see [`set_child_env`]).
+/// (see [`set_child_env`]). Elsewhere it starts in a process group of its own, so
+/// [`kill_tree`] can take its children down with it.
 pub fn command(program: &Path) -> Command {
     let mut cmd = Command::new(program);
     if let Some(vars) = CHILD_ENV.get() {
@@ -162,11 +163,20 @@ pub fn command(program: &Path) -> Command {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // The group's id is the child's pid. Tools never read the terminal, so leaving its
+        // foreground group costs nothing.
+        cmd.process_group(0);
+    }
     cmd
 }
 
 /// Kills a process and its children. yt-dlp.exe is a PyInstaller bundle that re-spawns
-/// itself and launches ffmpeg, so killing only the top process leaves orphans.
+/// itself and launches ffmpeg, so killing only the top process leaves orphans. Elsewhere
+/// yt-dlp's ffmpeg (and Android's python) would outlive it the same way; there the whole
+/// process group [`command`] made goes.
 pub fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
     {
@@ -175,6 +185,13 @@ pub fn kill_tree(child: &mut Child) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+    #[cfg(unix)]
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        // The child isn't reaped yet (the caller holds it), so no other process or group can
+        // have its id; one started without `command` leads no group and this just fails.
+        // SAFETY: kill only sends a signal.
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
     }
     let _ = child.kill();
 }
@@ -322,5 +339,28 @@ mod tests {
         // Without bundled tools (desktop), nothing runs through a launcher.
         assert_eq!(ToolPaths::locate_with(&s, None).ytdlp_launcher, None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Like yt-dlp's ffmpeg: a grandchild the killed process started must go too.
+    #[cfg(unix)]
+    #[test]
+    fn kill_tree_takes_grandchildren() {
+        let mut cmd = command(Path::new("sh"));
+        cmd.args(["-c", "sleep 100 & echo $!; wait"]).stdout(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let grandchild: libc::pid_t = line.trim().parse().unwrap();
+        // SAFETY: signal 0 only checks that the process exists.
+        let alive = || unsafe { libc::kill(grandchild, 0) } == 0;
+        assert!(alive());
+        kill_tree(&mut child);
+        let _ = child.wait();
+        // Once killed, init (or a subreaper) reaps it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!alive(), "sleep outlived its parent");
     }
 }

@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.QueuePlayNext
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material3.AlertDialog
@@ -226,6 +227,7 @@ private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: P
                 onAction = { a ->
                     when (a) {
                         TrackAction.Play -> model.play(p.id, start = i)
+                        TrackAction.Next -> model.playNext(t)
                         TrackAction.Queue -> model.queue(t)
                         TrackAction.Offline -> model.downloadForOffline(t)
                         TrackAction.Save -> model.saveTrack(t)
@@ -368,7 +370,7 @@ private fun AddBar(model: PlaylistsModel, id: ULong) {
     }
 }
 
-private enum class TrackAction { Play, Queue, Offline, Save, Up, Down, Remove }
+private enum class TrackAction { Play, Next, Queue, Offline, Save, Up, Down, Remove }
 
 /** One track, with the playlist's menu (playlists.rs's row buttons). */
 @Composable
@@ -379,6 +381,7 @@ private fun PlaylistTrackRow(index: Int, track: TrackRecord, count: Int, playing
             onAction(a)
         }
         MenuItem("Play", Icons.Rounded.PlayArrow) { pick(TrackAction.Play) }
+        MenuItem("Play next", Icons.Rounded.QueuePlayNext) { pick(TrackAction.Next) }
         MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) { pick(TrackAction.Queue) }
         if (track.canGoOffline) MenuItem("Download for offline", Icons.Rounded.Download) { pick(TrackAction.Offline) }
         if (track.kind == TrackKind.LINK && !saved) MenuItem("Save to Saved", Icons.Rounded.BookmarkBorder) { pick(TrackAction.Save) }

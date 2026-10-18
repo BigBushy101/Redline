@@ -59,6 +59,10 @@ object RedlineEngine {
     fun defaultConvertDir(context: Context): File =
         File(context.getExternalFilesDir(null) ?: context.filesDir, "Converted")
 
+    /** Where files picked for playlists are copied (see [app.redline.state.ImportedMusic]). */
+    fun importedMusicDir(context: Context): File =
+        context.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: File(context.filesDir, "Music")
+
     /** Where picked and shared files are copied for ffmpeg; each copy gets a folder of its own. */
     fun convertInputsDir(context: Context): File = File(context.cacheDir, "convert-inputs")
 

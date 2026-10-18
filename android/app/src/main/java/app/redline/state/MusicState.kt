@@ -1,6 +1,7 @@
 package app.redline.state
 
 import android.app.Application
+import app.redline.RedlineEngine
 import app.redline.core.EqRecord
 import app.redline.core.Music
 import app.redline.core.MusicListener
@@ -70,6 +71,9 @@ class MusicState(private val app: Application, val music: Music) {
     /** The platforms with something saved, for the Saved overview. */
     val savedOverview: StateFlow<SavedOverviewRecord?> = _savedOverview.asStateFlow()
 
+    /** Copies of files picked for playlists. */
+    val imported = ImportedMusic(RedlineEngine.importedMusicDir(app))
+
     private val refreshes = Channel<Unit>(Channel.CONFLATED)
     private var queueVersion: ULong? = null
     /** Counts the settings changes made here; a read that started before one is stale. */
@@ -79,6 +83,8 @@ class MusicState(private val app: Application, val music: Music) {
         scope.launch { for (unit in refreshes) refresh() }
         requestRefresh()
         reloadPlaylists()
+        // Copies an older version left behind, or whose tracks have left Now playing since.
+        scope.launch { imported.sweep(music) }
     }
 
     /** Called on the core's thread; just queues a refresh. */
@@ -136,12 +142,21 @@ class MusicState(private val app: Application, val music: Music) {
     /** A call that blocks for seconds (yt-dlp lookups, ffprobe scans). */
     suspend fun <T> onMusicSlow(call: (Music) -> T): T = withContext(Dispatchers.IO) { call(music) }
 
-    /** Changes the playlists, then reads the list again and tells open playlists. */
-    fun editPlaylists(call: (Music) -> Unit) {
+    /**
+     * Changes the playlists, then reads the list again and tells open playlists. An edit that
+     * drops tracks ([sweepImports]) also deletes the copied files nothing plays any more.
+     */
+    fun editPlaylists(sweepImports: Boolean = false, call: (Music) -> Unit) {
         scope.launch {
             withContext(musicThread) { call(music) }
             reloadPlaylistsNow()
+            if (sweepImports) imported.sweep(music)
         }
+    }
+
+    /** Deletes the copied files nothing plays any more (see [ImportedMusic]). */
+    suspend fun sweepImports() {
+        imported.sweep(music)
     }
 
     /** Like [editPlaylists], for a call whose result the caller needs. */

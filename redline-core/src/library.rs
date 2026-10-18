@@ -88,6 +88,9 @@ impl Playlist {
 pub struct Library {
     pub playlists: Vec<Playlist>,
     dirty: bool,
+    /// The playlists file is there but couldn't be read, so `playlists` may be missing what
+    /// it holds; cleared once they're saved over it.
+    unreadable: bool,
 }
 
 fn library_path() -> PathBuf {
@@ -100,19 +103,27 @@ impl Library {
     }
 
     fn load_from(path: &Path) -> Self {
-        let playlists = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let (playlists, unreadable) = match std::fs::read_to_string(path) {
+            Ok(s) => serde_json::from_str(&s).map_or((Vec::new(), true), |p| (p, false)),
+            Err(e) => (Vec::new(), e.kind() != std::io::ErrorKind::NotFound),
+        };
         Self {
             playlists,
             dirty: false,
+            unreadable,
         }
+    }
+
+    /// Whether the saved playlists couldn't be read (see [`Self::unreadable`]): nothing should
+    /// be thrown away for not being in a playlist.
+    pub fn is_unreadable(&self) -> bool {
+        self.unreadable
     }
 
     pub fn save_if_dirty(&mut self) {
         if std::mem::take(&mut self.dirty) {
             self.save_to(&library_path());
+            self.unreadable = false;
         }
     }
 
@@ -330,6 +341,28 @@ impl NowPlaying {
         }
     }
 
+    /// Puts tracks right after the current one ("Play next"), shuffled or not. They also go
+    /// after it in list order, so turning shuffle off keeps them next. An empty queue just
+    /// gets them, from the first.
+    pub fn insert_next(&mut self, tracks: impl IntoIterator<Item = Track>) {
+        let at = self.current_index().map_or(self.tracks.len(), |c| c + 1);
+        let before = self.tracks.len();
+        self.tracks.splice(at..at, tracks);
+        let n = self.tracks.len() - before;
+        for i in &mut self.order {
+            if *i >= at {
+                *i += n;
+            }
+        }
+        let pos = if self.order.is_empty() {
+            self.pos = 0;
+            0
+        } else {
+            self.pos + 1
+        };
+        self.order.splice(pos..pos, at..at + n);
+    }
+
     /// Takes `tracks[index]` out of the queue, keeping the current track current.
     pub fn remove(&mut self, index: usize) {
         if index >= self.tracks.len() {
@@ -497,6 +530,11 @@ mod tests {
         let titles: Vec<_> = p.tracks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, ["A", "T2"]);
         assert_eq!(p.tracks[0].source, Source::Local("C:/m/a.flac".into()));
+        assert!(!back.is_unreadable());
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(Library::load_from(&path).is_unreadable(), "a broken file isn't an empty library");
+        let _ = std::fs::remove_file(&path);
+        assert!(!Library::load_from(&path).is_unreadable(), "no file yet is");
 
         // Older files without the optional fields still load.
         let old: Vec<Playlist> =
@@ -652,5 +690,60 @@ mod tests {
         q.clear();
         assert!(q.is_empty() && q.current().is_none());
         assert_eq!(Repeat::Off.cycle().cycle().cycle(), Repeat::Off);
+    }
+
+    fn titles(q: &NowPlaying) -> Vec<&str> {
+        q.in_order().map(|(_, t)| t.title.as_str()).collect()
+    }
+
+    #[test]
+    fn play_next_goes_after_the_current_track() {
+        let mut q = NowPlaying::default();
+        q.insert_next([link(1), link(2)]);
+        assert_eq!(q.current().unwrap().title, "T1", "an empty queue starts at the top");
+
+        q.start((1..=4).map(link).collect(), 1, None);
+        q.insert_next([link(8), link(9)]);
+        assert_eq!(q.current().unwrap().title, "T2");
+        assert_eq!(titles(&q), ["T1", "T2", "T8", "T9", "T3", "T4"]);
+        assert_eq!(q.next().unwrap().title, "T8");
+        assert_eq!(q.next().unwrap().title, "T9");
+        assert_eq!(q.next().unwrap().title, "T3");
+
+        // Removing and jumping still work by list index afterwards.
+        q.remove(2);
+        assert_eq!(q.current().unwrap().title, "T3");
+        assert_eq!(q.jump(0).unwrap().title, "T1");
+        q.insert_next([]);
+        assert_eq!(titles(&q), ["T1", "T2", "T9", "T3", "T4"]);
+    }
+
+    #[test]
+    fn play_next_while_shuffled() {
+        let mut q = NowPlaying::default();
+        q.set_shuffle(true);
+        q.start((1..=6).map(link).collect(), 2, None);
+        q.next();
+        q.next();
+        let cur = q.current().unwrap().title.clone();
+        let before = titles(&q).into_iter().map(String::from).collect::<Vec<_>>();
+        q.insert_next([link(8), link(9)]);
+        assert_eq!(q.current().unwrap().title, cur);
+        let mut want = before.clone();
+        want.splice(3..3, ["T8".to_string(), "T9".to_string()]);
+        assert_eq!(titles(&q), want, "in play order right after the current track");
+        assert_eq!(q.next().unwrap().title, "T8");
+        assert_eq!(q.next().unwrap().title, "T9");
+        assert_eq!(q.next().unwrap().title, want[5]);
+
+        // Every list index is in the order once, and shuffle off keeps them after `cur`.
+        let mut order: Vec<_> = q.in_order().map(|(i, _)| i).collect();
+        order.sort();
+        assert_eq!(order, (0..8).collect::<Vec<_>>());
+        q.jump(q.tracks.iter().position(|t| t.title == cur).unwrap());
+        q.set_shuffle(false);
+        let list = titles(&q);
+        let at = list.iter().position(|t| *t == cur).unwrap();
+        assert_eq!(list[at + 1..at + 3], ["T8", "T9"]);
     }
 }

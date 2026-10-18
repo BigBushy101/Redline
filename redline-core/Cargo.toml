@@ -27,6 +27,10 @@ cpal = "0.18.2"
 # AAudio for the player's output (see player/aaudio.rs); the version cpal would use.
 ndk = { version = "0.9", default-features = false, features = ["audio", "api-level-26"] }
 
+# Killing a tool's whole process group (tools::kill_tree).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 # Windows media keys and the media overlay (SMTC)
 souvlaki = "0.8.3"

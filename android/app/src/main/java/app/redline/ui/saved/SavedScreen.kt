@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.QueuePlayNext
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material3.AlertDialog
@@ -350,6 +351,10 @@ private fun PlatformPage(model: SavedModel, page: SavedPlatformPageRecord, curre
                         close()
                         model.playSongs(page.songs, i)
                     }
+                    MenuItem("Play next", Icons.Rounded.QueuePlayNext) {
+                        close()
+                        model.playNext(t)
+                    }
                     MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) {
                         close()
                         model.queue(t)
@@ -597,6 +602,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.savedTracks(
                 play(i)
             }
             if (!t.removed) {
+                MenuItem("Play next", Icons.Rounded.QueuePlayNext) {
+                    close()
+                    model.playNext(track)
+                }
                 MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) {
                     close()
                     model.queue(track)

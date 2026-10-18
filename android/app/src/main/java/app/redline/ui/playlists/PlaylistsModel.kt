@@ -3,7 +3,6 @@ package app.redline.ui.playlists
 import android.app.Application
 import android.content.ContentResolver
 import android.net.Uri
-import android.os.Environment
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
@@ -43,7 +42,8 @@ class Adding(val playlist: ULong, val what: String)
  * added to it, and the edits, which go to the core through [MusicState].
  *
  * Picked files are copied into the app's Music folder first: ffmpeg can't read a content://
- * link. Unlike the Convert page's copies these stay, since the playlist keeps pointing at them.
+ * link. Unlike the Convert page's copies these stay while a playlist (or Now playing) points
+ * at them; [MusicState.imported] deletes them after that.
  */
 class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : AndroidViewModel(app) {
     private val state = (app as RedlineApp).state
@@ -116,7 +116,7 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
 
     fun delete(id: ULong) {
         if (openId == id) close()
-        music?.editPlaylists { it.deletePlaylist(id) }
+        music?.editPlaylists(sweepImports = true) { it.deletePlaylist(id) }
     }
 
     fun play(id: ULong, start: Int = 0, shuffle: Boolean = false) {
@@ -124,6 +124,11 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
     }
 
     // ---- Tracks -------------------------------------------------------------------------
+
+    fun playNext(track: TrackRecord) {
+        music?.act { it.playNext(listOf(track)) }
+        viewModelScope.launch { _messages.send(PlaylistsMessage.Info("“${track.title}” plays next")) }
+    }
 
     fun queue(track: TrackRecord) {
         music?.act { it.queueTracks(listOf(track)) }
@@ -135,7 +140,7 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
     }
 
     fun remove(id: ULong, index: Int) {
-        music?.editPlaylists { it.removeTrack(id, index.toUInt()) }
+        music?.editPlaylists(sweepImports = true) { it.removeTrack(id, index.toUInt()) }
     }
 
     /** "Save to Saved": the link as a single song (the desktop's bookmark on playlist rows). */
@@ -183,11 +188,17 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
         if (uris.isEmpty()) return
         val music = music ?: return
         val what = if (uris.size == 1) "file" else "${uris.size} files"
-        add(id, what) {
+        val copies = mutableListOf<File>()
+        // Copies are held until their tracks are in the playlist; ones that didn't make it go.
+        val done: suspend () -> Unit = {
+            music.imported.release(copies)
+            music.sweepImports()
+        }
+        add(id, what, done) {
             val paths = mutableListOf<String>()
             for (uri in uris) {
                 try {
-                    paths += withContext(Dispatchers.IO) { copy(uri).absolutePath }
+                    paths += copy(music, uri, copies).absolutePath
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -198,7 +209,7 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
         }
     }
 
-    private fun add(id: ULong, what: String, find: suspend () -> List<TrackRecord>?) {
+    private fun add(id: ULong, what: String, done: suspend () -> Unit = {}, find: suspend () -> List<TrackRecord>?) {
         val music = music ?: return
         val entry = Adding(id, what)
         adding = adding + entry
@@ -218,31 +229,26 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
                 _messages.send(PlaylistsMessage.Error(e.message ?: e.toString()))
             } finally {
                 adding = adding.filter { it !== entry }
+                done()
             }
         }
     }
 
-    /** Copies a picked file to the Music folder under its own name, numbered if taken. */
-    private fun copy(uri: Uri): File {
-        val app = getApplication<Application>()
-        val dir = app.getExternalFilesDir(Environment.DIRECTORY_MUSIC) ?: File(app.filesDir, "Music")
-        dir.mkdirs()
-        val name = displayName(uri)
-        val base = name.substringBeforeLast('.', name)
-        val ext = name.substringAfterLast('.', "").let { if (it.isEmpty()) "" else ".$it" }
-        var file = File(dir, name)
-        var n = 1
-        // createNewFile claims the name, so two copies at once can't pick the same one.
-        while (!file.createNewFile()) {
-            n++
-            file = File(dir, "$base ($n)$ext")
-        }
-        val input = resolver.openInputStream(uri) ?: throw IOException("the file can't be opened")
-        try {
-            input.use { src -> file.outputStream().use { dst -> src.copyTo(dst, 256 * 1024) } }
-        } catch (e: Exception) {
-            file.delete()
-            throw e
+    /**
+     * Copies a picked file to the Music folder under its own name, numbered if taken. The copy
+     * goes in [held] as soon as it exists, for the caller to release.
+     */
+    private suspend fun copy(music: MusicState, uri: Uri, held: MutableList<File>): File {
+        val file = music.imported.newFile(withContext(Dispatchers.IO) { displayName(uri) })
+        held += file
+        withContext(Dispatchers.IO) {
+            try {
+                val input = resolver.openInputStream(uri) ?: throw IOException("the file can't be opened")
+                input.use { src -> file.outputStream().use { dst -> src.copyTo(dst, 256 * 1024) } }
+            } catch (e: Exception) {
+                file.delete()
+                throw e
+            }
         }
         return file
     }
