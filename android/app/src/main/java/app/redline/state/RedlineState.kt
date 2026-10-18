@@ -18,6 +18,7 @@ import app.redline.work.DownloadService
 import app.redline.work.Notifications
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -133,6 +134,7 @@ class RedlineState(private val app: Application) {
                     launch { _settings.value = onEngine { it.settings() } }
                     launch { _encoders.value = onEngineSlow { it.detectEncoders() } }
                     refreshTools()
+                    launch { updateYtdlpIfStale() }
                 },
                 onFailure = { e ->
                     // UnsatisfiedLinkError lands here too when libredline_mobile.so is missing.
@@ -241,8 +243,32 @@ class RedlineState(private val app: Application) {
         }
     }
 
+    /**
+     * The APK's yt-dlp is whatever youtubedl-android froze into it, and YouTube answers an old
+     * one's stream links with 403s; the desktop downloads the latest on first run instead. So
+     * update at launch, at most once a day, as the Settings button does.
+     */
+    private suspend fun updateYtdlpIfStale() {
+        val prefs = app.getSharedPreferences("tools", Application.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        if (now - prefs.getLong(YTDLP_CHECKED, 0) < YTDLP_EVERY_MS) return
+        try {
+            val result = onEngineSlow { it.updateYtdlp() }
+            Log.i(TAG, "yt-dlp update: $result")
+            prefs.edit().putLong(YTDLP_CHECKED, now).apply()
+            refreshTools()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Offline or GitHub unreachable: the next launch tries again.
+            Log.w(TAG, "yt-dlp update failed", e)
+        }
+    }
+
     private companion object {
         const val TAG = "Redline"
+        const val YTDLP_CHECKED = "ytdlpCheckedAt"
+        const val YTDLP_EVERY_MS = 24 * 60 * 60 * 1000L
         /** Jobs in these states don't read their inputs again. */
         val releasing = setOf(JobState.DONE, JobState.SKIPPED)
     }

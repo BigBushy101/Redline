@@ -249,7 +249,44 @@ fn extract(zip_path: &Path, dest_dir: &Path, names: &[&str]) -> Result<()> {
 /// Runs `yt-dlp -U` and returns its last line of output. On Android this replaces the zipapp
 /// script in the app's storage, which is writable, so it works there too.
 pub fn update_ytdlp(tools: &ToolPaths) -> Result<String> {
-    let out = tools.ytdlp_command()?.arg("-U").output()?;
+    if tools.ytdlp_launcher.is_some() {
+        return update_script(tools);
+    }
+    last_line(tools.ytdlp_command()?.arg("-U").output()?)
+}
+
+/// The zipapp (Android's yt-dlp, run through Python) rewrites itself in place, so a yt-dlp
+/// that starts meanwhile, or an update cut short, would find half a file. This updates a
+/// copy, checks the copy runs, and only then moves it over the original.
+fn update_script(tools: &ToolPaths) -> Result<String> {
+    let script = tools.ytdlp.as_ref().ok_or_else(|| anyhow::anyhow!("yt-dlp is not installed"))?;
+    let mut copy = script.clone().into_os_string();
+    copy.push(".updating");
+    let copy = std::path::PathBuf::from(copy);
+    std::fs::copy(script, &copy)?;
+    let staged = ToolPaths { ytdlp: Some(copy.clone()), ..tools.clone() };
+    let result = staged
+        .ytdlp_command()
+        .and_then(|mut cmd| Ok(cmd.arg("-U").output()?))
+        .and_then(last_line)
+        .and_then(|last| match ytdlp_version(&staged) {
+            Some(_) => Ok(last),
+            None => bail!("the updated yt-dlp didn't run, so the old one was kept"),
+        });
+    match result {
+        Ok(last) => {
+            std::fs::rename(&copy, script)?;
+            Ok(last)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&copy);
+            Err(e)
+        }
+    }
+}
+
+/// A finished yt-dlp's last line of output: the result when it succeeded, the error if not.
+fn last_line(out: std::process::Output) -> Result<String> {
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
