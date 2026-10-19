@@ -357,6 +357,24 @@ impl Music {
         self.inner.send(Command::Seek(secs.max(0.0)));
     }
 
+    /// Puts the A-B loop's A marker where the track is now.
+    pub fn set_loop_a(&self) {
+        let pos = self.inner.player.state().position;
+        self.inner.send(Command::SetLoopA(pos));
+    }
+
+    /// Puts the B marker where the track is now; from then on reaching it goes back to A (the
+    /// start, if A isn't set). Ignored if it would be before A.
+    pub fn set_loop_b(&self) {
+        let pos = self.inner.player.state().position;
+        self.inner.send(Command::SetLoopB(pos));
+    }
+
+    /// Ends the A-B loop. Changing tracks ends it too.
+    pub fn clear_loop(&self) {
+        self.inner.send(Command::ClearLoop);
+    }
+
     pub fn next(&self) {
         self.inner.queue(|c, p, h| {
             if c.now.next().is_some() {

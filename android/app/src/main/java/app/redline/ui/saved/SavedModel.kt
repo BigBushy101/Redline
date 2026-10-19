@@ -1,6 +1,7 @@
 package app.redline.ui.saved
 
 import android.app.Application
+import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -15,9 +16,11 @@ import app.redline.core.SavedPlatformPageRecord
 import app.redline.core.SavedTrackRecord
 import app.redline.core.TrackRecord
 import app.redline.state.MusicState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** What the Saved pages (and the Save buttons elsewhere) tell the user. */
 sealed interface SavedMessage {
@@ -58,6 +61,10 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
 
     /** Links being looked up to save. */
     var saving by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    /** Links of an imported list still to look up and save, while an import runs. */
+    var importing by mutableStateOf<Int?>(null)
         private set
 
     private val _messages = Channel<SavedMessage>(Channel.BUFFERED)
@@ -193,6 +200,82 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
         }
     }
 
+    // ---- Export and import --------------------------------------------------------------
+
+    /** Writes all of Saved, as a Redline export, to the document the user created. */
+    fun exportTo(uri: Uri) {
+        val music = music ?: return
+        viewModelScope.launch {
+            try {
+                val json = music.onMusicSlow { it.exportSaved() }
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    (resolver.openOutputStream(uri, "wt") ?: error("it couldn't be opened")).use { it.write(json.toByteArray()) }
+                }
+                val o = music.onMusicSlow { it.savedOverview() }
+                _messages.send(SavedMessage.Info("Exported ${o.collectionCount} collection${if (o.collectionCount == 1u) "" else "s"} and ${songs(o.songCount.toInt())}"))
+            } catch (e: Exception) {
+                _messages.send(SavedMessage.Error("Couldn't export: ${e.message ?: "the file couldn't be written"}"))
+            }
+        }
+    }
+
+    /**
+     * Imports a Redline export (merged in, nothing saved twice) or a text file of links, one
+     * per line, which are looked up and saved one at a time.
+     */
+    fun importFrom(uri: Uri) {
+        val music = music ?: return
+        if (importing != null) return
+        viewModelScope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    (resolver.openInputStream(uri) ?: error("it couldn't be opened")).use { it.readBytes().decodeToString() }
+                }
+                val out = music.onMusicSlow { it.importSaved(text) }
+                music.act { } // Saved changed
+                state.act { } // and kept-offline collections may have queued downloads
+                if (out.links.isEmpty()) {
+                    _messages.send(SavedMessage.Info(out.message))
+                    return@launch
+                }
+                _messages.send(SavedMessage.Info("Saving ${links(out.links.size)}…"))
+                var saved = 0
+                var failed = 0
+                importing = out.links.size
+                for ((i, link) in out.links.withIndex()) {
+                    try {
+                        music.onMusicSlow { it.saveLink(link) }
+                        saved++
+                        music.act { }
+                    } catch (e: RedlineException) {
+                        failed++
+                    }
+                    importing = out.links.size - i - 1
+                }
+                state.act { }
+                val parts = buildString {
+                    append(
+                        when {
+                            saved == 0 -> "Couldn't look up ${links(failed)}"
+                            failed == 0 -> "Imported ${links(saved)}"
+                            else -> "Imported ${links(saved)}; $failed couldn't be looked up"
+                        },
+                    )
+                    if (out.skipped > 0u) append(" (${out.skipped} saved already)")
+                }
+                _messages.send(SavedMessage.Info(parts))
+            } catch (e: RedlineException) {
+                _messages.send(SavedMessage.Error(e.message ?: "Couldn't import that file."))
+            } catch (e: Exception) {
+                _messages.send(SavedMessage.Error("Couldn't read that file: ${e.message ?: "it couldn't be opened"}"))
+            } finally {
+                importing = null
+            }
+        }
+    }
+
     // ---- Collections --------------------------------------------------------------------
 
     fun refresh(id: ULong) = refreshing { it.refreshCollection(id) }
@@ -311,3 +394,5 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
 
 /** "1 song", "12 songs". */
 fun songs(n: Int) = "$n song${if (n == 1) "" else "s"}"
+
+private fun links(n: Int) = "$n link${if (n == 1) "" else "s"}"

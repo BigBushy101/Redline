@@ -446,3 +446,53 @@ fn prefetch_for_a_replaced_next_is_dropped() {
     wait_for(&p, "end of c", |s| s.status == Status::Ended);
     assert_eq!(*media.resolves.lock().unwrap(), 2, "c came from the cache");
 }
+
+#[test]
+fn ab_loop_goes_back_to_a_until_cleared() {
+    let capture = Capture::new(RATE, 8.0);
+    let tone = Tone::new(3.0);
+    let p = player(tone.clone(), &capture);
+    p.send(Command::Load(track(), 0.0));
+    wait_for(&p, "playing", |s| s.status == Status::Playing && s.position > 0.6);
+    p.send(Command::SetLoopA(0.5));
+    p.send(Command::SetLoopB(1.0));
+    let s = wait_for(&p, "markers", |s| s.ab_loop.is_active());
+    assert_eq!((s.ab_loop.a, s.ab_loop.b), (Some(0.5), Some(1.0)));
+    // Already past B when it was set: back to A straight away, then round again.
+    let start = Instant::now();
+    loop {
+        let s = p.state();
+        assert_ne!(s.status, Status::Ended, "looped instead of ending");
+        assert!(s.position <= 1.1, "stayed inside the loop: {}", s.position);
+        if tone.starts.lock().unwrap().iter().filter(|t| **t == 0.5).count() >= 3 {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "didn't loop: {:?}", tone.starts.lock().unwrap());
+        thread::sleep(Duration::from_millis(5));
+    }
+    p.send(Command::ClearLoop);
+    let s = wait_for(&p, "end", |s| s.status == Status::Ended);
+    assert!(!s.ab_loop.is_set());
+
+    // A new track clears the markers.
+    p.send(Command::Load(track(), 0.0));
+    p.send(Command::SetLoopB(2.0));
+    wait_for(&p, "B", |s| s.ab_loop.is_active());
+    p.send(Command::Load(track(), 0.0));
+    wait_for(&p, "cleared", |s| s.load_id == 3 && !s.ab_loop.is_set());
+}
+
+#[test]
+fn ab_loop_with_b_at_the_end_loops_instead_of_ending() {
+    let capture = Capture::new(RATE, 8.0);
+    let tone = Tone::new(1.0);
+    let p = player(tone.clone(), &capture);
+    p.send(Command::Load(track(), 0.0));
+    wait_for(&p, "playing", |s| s.status == Status::Playing);
+    p.send(Command::SetLoopA(0.2));
+    p.send(Command::SetLoopB(5.0));
+    let s = wait_for(&p, "B", |s| s.ab_loop.b.is_some());
+    assert_eq!(s.ab_loop.b, Some(1.0), "clamped to the end");
+    wait_for(&p, "looped", |s| s.status != Status::Ended && tone.starts.lock().unwrap().contains(&0.2));
+    assert_eq!(p.state().advances, 0);
+}

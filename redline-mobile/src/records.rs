@@ -947,6 +947,9 @@ pub struct PlayerSnapshotRecord {
     /// Changes whenever the queue's tracks, order or current track do; fetch `queue()` again
     /// only then.
     pub queue_version: u64,
+    /// The A-B loop's markers, in seconds; it loops once both are set.
+    pub loop_a_secs: Option<f64>,
+    pub loop_b_secs: Option<f64>,
 }
 
 pub fn player_snapshot(st: &PlayerState, now: &NowPlaying, queue_version: u64) -> PlayerSnapshotRecord {
@@ -999,6 +1002,8 @@ pub fn player_snapshot(st: &PlayerState, now: &NowPlaying, queue_version: u64) -
         is_link: matches!(st.source, Some(Source::Link(_))),
         load_id: st.load_id,
         queue_version,
+        loop_a_secs: st.ab_loop.a,
+        loop_b_secs: st.ab_loop.b,
     }
 }
 

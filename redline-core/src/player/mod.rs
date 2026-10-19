@@ -9,6 +9,7 @@
 //! URLs expire after a few hours. The one queued next is looked up (and its URL warmed) while
 //! the current track plays, so it starts without waiting on yt-dlp.
 
+pub mod ab_loop;
 #[cfg(target_os = "android")]
 mod aaudio;
 pub mod decode;
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+pub use ab_loop::AbLoop;
 use crate::Wake;
 use crate::tools::ToolPaths;
 use crate::tools::ytdlp::{self, NetworkOptions};
@@ -95,6 +97,8 @@ pub struct PlayerState {
     /// How many times a track ended and the player moved on to the `SetNext` source by
     /// itself, so the app can move its queue along.
     pub advances: u64,
+    /// A-B loop markers on the current track; a new track clears them.
+    pub ab_loop: AbLoop,
 }
 
 impl Default for PlayerState {
@@ -109,6 +113,7 @@ impl Default for PlayerState {
             volume: 1.0,
             load_id: 0,
             advances: 0,
+            ab_loop: AbLoop::default(),
         }
     }
 }
@@ -144,6 +149,11 @@ pub enum Command {
     /// What to play when the current track ends. The engine moves on by itself, so a
     /// playlist keeps going however rarely the UI runs (minimized, say).
     SetNext(Option<Source>),
+    /// Puts the loop's A marker at these seconds into the current track.
+    SetLoopA(f64),
+    /// Puts the loop's B marker here; from then on reaching B goes back to A.
+    SetLoopB(f64),
+    ClearLoop,
 }
 
 /// The player's saved controls.
@@ -516,6 +526,7 @@ impl Engine {
             Command::Load(source, start_at) => {
                 // A new pick; the app says what follows it.
                 self.next = None;
+                self.set_state(|s| s.ab_loop.clear());
                 self.load(source, start_at.max(0.0))
             }
             Command::Play => self.play(),
@@ -548,9 +559,23 @@ impl Engine {
                     s.position = 0.0;
                     s.duration = None;
                     s.buffering = false;
+                    s.ab_loop.clear();
                 });
             }
             Command::SetNext(next) => self.next = next,
+            Command::SetLoopA(secs) => {
+                if self.current.is_some() {
+                    self.set_state(|s| s.ab_loop.set_a(secs));
+                }
+            }
+            Command::SetLoopB(secs) => {
+                if self.current.is_some() {
+                    self.set_state(|s| {
+                        s.ab_loop.set_b(secs, s.duration);
+                    });
+                }
+            }
+            Command::ClearLoop => self.set_state(|s| s.ab_loop.clear()),
             Command::SetTools(tools) => self.env.tools = tools,
             Command::SetNetwork(network) => {
                 // Different cookies or proxy can resolve differently.
@@ -851,6 +876,17 @@ impl Engine {
         if st.status == Status::Loading && ready {
             st.status = if want_play { Status::Playing } else { Status::Paused };
         }
+        // Reaching B (or the end, when B is there) goes back to A instead of on.
+        let loop_to = match st.ab_loop.wrap(st.position) {
+            Some(a) if st.status == Status::Playing => Some(a),
+            _ if drained && st.status == Status::Playing && st.ab_loop.is_active() => st.ab_loop.a,
+            _ => None,
+        };
+        if let Some(a) = loop_to {
+            drop(st);
+            self.seek(a);
+            return true;
+        }
         if drained && st.status == Status::Playing {
             st.status = Status::Ended;
             if let Some(d) = duration {
@@ -866,6 +902,7 @@ impl Engine {
         if changed && self.status() == Status::Ended {
             match self.next.take() {
                 Some(next) => {
+                    self.set_state(|s| s.ab_loop.clear());
                     self.load(next, 0.0);
                     self.set_state(|s| s.advances += 1);
                 }

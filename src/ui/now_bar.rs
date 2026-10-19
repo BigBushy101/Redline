@@ -119,8 +119,11 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
         };
         time(ui, Some(st.position), Align::Max);
         let w = (ui.available_width() - time_w - 8.0).max(40.0);
-        let frac = st.duration.filter(|d| *d > 0.0).map(|d| (st.position / d) as f32);
-        if let Some(f) = theme::seek_bar(ui, w, frac)
+        let total = st.duration.filter(|d| *d > 0.0);
+        let frac = total.map(|d| (st.position / d) as f32);
+        let mark = |t: Option<f64>| t.zip(total).map(|(t, d)| (t / d) as f32);
+        let markers = (mark(st.ab_loop.a), mark(st.ab_loop.b));
+        if let Some(f) = theme::seek_bar(ui, w, frac, markers)
             && let Some(d) = st.duration
         {
             let to = f as f64 * d;
@@ -167,8 +170,40 @@ fn player_bar(ui: &mut Ui, app: &mut App) {
     } else if resp.clicked() {
         app.toggle_panel(Panel::Speed);
     }
+    r.add_space(4.0);
+    loop_buttons(&mut r, app);
     r.add_space(12.0);
     jobs_indicator(&mut r, app);
+}
+
+/// A-B loop: A and B mark the current spot, the cross clears them. Laid out right to left.
+fn loop_buttons(ui: &mut Ui, app: &mut App) {
+    let st = &app.player_state;
+    let (ab, pos) = (st.ab_loop, st.position);
+    let can = st.duration.is_some() && !matches!(st.status, Status::Idle | Status::Loading | Status::Error(_));
+    let at = |t: Option<f64>| t.map_or(String::new(), |t| format!(" ({})", fmt_duration(t)));
+    let spacing = std::mem::replace(&mut ui.spacing_mut().item_spacing.x, 2.0);
+    if ab.is_set() && panel_button(ui, icons::X, false, false, "Clear the loop").clicked() {
+        app.player.send(Command::ClearLoop);
+    }
+    let b_ok = pos >= ab.a.unwrap_or(0.0) + redline_core::player::ab_loop::MIN_LOOP;
+    let b_tip = format!("Loop back at this point{}", at(ab.b));
+    if ui
+        .add_enabled_ui(can && b_ok, |ui| panel_button(ui, "B", ab.b.is_some(), false, &b_tip))
+        .inner
+        .clicked()
+    {
+        app.player.send(Command::SetLoopB(pos));
+    }
+    let a_tip = format!("Loop from this point{}", at(ab.a));
+    if ui
+        .add_enabled_ui(can, |ui| panel_button(ui, "A", ab.a.is_some(), false, &a_tip))
+        .inner
+        .clicked()
+    {
+        app.player.send(Command::SetLoopA(pos));
+    }
+    ui.spacing_mut().item_spacing.x = spacing;
 }
 
 /// Small text or icon button in the bar, red while its setting is in effect.

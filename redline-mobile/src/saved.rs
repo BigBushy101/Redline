@@ -15,7 +15,7 @@ use redline_core::history::History;
 use redline_core::library::{self, Track};
 use redline_core::platform::{self, Platform as CorePlatform};
 use redline_core::player::Source;
-use redline_core::saved::{self, Collection, CollectionId, SaveOutcome, Saved, SavedTrack};
+use redline_core::saved::{self, Collection, CollectionId, Import, SaveOutcome, Saved, SavedTrack};
 
 use crate::engine::State;
 use crate::error::RedlineError;
@@ -179,6 +179,18 @@ pub enum SaveKind {
     /// A single song.
     Song,
     AlreadySaved,
+}
+
+/// What `import_saved` did.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct SavedImportRecord {
+    /// Ready to show: what a Redline export added. Empty for a list of links.
+    pub message: String,
+    /// From a plain list of links: the ones not saved yet, to save one by one with
+    /// `save_link`.
+    pub links: Vec<String>,
+    /// Links in the list that were saved already.
+    pub skipped: u32,
 }
 
 /// What `save_link` did.
@@ -554,6 +566,56 @@ impl Music {
     pub fn remove_saved_song(&self, link: String) -> bool {
         let key = platform::canonical(&link);
         self.inner.saved(|s| s.remove_song(&key))
+    }
+
+    // ---- Export and import ----
+
+    /// All of Saved as a Redline export (JSON), to write to the file the user picks.
+    pub fn export_saved(&self) -> String {
+        self.inner.ctl().saved.export_json()
+    }
+
+    /// Reads an import file's text. A Redline export is merged in straight away (collections
+    /// already saved gain only their missing songs; new kept-offline ones queue downloads). A
+    /// list of links, one per line, comes back as the links still to save.
+    pub fn import_saved(&self, text: String) -> Result<SavedImportRecord, RedlineError> {
+        let import = saved::parse_import(&text).map_err(|e| RedlineError::Invalid(format!("{e:#}")))?;
+        let export = match import {
+            Import::Links(links) => {
+                let total = links.len();
+                let links = self.inner.ctl().saved.unsaved_links(links);
+                let skipped = (total - links.len()) as u32;
+                let message = if links.is_empty() {
+                    format!("All {total} link{} in the file are saved already", if total == 1 { "" } else { "s" })
+                } else {
+                    String::new()
+                };
+                return Ok(SavedImportRecord { message, links, skipped });
+            }
+            Import::Saved(export) => export,
+        };
+        let (report, queued) = {
+            let mut ctl = self.inner.ctl();
+            let report = ctl.saved.merge(export);
+            ctl.saved_version += 1;
+            let mut st = self.inner.engine.state();
+            let mut queued = 0;
+            if st.tools.ready_for_download() {
+                for id in &report.new_offline {
+                    if let Some(c) = ctl.saved.get(*id) {
+                        let planned = saved::offline_jobs(c, &st.history, &st.settings);
+                        queued += queue_downloads(&mut st, planned);
+                    }
+                }
+            }
+            (report, queued)
+        };
+        if queued > 0 {
+            self.inner.engine.signal.poke();
+        }
+        self.inner.signal.poke();
+        let more = if queued > 0 { format!("; downloading {queued} for offline") } else { String::new() };
+        Ok(SavedImportRecord { message: format!("{}{more}", report.message()), links: Vec::new(), skipped: 0 })
     }
 
     // ---- Collections ----

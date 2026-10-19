@@ -8,7 +8,7 @@ use redline_core::library::{self, Track};
 use redline_core::platform::Platform;
 use redline_core::player::Source;
 use redline_core::download_plan::PlannedDownload;
-use redline_core::saved::{self, CollectionId, SaveOutcome, SavedTrack};
+use redline_core::saved::{self, CollectionId, Import, SaveOutcome, SavedTrack};
 
 use super::playlists::{AddTarget, add_menu, add_to, playlist_names};
 use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
@@ -31,6 +31,8 @@ struct Lookup {
     url: String,
     /// Saving alongside a download: no toasts unless saving fails.
     quiet: bool,
+    /// One of an imported list of links; counted in [`SavedPage::import`] instead of toasted.
+    import: bool,
     task: Task<Result<MediaInfo, String>>,
 }
 
@@ -58,6 +60,19 @@ pub struct SavedPage {
     launch_queue: std::collections::VecDeque<CollectionId>,
     launch_current: Option<CollectionId>,
     launch_checked: bool,
+    /// An imported list of links being looked up and saved.
+    import: Option<ImportTally>,
+}
+
+#[derive(Default)]
+struct ImportTally {
+    /// Links still to look up, one at a time so a long list doesn't start yt-dlp for each.
+    waiting: std::collections::VecDeque<String>,
+    pending: usize,
+    saved: usize,
+    failed: usize,
+    /// Links in the file that were saved already.
+    skipped: usize,
 }
 
 /// Collections not refreshed for this long are refreshed on launch.
@@ -81,6 +96,10 @@ pub fn start_save_quietly(app: &mut App, url: &str) {
 }
 
 fn start_save_with(app: &mut App, url: &str, quiet: bool) {
+    start_lookup(app, url, quiet, false);
+}
+
+fn start_lookup(app: &mut App, url: &str, quiet: bool, import: bool) {
     let url = url.trim().to_owned();
     if url.is_empty() {
         return;
@@ -97,6 +116,7 @@ fn start_save_with(app: &mut App, url: &str, quiet: bool) {
     app.saved_page.lookups.push(Lookup {
         url,
         quiet,
+        import,
         task: Task::spawn(&app.wake, move || {
             ytdlp::fetch_titled(&tools, &net, &fetch, &|_| false).map_err(|e| format!("{e:#}"))
         }),
@@ -202,6 +222,15 @@ pub fn poll(app: &mut App) {
             continue;
         };
         let lookup = app.saved_page.lookups.remove(i);
+        if lookup.import {
+            let saved = result.and_then(|info| app.saved.save_link(&info, &lookup.url).map_err(|e| format!("{e:#}")));
+            if let SaveOutcome::Refreshed { id, sync, .. } = saved.as_ref().unwrap_or(&SaveOutcome::AlreadySaved) {
+                let (id, added) = (*id, sync.added.clone());
+                keep_new_offline(app, id, &added);
+            }
+            finish_import_link(app, saved.is_ok());
+            continue;
+        }
         match result {
             Ok(info) => save_info_with(app, &info, &lookup.url, lookup.quiet),
             // A download's own lookup failing shows on the download.
@@ -222,6 +251,110 @@ pub fn poll(app: &mut App) {
         finish_sync(app, sync.id, result);
     }
     launch_refresh(app);
+}
+
+/// Export…: writes Saved to a file the user picks.
+fn export_saved(app: &mut App) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Redline Saved", &["json"])
+        .set_file_name("redline-saved.json")
+        .save_file()
+    else {
+        return;
+    };
+    match std::fs::write(&path, app.saved.export_json()) {
+        Ok(()) => {
+            let songs = app.saved.songs.len() + app.saved.collections.iter().map(|c| c.tracks.len()).sum::<usize>();
+            app.toast(format!(
+                "Exported {} and {} to {}",
+                plural(app.saved.collections.len(), "collection"),
+                plural(songs, "song"),
+                path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned())
+            ));
+        }
+        Err(e) => app.toast(format!("Couldn't write {}: {e}", path.display())),
+    }
+}
+
+/// Import…: a Redline export is merged in; a list of links is looked up and saved, one
+/// toast at the end.
+fn import_saved(app: &mut App) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Saved export or list of links", &["json", "txt"])
+        .add_filter("All files", &["*"])
+        .pick_file()
+    else {
+        return;
+    };
+    let parsed = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))
+        .and_then(|text| saved::parse_import(&text).map_err(|e| format!("{e:#}")));
+    match parsed {
+        Err(e) => app.toast(e),
+        Ok(Import::Saved(export)) => {
+            let report = app.saved.merge(export);
+            let mut queued = 0;
+            for id in &report.new_offline {
+                if let Some(c) = app.saved.get(*id) {
+                    let planned = saved::offline_jobs(c, &app.history, &app.settings);
+                    queued += queue_downloads(app, planned);
+                }
+            }
+            let more = if queued > 0 { format!("; downloading {} for offline", plural(queued, "song")) } else { String::new() };
+            app.toast(format!("{}{more}", report.message()));
+        }
+        Ok(Import::Links(links)) => {
+            if app.tools.ytdlp.is_none() {
+                app.toast("Saving links needs yt-dlp. Set it up in Settings.");
+                return;
+            }
+            let total = links.len();
+            let new = app.saved.unsaved_links(links);
+            if new.is_empty() {
+                app.toast(format!("All {} in the file are saved already", plural(total, "link")));
+                return;
+            }
+            app.toast(format!("Saving {}…", plural(new.len(), "link")));
+            let tally = app.saved_page.import.get_or_insert_with(ImportTally::default);
+            tally.pending += new.len();
+            tally.skipped += total - new.len();
+            let idle = tally.waiting.is_empty() && !app.saved_page.lookups.iter().any(|l| l.import);
+            app.saved_page.import.as_mut().expect("just set").waiting.extend(new);
+            if idle {
+                next_import_link(app);
+            }
+        }
+    }
+}
+
+fn next_import_link(app: &mut App) {
+    if let Some(url) = app.saved_page.import.as_mut().and_then(|t| t.waiting.pop_front()) {
+        start_lookup(app, &url, true, true);
+    }
+}
+
+/// Counts one imported link as done, and says how the import went after the last.
+fn finish_import_link(app: &mut App, ok: bool) {
+    let Some(t) = app.saved_page.import.as_mut() else { return };
+    t.pending = t.pending.saturating_sub(1);
+    if ok {
+        t.saved += 1;
+    } else {
+        t.failed += 1;
+    }
+    if t.pending > 0 {
+        return next_import_link(app);
+    }
+    let t = app.saved_page.import.take().unwrap_or_default();
+    let mut msg = match (t.saved, t.failed) {
+        (0, n) => format!("Couldn't look up {}", plural(n, "link")),
+        (s, 0) => format!("Imported {}", plural(s, "link")),
+        (s, n) => format!("Imported {}; {n} couldn't be looked up", plural(s, "link")),
+    };
+    if t.skipped > 0 {
+        msg += &format!(" ({} saved already)", t.skipped);
+    }
+    app.toast(msg);
 }
 
 fn finish_sync(app: &mut App, id: CollectionId, result: Result<Vec<Track>, String>) {
@@ -298,7 +431,7 @@ fn save_box(ui: &mut Ui, app: &mut App) {
         start_save(app, &url);
     }
     let page = &mut app.saved_page;
-    for l in &page.lookups {
+    for l in page.lookups.iter().filter(|l| !l.import) {
         ui.horizontal(|ui| {
             ui.add(Spinner::new().size(14.0).color(theme::accent().base));
             ui.add(egui::Label::new(theme::muted(format!("Looking up {}…", l.url))).truncate());
@@ -330,6 +463,26 @@ fn overview(ui: &mut Ui, app: &mut App) {
     };
     theme::page_header(ui, "Saved", "Saved music", &subtitle);
     save_box(ui, app);
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let importing = app.saved_page.import.as_ref().map(|t| t.pending);
+        if theme::ghost_button(ui, &format!("{}  Export…", icons::EXPORT), true)
+            .on_hover_text("Save your collections and songs to a file")
+            .clicked()
+        {
+            export_saved(app);
+        }
+        if theme::ghost_button(ui, &format!("{}  Import…", icons::DOWNLOAD_SIMPLE), importing.is_none())
+            .on_hover_text("Add from a Redline export, or a text file with one link per line")
+            .clicked()
+        {
+            import_saved(app);
+        }
+        if let Some(n) = importing {
+            ui.add(Spinner::new().size(14.0).color(theme::accent().base));
+            ui.label(theme::muted(format!("Importing, {} to go…", plural(n, "link"))));
+        }
+    });
     ui.add_space(24.0);
 
     if platforms.is_empty() {

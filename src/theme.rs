@@ -671,8 +671,9 @@ pub fn option_row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 /// Spotify-style scrubber over `progress` (0..=1). While dragging it follows the pointer;
-/// returns the fraction to seek to once the press is released.
-pub fn seek_bar(ui: &mut Ui, width: f32, progress: Option<f32>) -> Option<f32> {
+/// returns the fraction to seek to once the press is released. `markers` are the A-B loop's
+/// points (fractions too), drawn like the trim bar's handles with the span between them lit.
+pub fn seek_bar(ui: &mut Ui, width: f32, progress: Option<f32>, markers: (Option<f32>, Option<f32>)) -> Option<f32> {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 16.0), Sense::click_and_drag());
     let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
     let frac_at = |x: f32| ((x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
@@ -682,6 +683,15 @@ pub fn seek_bar(ui: &mut Ui, width: f32, progress: Option<f32>) -> Option<f32> {
         _ => progress,
     };
     paint_progress(ui, rect, shown, resp.hovered() || held);
+    let x_at = |f: f32| track.left() + track.width() * f.clamp(0.0, 1.0);
+    if let (Some(a), Some(b)) = markers {
+        let span = Rect::from_min_max(pos2(x_at(a), track.top() - 2.0), pos2(x_at(b), track.bottom() + 2.0));
+        ui.painter().rect_filled(span, CornerRadius::same(2), accent().base.gamma_multiply(0.35));
+    }
+    for f in [markers.0, markers.1].into_iter().flatten() {
+        let tick = Rect::from_center_size(pos2(x_at(f), track.center().y), vec2(3.0, 12.0));
+        ui.painter().rect_filled(tick, CornerRadius::same(1), TEXT);
+    }
     let released = resp.drag_stopped() || resp.clicked();
     let pos = resp.interact_pointer_pos().or(resp.hover_pos());
     pointer(resp, progress.is_some());

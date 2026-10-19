@@ -45,6 +45,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderColors
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +55,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -190,19 +195,46 @@ private fun NowPlaying(s: PlayerSnapshotRecord, music: MusicState) {
         }
         Spacer(Modifier.height(12.dp))
         SeekBar(s, music::seek)
+        LoopControls(s, music)
         Spacer(Modifier.height(8.dp))
         Transport(s, music)
         Spacer(Modifier.height(16.dp))
     }
 }
 
-/** Follows the track; dragging shows where you'll land, and it seeks on release. */
+/**
+ * Follows the track; dragging shows where you'll land, and it seeks on release. The A-B
+ * loop's span is lit on the track, with white marks at A and B like the trim slider's handles.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SeekBar(s: PlayerSnapshotRecord, seek: (Double) -> Unit) {
     val duration = s.durationSecs?.takeIf { it > 0 }
     var dragging by remember { mutableStateOf<Float?>(null) }
     val position = dragging?.toDouble() ?: s.positionSecs
+    val colors = sliderColors()
+    val accent = LocalAccent.current
+    val frac = { t: Double? -> if (t == null || duration == null) null else (t / duration).coerceIn(0.0, 1.0).toFloat() }
+    val (a, b) = frac(s.loopASecs) to frac(s.loopBSecs)
     Slider(
+        track = { state ->
+            SliderDefaults.Track(
+                sliderState = state,
+                colors = colors,
+                enabled = duration != null,
+                drawStopIndicator = null,
+                modifier = Modifier.drawWithContent {
+                    drawContent()
+                    if (a != null && b != null) {
+                        drawRect(accent.hover.copy(alpha = 0.45f), Offset(size.width * a, 0f), Size(size.width * (b - a), size.height))
+                    }
+                    for (f in listOfNotNull(a, b)) {
+                        val w = 3.dp.toPx()
+                        drawRect(RedlineColors.Text, Offset(size.width * f - w / 2, -2.dp.toPx()), Size(w, size.height + 4.dp.toPx()))
+                    }
+                },
+            )
+        },
         value = (duration?.let { position.coerceIn(0.0, it) } ?: 0.0).toFloat(),
         onValueChange = { dragging = it },
         onValueChangeFinished = {
@@ -211,13 +243,38 @@ private fun SeekBar(s: PlayerSnapshotRecord, seek: (Double) -> Unit) {
         },
         valueRange = 0f..(duration?.toFloat() ?: 1f),
         enabled = duration != null,
-        colors = sliderColors(),
+        colors = colors,
         modifier = Modifier.fillMaxWidth(),
     )
     Row(Modifier.fillMaxWidth()) {
         Text(fmtDuration(position), style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted)
         Spacer(Modifier.weight(1f))
         Text(duration?.let(::fmtDuration) ?: if (s.isLink) "Live" else "", style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted)
+    }
+}
+
+/** A-B loop: A and B mark where the track is now; reaching B goes back to A. */
+@Composable
+private fun LoopControls(s: PlayerSnapshotRecord, music: MusicState) {
+    val accent = LocalAccent.current
+    val can = s.durationSecs != null && s.status in setOf(PlayerStatus.PLAYING, PlayerStatus.PAUSED, PlayerStatus.ENDED)
+    val (a, b) = s.loopASecs to s.loopBSecs
+    // The core refuses a B less than half a second after A.
+    val bOk = s.positionSecs >= (a ?: 0.0) + 0.5
+    val label = { name: String, t: Double? -> if (t == null) "Set $name" else "$name ${fmtDuration(t)}" }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("Loop", style = MaterialTheme.typography.labelLarge, color = RedlineColors.Muted)
+        Spacer(Modifier.width(4.dp))
+        TextButton(onClick = { music.setLoopA() }, enabled = can) {
+            Text(label("A", a), color = if (a != null) accent.hover else if (can) RedlineColors.Text else RedlineColors.Subtle)
+        }
+        TextButton(onClick = { music.setLoopB() }, enabled = can && bOk) {
+            Text(label("B", b), color = if (b != null) accent.hover else if (can && bOk) RedlineColors.Text else RedlineColors.Subtle)
+        }
+        Spacer(Modifier.weight(1f))
+        if (a != null || b != null) {
+            TextButton(onClick = { music.clearLoop() }) { Text("Clear", color = RedlineColors.Muted) }
+        }
     }
 }
 

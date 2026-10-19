@@ -188,6 +188,9 @@ class MusicState(private val app: Application, val music: Music) {
     fun prev() = act { it.prev() }
     fun stop() = act { it.stop() }
     fun seek(secs: Double) = act { it.seek(secs) }
+    fun setLoopA() = act { it.setLoopA() }
+    fun setLoopB() = act { it.setLoopB() }
+    fun clearLoop() = act { it.clearLoop() }
     fun jump(index: UInt) = act { it.jump(index) }
     fun removeFromQueue(index: UInt) = act { it.removeFromQueue(index) }
     fun setShuffle(on: Boolean) = act { it.setShuffle(on) }

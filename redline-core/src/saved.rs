@@ -419,6 +419,189 @@ impl Saved {
         }
         removed
     }
+
+    /// The whole of Saved as an export file ([`SavedExport`]), for moving it to another
+    /// install or keeping a copy.
+    pub fn export_json(&self) -> String {
+        let export = SavedExport {
+            format: EXPORT_FORMAT.to_owned(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now().timestamp(),
+            collections: self
+                .collections
+                .iter()
+                .map(|c| ExportCollection {
+                    name: c.name.clone(),
+                    source_url: c.source_url.clone(),
+                    keep_offline: c.keep_offline,
+                    synced_at: c.synced_at,
+                    extractor_platform: c.extractor_platform,
+                    tracks: c.tracks.clone(),
+                })
+                .collect(),
+            songs: self.songs.clone(),
+        };
+        serde_json::to_string_pretty(&export).expect("Saved serializes")
+    }
+
+    /// Takes in an export. A collection already saved from the same link keeps its name and
+    /// settings and gains only the songs it doesn't have; single songs already saved are
+    /// skipped. Importing the same file twice changes nothing.
+    pub fn merge(&mut self, export: SavedExport) -> MergeReport {
+        let mut report = MergeReport::default();
+        for c in export.collections {
+            if let Some(id) = self.find_collection(&c.source_url).map(|c| c.id) {
+                let existing = self.collections.iter_mut().find(|e| e.id == id).expect("just found");
+                let mut have: HashSet<String> = existing.tracks.iter().map(|t| t.track.key()).collect();
+                let new: Vec<SavedTrack> = c.tracks.into_iter().filter(|t| have.insert(t.track.key())).collect();
+                if !new.is_empty() {
+                    report.collections_merged += 1;
+                    report.tracks_added += new.len();
+                    existing.tracks.extend(new);
+                }
+                continue;
+            }
+            let id = self.collections.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+            let mut keys = HashSet::new();
+            let tracks: Vec<SavedTrack> = c.tracks.into_iter().filter(|t| keys.insert(t.track.key())).collect();
+            report.collections_added += 1;
+            report.tracks_added += tracks.len();
+            if c.keep_offline {
+                report.new_offline.push(id);
+            }
+            self.collections.push(Collection {
+                id,
+                name: c.name,
+                source_url: c.source_url,
+                tracks,
+                synced_at: c.synced_at,
+                keep_offline: c.keep_offline,
+                sync_error: None,
+                extractor_platform: c.extractor_platform,
+            });
+        }
+        // Oldest first, so each lands on top in the file's order.
+        for song in export.songs.into_iter().rev() {
+            report.songs_added += self.add_song(song) as usize;
+        }
+        if report.collections_added + report.tracks_added > 0 {
+            self.touch();
+        }
+        report
+    }
+
+    /// The links not saved yet, as a song or as a collection, so an import of a list of
+    /// links only looks up what's new.
+    pub fn unsaved_links(&self, links: Vec<String>) -> Vec<String> {
+        links
+            .into_iter()
+            .filter(|u| !self.contains(&platform::canonical(u)) && self.find_collection(u).is_none())
+            .collect()
+    }
+}
+
+const EXPORT_FORMAT: &str = "redline-saved";
+const EXPORT_VERSION: u32 = 1;
+
+/// The export file: Saved's collections (their links, names, settings and songs) and single
+/// songs. Ids and sync errors are left out; they belong to one install.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedExport {
+    /// Always `redline-saved`; tells the file apart from other JSON.
+    pub format: String,
+    pub version: u32,
+    /// Unix seconds.
+    #[serde(default)]
+    pub exported_at: i64,
+    #[serde(default)]
+    pub collections: Vec<ExportCollection>,
+    #[serde(default)]
+    pub songs: Vec<Track>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExportCollection {
+    pub name: String,
+    pub source_url: String,
+    #[serde(default)]
+    pub keep_offline: bool,
+    #[serde(default)]
+    pub synced_at: Option<i64>,
+    #[serde(default)]
+    pub extractor_platform: Option<Platform>,
+    #[serde(default)]
+    pub tracks: Vec<SavedTrack>,
+}
+
+/// What an import file holds.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Import {
+    /// A Redline export, to [`Saved::merge`].
+    Saved(SavedExport),
+    /// A plain list of links, one per line, each to look up and save with [`Saved::save_link`].
+    Links(Vec<String>),
+}
+
+/// Reads an import file: a Redline export, or text with one link per line (blank lines and
+/// `#` comments are skipped, repeats dropped).
+pub fn parse_import(text: &str) -> Result<Import> {
+    let text = text.trim_start_matches('\u{feff}');
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+        && value.get("format").and_then(|f| f.as_str()) == Some(EXPORT_FORMAT)
+    {
+        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        if version > EXPORT_VERSION as u64 {
+            bail!("This file was made by a newer Redline (format version {version}). Update Redline to import it.");
+        }
+        return Ok(Import::Saved(serde_json::from_value(value)?));
+    }
+    let mut seen = HashSet::new();
+    let links: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("http://") || l.starts_with("https://"))
+        .filter(|l| seen.insert(platform::canonical(l)))
+        .map(str::to_owned)
+        .collect();
+    if links.is_empty() {
+        bail!("No Redline export or links in this file.");
+    }
+    Ok(Import::Links(links))
+}
+
+/// What [`Saved::merge`] did, for the toast.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MergeReport {
+    pub collections_added: usize,
+    /// Already saved, and given songs they didn't have.
+    pub collections_merged: usize,
+    /// Songs added to collections, new or merged.
+    pub tracks_added: usize,
+    /// Single songs added.
+    pub songs_added: usize,
+    /// New collections set to keep offline, whose downloads the app should queue.
+    pub new_offline: Vec<CollectionId>,
+}
+
+impl MergeReport {
+    pub fn message(&self) -> String {
+        let n = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
+        let mut parts = Vec::new();
+        if self.collections_added > 0 {
+            parts.push(n(self.collections_added, "collection"));
+        }
+        if self.songs_added > 0 {
+            parts.push(n(self.songs_added, "song"));
+        }
+        if self.collections_merged > 0 {
+            parts.push(format!("new songs in {}", n(self.collections_merged, "saved collection")));
+        }
+        if parts.is_empty() {
+            "Nothing new to import; it's all saved already".to_owned()
+        } else {
+            format!("Imported {}", parts.join(", "))
+        }
+    }
 }
 
 /// Lines up a collection with a fresh listing from its platform.
@@ -841,6 +1024,94 @@ mod tests {
             collections: vec![c.clone()],
             ..Default::default()
         }
+    }
+
+    fn export_of(s: &Saved) -> SavedExport {
+        match parse_import(&s.export_json()).unwrap() {
+            Import::Saved(e) => e,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_round_trips_into_an_empty_library() {
+        let mut s = Saved::default();
+        s.collections.push(collection(&[("a", false), ("b", true)]));
+        s.collections[0].keep_offline = true;
+        s.collections[0].sync_error = Some("rate limited".into());
+        s.add_song(Track::new(Source::Link("https://soundcloud.com/x/y".into()), "Y".into()));
+        s.add_song(Track::new(Source::Link("https://soundcloud.com/x/z".into()), "Z".into()));
+
+        let mut back = Saved::default();
+        let report = back.merge(export_of(&s));
+        assert_eq!(report.collections_added, 1);
+        assert_eq!(report.songs_added, 2);
+        assert_eq!(report.new_offline, [1]);
+        assert_eq!(report.message(), "Imported 1 collection, 2 songs");
+        let c = &back.collections[0];
+        assert_eq!((c.name.as_str(), c.keep_offline, c.sync_error.as_deref()), ("Mix", true, None));
+        assert_eq!(c.tracks, s.collections[0].tracks, "songs and removed flags come along");
+        assert_eq!(back.songs, s.songs, "in the same order");
+        assert!(back.dirty);
+    }
+
+    #[test]
+    fn import_merges_without_duplicates() {
+        let mut theirs = Saved::default();
+        theirs.collections.push(collection(&[("a", false), ("b", false), ("c", false)]));
+        let mut other = collection(&[("x", false)]);
+        other.id = 7;
+        other.source_url = "https://www.youtube.com/playlist?list=PL2".into();
+        theirs.collections.push(other);
+        theirs.add_song(Track::new(Source::Link("https://youtu.be/q".into()), "Q".into()));
+        theirs.add_song(Track::new(Source::Link("https://youtu.be/r".into()), "R".into()));
+
+        let mut mine = Saved::default();
+        let mut c = collection(&[("a", false)]);
+        c.name = "My name for it".into();
+        c.id = 3;
+        c.source_url = "https://youtube.com/playlist?list=PL1&si=abc".into();
+        mine.collections.push(c);
+        mine.add_song(Track::new(Source::Link("https://www.youtube.com/watch?v=q".into()), "Q".into()));
+
+        let report = mine.merge(export_of(&theirs));
+        assert_eq!(
+            (report.collections_added, report.collections_merged, report.tracks_added, report.songs_added),
+            (1, 1, 3, 1)
+        );
+        assert_eq!(mine.collections.len(), 2);
+        let merged = mine.get(3).unwrap();
+        assert_eq!(merged.name, "My name for it", "the local name stays");
+        assert_eq!(keys(&merged.tracks), ["A", "B", "C"]);
+        assert_eq!(mine.collections[1].id, 4, "a fresh id");
+        assert_eq!(mine.songs.len(), 2);
+
+        // The same file again: nothing new.
+        let again = mine.merge(export_of(&theirs));
+        assert_eq!(again, MergeReport::default());
+        assert_eq!(again.message(), "Nothing new to import; it's all saved already");
+    }
+
+    #[test]
+    fn imports_a_plain_list_of_links() {
+        let text = "\u{feff}# my links\nhttps://youtu.be/a\n\n  https://www.youtube.com/watch?v=a  \nnot a link\nhttps://soundcloud.com/x/y\r\nhttps://www.youtube.com/playlist?list=PL1\n";
+        let Import::Links(links) = parse_import(text).unwrap() else { panic!() };
+        assert_eq!(links, ["https://youtu.be/a", "https://soundcloud.com/x/y", "https://www.youtube.com/playlist?list=PL1"]);
+
+        let mut s = Saved::default();
+        s.collections.push(collection(&[]));
+        s.add_song(Track::new(Source::Link("https://soundcloud.com/x/y".into()), "Y".into()));
+        assert_eq!(s.unsaved_links(links), ["https://youtu.be/a"], "saved songs and collections are skipped");
+
+        assert!(parse_import("just words\n").is_err());
+        assert!(parse_import("{\"other\": 1}").is_err());
+    }
+
+    #[test]
+    fn refuses_exports_from_a_newer_version() {
+        let err = parse_import(r#"{"format":"redline-saved","version":2,"collections":[]}"#).unwrap_err();
+        assert!(err.to_string().contains("newer Redline"), "{err}");
+        assert!(matches!(parse_import(r#"{"format":"redline-saved","version":1}"#), Ok(Import::Saved(_))));
     }
 
     /// Save a small public YouTube playlist, then sync it twice: the second sync changes

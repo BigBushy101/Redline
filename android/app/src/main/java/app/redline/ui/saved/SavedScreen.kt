@@ -1,6 +1,8 @@
 package app.redline.ui.saved
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -164,6 +166,7 @@ private fun Overview(model: SavedModel, overview: SavedOverviewRecord?) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item { PageHeader("Saved", "Saved music", subtitle) }
         item { SaveBox(model) }
+        item { ExportImport(model) }
         if (platforms.isEmpty()) {
             item {
                 EmptyState(
@@ -246,6 +249,31 @@ private fun SaveBox(model: SavedModel) {
                     Spacer(Modifier.width(12.dp))
                     Text("Looking up $url…", color = RedlineColors.Muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
+            }
+        }
+    }
+}
+
+/** Export… writes Saved to a file; Import… reads a Redline export or a list of links. */
+@Composable
+private fun ExportImport(model: SavedModel) {
+    val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri?.let(model::exportTo)
+    }
+    val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(model::importFrom)
+    }
+    val importing = model.importing
+    Column(Modifier.padding(horizontal = PagePadding).padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            GhostButton("Export…", { export.launch("redline-saved.json") })
+            GhostButton("Import…", { import.launch(arrayOf("application/json", "text/plain", "application/octet-stream", "*/*")) }, enabled = importing == null)
+        }
+        if (importing != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(20.dp), color = LocalAccent.current.base, strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+                Text("Importing, $importing link${if (importing == 1) "" else "s"} to go…", color = RedlineColors.Muted)
             }
         }
     }
