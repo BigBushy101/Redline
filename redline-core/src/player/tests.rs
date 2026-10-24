@@ -539,3 +539,40 @@ fn next_link_that_failed_ahead_of_time_says_so_and_fails_at_once() {
     p.send(Command::Play);
     wait_for(&p, "asked again", |_| *media.resolves.lock().unwrap() == 2);
 }
+
+/// Files play as a long tone; links take a while to look up, like yt-dlp does, and count
+/// their look-ups.
+struct SlowLookup {
+    resolves: Mutex<u32>,
+}
+
+impl Media for SlowLookup {
+    fn resolve(&self, env: &Env, source: &Source) -> Result<Resolved> {
+        if matches!(source, Source::Link(_)) {
+            *self.resolves.lock().unwrap() += 1;
+            thread::sleep(Duration::from_millis(400));
+            return Tone::new(0.5).resolve(env, source);
+        }
+        Tone::new(5.0).resolve(env, source)
+    }
+
+    fn decode(&self, env: &Env, input: &Input, start: f64, rate: u32) -> Result<Pcm> {
+        Tone::new(5.0).decode(env, input, start, rate)
+    }
+}
+
+#[test]
+fn skipping_to_a_link_being_looked_up_ahead_waits_for_that_look_up() {
+    let capture = Capture::new(RATE, 1.0);
+    let media = Arc::new(SlowLookup { resolves: Mutex::default() });
+    let p = player(media.clone(), &capture);
+    let next = Source::Link("https://youtu.be/b".into());
+    p.send(Command::Load(track(), 0.0));
+    p.send(Command::SetNext(Some(next.clone())));
+    wait_for(&p, "look-up ahead started", |_| *media.resolves.lock().unwrap() == 1);
+    // Next pressed while yt-dlp is still busy with it.
+    p.send(Command::Load(next.clone(), 0.0));
+    let s = wait_for(&p, "playing b", |s| s.status == Status::Playing && s.source.as_ref() == Some(&next));
+    assert_eq!(s.track.unwrap().title, "Tone https://youtu.be/b");
+    assert_eq!(*media.resolves.lock().unwrap(), 1, "looked up once");
+}
