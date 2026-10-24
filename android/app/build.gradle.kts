@@ -1,4 +1,5 @@
 import org.gradle.process.ExecOperations
+import java.util.Properties
 import javax.inject.Inject
 
 plugins {
@@ -27,9 +28,28 @@ android {
         }
     }
 
+    // Release signing: the key lives outside the repo. Point REDLINE_SIGNING at its
+    // keystore.properties (storeFile, storePassword, keyAlias, keyPassword), or keep it at
+    // ~/.redline-signing/keystore.properties. Without it, the release APK is built unsigned.
+    val signingProps = (System.getenv("REDLINE_SIGNING")?.let(::File)
+        ?: File(System.getProperty("user.home"), ".redline-signing/keystore.properties"))
+        .takeIf { it.isFile }
+        ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+    signingConfigs {
+        if (signingProps != null) {
+            create("release") {
+                storeFile = File(signingProps.getProperty("storeFile"))
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
@@ -84,8 +104,19 @@ val copyDebugApk = tasks.register<Copy>("copyDebugApk") {
     into(rootProject.layout.projectDirectory.dir("apk"))
 }
 
+// Same for the signed release APK: android/apk/redline-<versionName>.apk.
+val copyReleaseApk = tasks.register<Copy>("copyReleaseApk") {
+    val apkName = "redline-${android.defaultConfig.versionName}.apk"
+    from(layout.buildDirectory.dir("outputs/apk/release")) {
+        include("*.apk")
+        rename { apkName }
+    }
+    into(rootProject.layout.projectDirectory.dir("apk"))
+}
+
 tasks.configureEach {
     if (name == "assembleDebug") finalizedBy(copyDebugApk)
+    if (name == "assembleRelease") finalizedBy(copyReleaseApk)
 }
 
 // ---- The Rust core (redline-mobile, through UniFFI) ----------------------------------------
