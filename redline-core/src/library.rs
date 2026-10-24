@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::download_plan::{LinkChoices, PlannedDownload};
 use crate::history::History;
+use crate::linkcheck;
 use crate::platform::{self, Platform};
 use crate::player::{Source, decode};
 use crate::settings;
@@ -27,6 +28,9 @@ pub struct Track {
     /// Unix seconds.
     #[serde(default)]
     pub added_at: i64,
+    /// The link this track pointed at before a replacement was swapped in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_from: Option<String>,
 }
 
 impl Track {
@@ -38,7 +42,20 @@ impl Track {
             duration: None,
             thumbnail: None,
             added_at: chrono::Utc::now().timestamp(),
+            replaced_from: None,
         }
+    }
+
+    /// Points a link track at another upload of the same song, keeping its title, artist and
+    /// when it was added. The first link it ever had stays in `replaced_from`.
+    pub fn swap_link(&mut self, c: &linkcheck::Candidate) {
+        let Source::Link(old) = &self.source else { return };
+        if self.replaced_from.is_none() {
+            self.replaced_from = Some(old.clone());
+        }
+        self.source = Source::Link(c.url.clone());
+        self.thumbnail = c.thumbnail.clone().or(self.thumbnail.take());
+        self.duration = c.duration.or(self.duration);
     }
 
     pub fn is_link(&self) -> bool {
@@ -187,6 +204,13 @@ impl Library {
         {
             p.tracks.remove(index);
         }
+    }
+
+    /// Swaps a replacement link into the track at `index`; false if there's no such track.
+    pub fn replace_link(&mut self, id: PlaylistId, index: usize, c: &linkcheck::Candidate) -> bool {
+        let Some(t) = self.get_mut(id).and_then(|p| p.tracks.get_mut(index)) else { return false };
+        t.swap_link(c);
+        true
     }
 
     /// Moves a track from `from` to `to` (both indices in the current order).
@@ -608,6 +632,50 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_link_keeps_the_rest() {
+        let mut lib = Library::default();
+        let id = lib.create("Mix");
+        let mut dead = link(2);
+        dead.artist = Some("Band".into());
+        dead.duration = Some(200.0);
+        dead.thumbnail = Some("old.jpg".into());
+        dead.added_at = 42;
+        lib.add(id, [link(1), dead, link(3)]);
+        lib.dirty = false;
+        let c = linkcheck::Candidate {
+            url: "https://x/new".into(),
+            title: "T2 (Official Video)".into(),
+            duration: Some(201.0),
+            ..Default::default()
+        };
+        assert!(lib.replace_link(id, 1, &c));
+        assert!(lib.dirty);
+        assert!(!lib.replace_link(id, 9, &c));
+        let t = &lib.get(id).unwrap().tracks[1];
+        assert_eq!(t.source, Source::Link("https://x/new".into()));
+        assert_eq!((t.title.as_str(), t.artist.as_deref(), t.added_at), ("T2", Some("Band"), 42));
+        assert_eq!((t.duration, t.thumbnail.as_deref()), (Some(201.0), Some("old.jpg")));
+        assert_eq!(t.replaced_from.as_deref(), Some("https://x/2"));
+
+        // Replacing again keeps the first link.
+        let again = linkcheck::Candidate { url: "https://x/newer".into(), ..Default::default() };
+        lib.replace_link(id, 1, &again);
+        let t = &lib.get(id).unwrap().tracks[1];
+        assert_eq!(t.source, Source::Link("https://x/newer".into()));
+        assert_eq!(t.replaced_from.as_deref(), Some("https://x/2"));
+        assert_eq!(t.duration, Some(201.0));
+
+        let mut file = Track::new(Source::Local("C:/m/a.flac".into()), "a".into());
+        file.swap_link(&c);
+        assert_eq!((&file.source, &file.replaced_from), (&Source::Local("C:/m/a.flac".into()), &None));
+
+        let json = serde_json::to_string(&lib.get(id).unwrap().tracks).unwrap();
+        assert_eq!(json.matches("replaced_from").count(), 1, "only on replaced tracks");
+        let old: Track = serde_json::from_str(r#"{"source":{"Link":"https://y"},"title":"y"}"#).unwrap();
+        assert_eq!(old.replaced_from, None);
+    }
+
+    #[test]
     fn tracks_know_their_platform_and_key() {
         let a = Track::new(Source::Link("https://youtu.be/abc?t=3".into()), "a".into());
         let b = Track::new(Source::Link("https://music.youtube.com/watch?v=abc".into()), "b".into());
@@ -629,7 +697,7 @@ mod tests {
                     title: "A".into(),
                     uploader: Some("Band".into()),
                     duration: Some(60.0),
-                    thumbnail: None,
+                    ..Default::default()
                 },
                 PlaylistItem {
                     url: "https://youtu.be/b".into(),

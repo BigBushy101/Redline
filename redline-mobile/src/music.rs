@@ -17,6 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use redline_core::Wake;
 use redline_core::history::History;
 use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
+use redline_core::linkcheck::{self, Candidate, FixItem, LinkStatus};
 use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source, dsp};
 use redline_core::saved::Saved;
 use redline_core::tools::ToolPaths;
@@ -93,13 +94,20 @@ impl Controller {
             player.send(Command::SetEq(want.eq));
         }
         self.player_sent = Some(want.clone());
+        let mut tools_changed = false;
         if self.player_network.as_ref() != Some(&st.settings.network) {
             self.player_network = Some(st.settings.network.clone());
             player.send(Command::SetNetwork(st.settings.network.clone()));
+            tools_changed = true;
         }
         if self.player_tools.as_ref() != Some(&st.tools) {
             self.player_tools = Some(st.tools.clone());
             player.send(Command::SetTools(st.tools.clone()));
+            tools_changed = true;
+        }
+        if tools_changed {
+            // The link checks run with the same tools and network settings.
+            linkcheck::shared().set_tools(st.tools.clone(), st.settings.network.clone());
         }
         changed
     }
@@ -135,8 +143,10 @@ impl Controller {
         self.queue_changed();
     }
 
-    /// Replaces Now playing with `tracks` and starts at `start`.
+    /// Replaces Now playing with `tracks` and starts at `start`. Dead links are left out (a
+    /// dead `start` moves on to the next live track), unless they're all dead.
     pub(crate) fn play_tracks(&mut self, p: &Player, h: &History, tracks: Vec<Track>, start: usize, playlist: Option<PlaylistId>) {
+        let (tracks, start) = linkcheck::shared().drop_dead(tracks, start);
         self.now.start(tracks, start, playlist);
         self.load_current(p, h);
     }
@@ -153,8 +163,10 @@ impl Controller {
         self.play_tracks(p, h, tracks, start, playlist);
     }
 
-    /// Adds tracks to the end of Now playing, starting it if nothing's queued.
+    /// Adds tracks to the end of Now playing, starting it if nothing's queued. Dead links are
+    /// left out, as when playing.
     fn queue_tracks(&mut self, p: &Player, h: &History, tracks: Vec<Track>) {
+        let tracks = linkcheck::shared().drop_dead(tracks, 0).0;
         if self.now.is_empty() {
             self.play_tracks(p, h, tracks, 0, None);
         } else {
@@ -164,7 +176,9 @@ impl Controller {
     }
 
     /// Puts tracks right after the current one, starting Now playing if nothing's queued.
+    /// Dead links are left out, as when playing.
     fn play_next(&mut self, p: &Player, h: &History, tracks: Vec<Track>) {
+        let tracks = linkcheck::shared().drop_dead(tracks, 0).0;
         if self.now.is_empty() {
             self.play_tracks(p, h, tracks, 0, None);
         } else {
@@ -273,6 +287,14 @@ impl Music {
             signal,
             listener: Mutex::new(listener),
         });
+        // Link check results nudge Kotlin, which reads the statuses again. Weak: the checks
+        // outlive this player.
+        let poke = Arc::downgrade(&inner.signal);
+        linkcheck::shared().set_wake(Arc::new(move || {
+            if let Some(s) = poke.upgrade() {
+                s.poke();
+            }
+        }));
         let runner = inner.clone();
         let thread = thread::Builder::new()
             .name("redline-music".into())
@@ -312,6 +334,66 @@ impl Music {
 
     fn history_entry<R>(&self, index: u32, f: impl FnOnce(&redline_core::history::HistoryEntry) -> R) -> Option<R> {
         self.inner.engine.state().history.entries.get(index as usize).map(f)
+    }
+
+    /// yt-dlp and the network settings, for a replacement search.
+    fn search_tools(&self) -> Result<(ToolPaths, NetworkOptions), RedlineError> {
+        let st = self.inner.engine.state();
+        if st.tools.ytdlp.is_none() {
+            return Err(RedlineError::ToolsMissing("Finding replacements needs yt-dlp.".into()));
+        }
+        Ok((st.tools.clone(), st.settings.network.clone()))
+    }
+
+    /// The dead links among `tracks` (with their positions), searched for replacements one
+    /// after another. Blocks for a few seconds per track; takes no lock while it does.
+    pub(crate) fn find_fixes(&self, tracks: &[Track]) -> Result<Vec<FixItem>, RedlineError> {
+        let statuses = linkcheck::shared().statuses(tracks);
+        let dead: Vec<(usize, Track)> = tracks
+            .iter()
+            .zip(statuses)
+            .enumerate()
+            .filter(|(_, (_, s))| s.is_dead())
+            .map(|(i, (t, _))| (i, t.clone()))
+            .collect();
+        if dead.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (tools, net) = self.search_tools()?;
+        Ok(linkcheck::fix_unavailable(&tools, &net, dead))
+    }
+
+    /// Swaps in each item's clear match with `apply` (given the position, the track as it was
+    /// found and the pick; false if it's no longer there), and lists the rest for review.
+    pub(crate) fn fix_report(
+        &self,
+        items: Vec<FixItem>,
+        mut apply: impl FnMut(usize, &Track, &Candidate) -> bool,
+    ) -> FixReportRecord {
+        let mut fixed = 0;
+        let mut review = Vec::new();
+        for item in items {
+            if let Some(c) = item.clear_match()
+                && apply(item.index, &item.track, c)
+            {
+                linkcheck::shared().record(&c.url, LinkStatus::Alive);
+                fixed += 1;
+                continue;
+            }
+            review.push((item.index, item.track, item.ranked));
+        }
+        let st = self.inner.engine.state();
+        FixReportRecord {
+            fixed,
+            review: review
+                .into_iter()
+                .map(|(index, track, ranked)| ReviewRecord {
+                    index: index as u32,
+                    track: track_record(&track, &st.history),
+                    candidates: ranked.iter().map(replacement_record).collect(),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -558,6 +640,52 @@ impl Music {
         self.inner.library(|l| l.move_track(id, from as usize, to as usize));
     }
 
+    /// Swaps a replacement into the playlist's track at `index`, keeping its title, artist
+    /// and place. Returns whether there was such a track.
+    pub fn replace_playlist_track(&self, id: u64, index: u32, candidate: ReplacementRecord) -> bool {
+        let c = candidate.to_core();
+        let done = self.inner.library(|l| l.replace_link(id, index as usize, &c));
+        if done {
+            linkcheck::shared().record(&c.url, LinkStatus::Alive);
+        }
+        done
+    }
+
+    /// "Fix unavailable": searches for each dead link in the playlist, swaps in the clear
+    /// matches and returns the rest to review. Blocks for a few seconds per dead track.
+    pub fn fix_unavailable_playlist(&self, id: u64) -> Result<FixReportRecord, RedlineError> {
+        let tracks = self.inner.ctl().library.get(id).map(|p| p.tracks.clone()).unwrap_or_default();
+        let items = self.find_fixes(&tracks)?;
+        Ok(self.fix_report(items, |index, was, c| {
+            self.inner.library(|l| {
+                // Only if the playlist wasn't changed under the search.
+                let same = l.get(id).and_then(|p| p.tracks.get(index)).is_some_and(|t| t.source == was.source);
+                same && l.replace_link(id, index, c)
+            })
+        }))
+    }
+
+    // ---- Dead links ----
+
+    /// Checks, in the background, the links among `tracks` with no recent result (an open
+    /// playlist's or collection's). Results nudge as they come in; see `link_check_version`.
+    pub fn check_links(&self, tracks: Vec<TrackRecord>) {
+        let tracks: Vec<Track> = tracks.iter().map(TrackRecord::to_core).collect();
+        linkcheck::shared().request(&tracks);
+    }
+
+    /// Changes whenever a link check finds something; read the open page again then.
+    pub fn link_check_version(&self) -> u64 {
+        linkcheck::shared().version()
+    }
+
+    /// Other uploads of a track's song on YouTube, best first. Blocks while yt-dlp searches.
+    pub fn find_replacements(&self, track: TrackRecord) -> Result<Vec<ReplacementRecord>, RedlineError> {
+        let (tools, net) = self.search_tools()?;
+        let ranked = linkcheck::search(&tools, &net, &track.to_core()).map_err(RedlineError::failed)?;
+        Ok(ranked.iter().map(replacement_record).collect())
+    }
+
     // ---- Copied files ----
 
     /// Deletes the files right in `dir` (the app's own folder that picked files are copied
@@ -707,6 +835,8 @@ pub(crate) mod tests {
             added_at: 0,
             platform: None,
             offline: false,
+            link_status: LinkStatusRecord::Unknown,
+            replaced_from: None,
         }
     }
 
@@ -847,6 +977,55 @@ pub(crate) mod tests {
         music.next();
         until(&music, "the track played next", |s| s.title.as_deref() == Some("Tone c"));
         music.stop();
+        drop(music);
+        drop(engine);
+    }
+
+    #[test]
+    fn replacing_dead_links() {
+        let _turn = one_engine_at_a_time();
+        let (engine, music, _) = music(8.0);
+        let checks = linkcheck::shared();
+        let dead = link(901);
+        checks.record(&dead.location, LinkStatus::Dead);
+        let id = music.create_playlist("Fixes".into());
+        music.add_tracks(id, vec![link(900), dead.clone(), link(902)]);
+        assert_eq!(music.playlist(id).unwrap().tracks[1].link_status, LinkStatusRecord::Dead);
+
+        // Playing from the dead one starts on the next live one, and leaves it out.
+        music.play_playlist(id, 1, false);
+        let s = music.snapshot();
+        assert_eq!((s.queue_index, s.queue_length), (Some(1), 2));
+        assert_eq!(music.queue().iter().map(|q| q.track.title.as_str()).collect::<Vec<_>>(), ["Song 900", "Song 902"]);
+        music.stop();
+
+        // Nothing to fix without yt-dlp, and nothing dead in a playlist without dead links.
+        assert!(matches!(music.fix_unavailable_playlist(id), Err(RedlineError::ToolsMissing(_))));
+        assert!(matches!(music.find_replacements(dead.clone()), Err(RedlineError::ToolsMissing(_))));
+        let clean = music.create_playlist("Clean".into());
+        music.add_tracks(clean, vec![link(900)]);
+        assert_eq!(music.fix_unavailable_playlist(clean).unwrap(), FixReportRecord { fixed: 0, review: vec![] });
+
+        let pick = ReplacementRecord {
+            url: "https://www.youtube.com/watch?v=new901".into(),
+            title: "Song 901 (Official Video)".into(),
+            uploader: Some("Band".into()),
+            duration_secs: Some(61.0),
+            thumbnail: None,
+            delta_secs: Some(1.0),
+            clear_match: true,
+        };
+        assert!(music.replace_playlist_track(id, 1, pick.clone()));
+        assert!(!music.replace_playlist_track(id, 7, pick.clone()));
+        let t = &music.playlist(id).unwrap().tracks[1];
+        assert_eq!((t.title.as_str(), t.location.as_str()), ("Song 901", pick.url.as_str()), "title and place kept");
+        assert_eq!(t.replaced_from.as_deref(), Some(dead.location.as_str()));
+        assert_eq!((t.duration_secs, t.thumbnail.as_deref()), (Some(61.0), Some("https://img/901.jpg")));
+        assert_eq!(t.link_status, LinkStatusRecord::Alive, "the new link is known to play");
+        assert_eq!(t.clone().to_core().replaced_from, t.replaced_from, "round trip");
+
+        music.delete_playlist(id);
+        music.delete_playlist(clean);
         drop(music);
         drop(engine);
     }

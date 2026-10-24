@@ -10,6 +10,7 @@ use redline_core::format::starts_at;
 use redline_core::history::{History, HistoryEntry};
 use redline_core::jobs::{Job, JobSpec, JobStatus};
 use redline_core::library::{self, NowPlaying, Playlist, Repeat, Track};
+use redline_core::linkcheck::{self, Candidate, LinkStatus, Ranked};
 use redline_core::player::dsp::{self, EqSettings};
 use redline_core::player::{PlayerSettings, PlayerState, Source, Status};
 use redline_core::queue_watch;
@@ -702,6 +703,8 @@ pub struct SettingsRecord {
     pub convert: ConvertSettingsRecord,
     /// Refresh saved collections not refreshed in the last 12 hours when Redline starts.
     pub refresh_saved_on_start: bool,
+    /// Swap clear matches in for songs whose links died, when their list is opened.
+    pub auto_replace_dead: bool,
 }
 
 pub const MAX_CONCURRENCY: u32 = 6;
@@ -721,6 +724,7 @@ pub fn settings_record(s: &Settings) -> SettingsRecord {
         },
         convert: convert_settings_record(s),
         refresh_saved_on_start: s.refresh_saved_on_start,
+        auto_replace_dead: s.auto_replace_dead,
     }
 }
 
@@ -733,6 +737,7 @@ pub fn apply_settings(r: &SettingsRecord, s: &mut Settings) {
     s.skip_downloaded = r.skip_downloaded;
     s.notify = r.notify;
     s.refresh_saved_on_start = r.refresh_saved_on_start;
+    s.auto_replace_dead = r.auto_replace_dead;
     s.download = (&r.download).into();
     s.network = NetworkOptions {
         cookies_file: r.network.cookies_file.as_deref().filter(|f| !f.trim().is_empty()).map(PathBuf::from),
@@ -772,12 +777,46 @@ pub struct TrackRecord {
     pub platform: Option<crate::saved::Platform>,
     /// A link History has a downloaded copy of, which is what plays.
     pub offline: bool,
+    /// Whether the link still plays, as last checked; always `Unknown` for files.
+    pub link_status: LinkStatusRecord,
+    /// The link it pointed at before a replacement was swapped in.
+    pub replaced_from: Option<String>,
+}
+
+/// What the last check of a link found ([`linkcheck::LinkStatus`]).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkStatusRecord {
+    /// Not checked yet, or the check couldn't tell.
+    Unknown,
+    Alive,
+    /// There, but private or blocked from playing here.
+    Restricted,
+    /// Deleted: skipped when played, and offered a replacement.
+    Dead,
+}
+
+impl From<LinkStatus> for LinkStatusRecord {
+    fn from(s: LinkStatus) -> Self {
+        match s {
+            LinkStatus::Unknown => Self::Unknown,
+            LinkStatus::Alive => Self::Alive,
+            LinkStatus::Restricted => Self::Restricted,
+            LinkStatus::Dead => Self::Dead,
+        }
+    }
+}
+
+fn link_status(url: &str) -> LinkStatusRecord {
+    // The checks' cache file is placed on first use: in tests, in the test folders.
+    #[cfg(test)]
+    crate::engine::tests::test_dirs();
+    linkcheck::shared().status(url).into()
 }
 
 pub fn track_record(t: &Track, history: &History) -> TrackRecord {
-    let (kind, location) = match &t.source {
-        Source::Link(url) => (TrackKind::Link, url.clone()),
-        Source::Local(p) => (TrackKind::File, path_string(p)),
+    let (kind, location, link_status) = match &t.source {
+        Source::Link(url) => (TrackKind::Link, url.clone(), link_status(url)),
+        Source::Local(p) => (TrackKind::File, path_string(p), LinkStatusRecord::Unknown),
     };
     TrackRecord {
         kind,
@@ -789,6 +828,8 @@ pub fn track_record(t: &Track, history: &History) -> TrackRecord {
         added_at: t.added_at,
         platform: t.platform().map(Into::into),
         offline: t.is_link() && matches!(library::playable_source(t, history), Source::Local(_)),
+        link_status,
+        replaced_from: t.replaced_from.clone(),
     }
 }
 
@@ -804,8 +845,68 @@ impl TrackRecord {
             duration: self.duration_secs,
             thumbnail: self.thumbnail.clone(),
             added_at: self.added_at,
+            replaced_from: self.replaced_from.clone(),
         }
     }
+}
+
+/// Another upload a dead track could point at, from `find_replacements` (best first).
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ReplacementRecord {
+    pub url: String,
+    pub title: String,
+    /// The channel.
+    pub uploader: Option<String>,
+    pub duration_secs: Option<f64>,
+    pub thumbnail: Option<String>,
+    /// Its length minus the track's, when both are known.
+    pub delta_secs: Option<f64>,
+    /// A similar title and within 3 seconds: safe to swap in without asking.
+    pub clear_match: bool,
+}
+
+pub fn replacement_record(r: &Ranked) -> ReplacementRecord {
+    let c = &r.candidate;
+    ReplacementRecord {
+        url: c.url.clone(),
+        title: c.title.clone(),
+        uploader: c.uploader.clone(),
+        duration_secs: c.duration,
+        thumbnail: c.thumbnail.clone(),
+        delta_secs: r.delta_secs,
+        clear_match: r.is_clear_match(),
+    }
+}
+
+impl ReplacementRecord {
+    pub fn to_core(&self) -> Candidate {
+        Candidate {
+            url: self.url.trim().to_owned(),
+            title: self.title.clone(),
+            uploader: self.uploader.clone(),
+            duration: self.duration_secs,
+            thumbnail: self.thumbnail.clone(),
+        }
+    }
+}
+
+/// A dead track "Fix unavailable" found no clear match for, with what it did find.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ReviewRecord {
+    /// Where the track is in its playlist or collection.
+    pub index: u32,
+    pub track: TrackRecord,
+    /// Best first; empty when the search found nothing (or failed).
+    pub candidates: Vec<ReplacementRecord>,
+}
+
+/// What "Fix unavailable" did.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FixReportRecord {
+    /// Dead tracks swapped for a clear match.
+    pub fixed: u32,
+    /// The rest, for the user to pick from or skip.
+    pub review: Vec<ReviewRecord>,
 }
 
 /// The track a History row stands for, as the desktop adds it to playlists: a download's link

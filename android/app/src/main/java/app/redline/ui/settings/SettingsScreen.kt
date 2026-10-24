@@ -123,6 +123,12 @@ fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsSt
                     { v -> update { it.copy(refreshSavedOnStart = v) } },
                     hint = "Ones not refreshed in the last 12 hours, one at a time in the background",
                 )
+                ToggleRow(
+                    "Replace unavailable songs automatically",
+                    settings.autoReplaceDead,
+                    { v -> update { it.copy(autoReplaceDead = v) } },
+                    hint = "When a playlist or collection opens, songs whose video is gone get a close match from YouTube",
+                )
             }
 
             DefaultsCard(settings, lists, update)

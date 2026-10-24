@@ -4,6 +4,7 @@
 use eframe::egui::{self, Align, CornerRadius, Frame, Layout, Margin, RichText, Sense, TextEdit, Ui, UiBuilder, vec2};
 use egui_phosphor::regular as icons;
 use redline_core::library::Track;
+use redline_core::linkcheck::LinkStatus;
 use redline_core::platform::Platform;
 use redline_core::player::Source;
 
@@ -21,11 +22,15 @@ pub enum RowAction {
     Convert(usize),
     /// The platform glyph in the source column was clicked.
     OpenPlatform(Platform),
+    /// Look for another upload of a dead or restricted link.
+    FindReplacement(usize),
 }
 
 /// Width of the per-row buttons, so the columns line up whatever buttons a row has.
 const ACTIONS_W: f32 = 196.0;
 const SOURCE_W: f32 = 110.0;
+/// The warning glyph on links that are there but won't play for everyone.
+const AMBER: egui::Color32 = egui::Color32::from_rgb(0xD9, 0xA4, 0x41);
 
 pub fn search_box(ui: &mut Ui, text: &mut String, hint: &str) {
     Frame::new()
@@ -69,6 +74,13 @@ pub fn convert_button(ui: &mut Ui, idx: usize, has_file: bool) -> Option<RowActi
     (has_file && theme::icon_button(ui, icons::ARROWS_LEFT_RIGHT, "Convert").clicked()).then_some(RowAction::Convert(idx))
 }
 
+/// The Find replacement button for a link that's dead or restricted; `None` (no button)
+/// otherwise. It takes the place of Download for offline, which can't work for those.
+pub fn replace_button(ui: &mut Ui, idx: usize, link: LinkStatus) -> Option<RowAction> {
+    (link.label().is_some() && theme::icon_button(ui, icons::SWAP, "Find replacement").clicked())
+        .then_some(RowAction::FindReplacement(idx))
+}
+
 /// How a row is drawn, apart from the track itself.
 #[derive(Default)]
 pub struct RowState<'a> {
@@ -79,6 +91,8 @@ pub struct RowState<'a> {
     pub tag: Option<&'a str>,
     /// Show the link's platform glyph, which opens its Saved page.
     pub platform_link: bool,
+    /// What the last link check found.
+    pub link: LinkStatus,
 }
 
 /// A playlist-style row. Double-click asks to play it; `actions` draws the buttons on the
@@ -95,6 +109,7 @@ pub fn track_row(
         offline,
         tag,
         platform_link,
+        link,
     } = state;
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 56.0), Sense::click());
@@ -162,12 +177,28 @@ pub fn track_row(
                 ui.add_space(2.0);
                 let title = if playing {
                     RichText::new(&t.title).family(theme::bold()).color(theme::accent().hover)
-                } else if tag.is_some() {
+                } else if tag.is_some() || link.is_dead() {
                     RichText::new(&t.title).family(theme::bold()).color(theme::MUTED)
                 } else {
                     theme::strong(&t.title)
                 };
-                ui.add(egui::Label::new(title).truncate());
+                match link.label() {
+                    None => {
+                        ui.add(egui::Label::new(title).truncate());
+                    }
+                    Some(why) => {
+                        let (glyph, color) = if link.is_dead() {
+                            (icons::LINK_BREAK, theme::MUTED)
+                        } else {
+                            (icons::WARNING, AMBER)
+                        };
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+                            ui.label(RichText::new(glyph).size(13.0).color(color)).on_hover_text(why);
+                            ui.add(egui::Label::new(title).truncate()).on_hover_text(why);
+                        });
+                    }
+                }
                 let artist = RichText::new(t.artist.clone().unwrap_or_default()).small().color(theme::MUTED);
                 match tag {
                     None => {

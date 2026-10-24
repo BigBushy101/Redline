@@ -12,10 +12,13 @@ import app.redline.RedlineApp
 import app.redline.core.CollectionRecord
 import app.redline.core.Platform
 import app.redline.core.RedlineException
+import app.redline.core.ReplacementRecord
+import app.redline.core.ReviewRecord
 import app.redline.core.SavedPlatformPageRecord
 import app.redline.core.SavedTrackRecord
 import app.redline.core.TrackRecord
 import app.redline.state.MusicState
+import app.redline.ui.components.dead
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -66,6 +69,17 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
     /** Links of an imported list still to look up and save, while an import runs. */
     var importing by mutableStateOf<Int?>(null)
         private set
+
+    /** The song "Find replacement…" is open for. */
+    var replacing by mutableStateOf<TrackRecord?>(null)
+    /** The collection "Fix unavailable" is searching for. */
+    var fixing by mutableStateOf<ULong?>(null)
+        private set
+    /** What it found no clear match for, to review: the collection and its songs. */
+    var review by mutableStateOf<Pair<ULong, List<ReviewRecord>>?>(null)
+        private set
+    /** The collection whose links were last sent to be checked, and how long it was then. */
+    private var checked: Pair<ULong, Int>? = null
 
     private val _messages = Channel<SavedMessage>(Channel.BUFFERED)
     val messages = _messages.receiveAsFlow()
@@ -149,7 +163,12 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
             page = pageRead
             if (id != null && collectionId == id) {
                 // Removed elsewhere: back to the platform.
-                if (collectionRead == null) closeCollection() else collection = collectionRead
+                if (collectionRead == null) {
+                    closeCollection()
+                } else {
+                    collection = collectionRead
+                    linksOpened(id, collectionRead)
+                }
             }
             if (wantAll && allSongs) all = allRead
         }
@@ -341,6 +360,66 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
             val name = music.playlists.value.firstOrNull { it.id == target }?.name ?: "the playlist"
             _messages.send(SavedMessage.Info("Copied to $name"))
         }
+    }
+
+    // ---- Dead links ---------------------------------------------------------------------
+
+    /** Opened, or songs came in: check the links nobody checked lately, and auto-fix. */
+    private fun linksOpened(id: ULong, c: CollectionRecord) {
+        val music = music ?: return
+        val tracks = c.tracks.map { it.track }
+        if (checked != id to tracks.size) {
+            checked = id to tracks.size
+            music.act { it.checkLinks(tracks) }
+        }
+        // With the auto-replace setting on, a collection with dead songs is fixed once a session.
+        if (state.settings.value?.autoReplaceDead == true && fixing == null && tracks.any { it.dead } &&
+            music.autoFixed.add("collection:$id")
+        ) {
+            fixUnavailable(id, quiet = true)
+        }
+    }
+
+    /** Other uploads of a track's song, for "Find replacement…" (blocks on the IO dispatcher). */
+    suspend fun findReplacements(track: TrackRecord): List<ReplacementRecord> =
+        music?.onMusicSlow { it.findReplacements(track) }.orEmpty()
+
+    /** Swaps [pick] in for every saved copy of [track], keeping its title and place. */
+    fun replace(track: TrackRecord, pick: ReplacementRecord) {
+        val music = music ?: return
+        viewModelScope.launch {
+            val done = music.onMusic { it.replaceSavedTrack(track.location, pick) }
+            music.act { } // Saved changed
+            _messages.send(if (done) SavedMessage.Info("Replaced with “${pick.title}”") else SavedMessage.Error("That song isn't saved any more."))
+        }
+    }
+
+    /**
+     * "Fix unavailable": searches for each dead song, swaps in the clear matches and opens the
+     * review for the rest. [quiet] (the auto-replace setting) only swaps, saying nothing.
+     */
+    fun fixUnavailable(id: ULong, quiet: Boolean = false) {
+        val music = music ?: return
+        if (fixing != null) return
+        fixing = id
+        viewModelScope.launch {
+            try {
+                val report = music.onMusicSlow { it.fixUnavailableCollection(id) }
+                music.act { }
+                if (quiet) return@launch
+                val n = report.fixed.toInt()
+                _messages.send(SavedMessage.Info(if (n == 0 && report.review.isNotEmpty()) "No clear matches; pick from what was found" else "Fixed $n"))
+                if (report.review.isNotEmpty()) review = id to report.review
+            } catch (e: RedlineException) {
+                if (!quiet) _messages.send(SavedMessage.Error(e.message ?: "Couldn't look for replacements."))
+            } finally {
+                fixing = null
+            }
+        }
+    }
+
+    fun closeReview() {
+        review = null
     }
 
     // ---- Playing and songs --------------------------------------------------------------

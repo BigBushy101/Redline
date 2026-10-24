@@ -5,6 +5,7 @@ use egui_phosphor::regular as icons;
 
 use redline_core::Wake;
 use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
+use redline_core::linkcheck;
 use redline_core::platform::Platform;
 use redline_core::saved::Saved;
 use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source};
@@ -55,6 +56,8 @@ pub struct App {
     pub saved: Saved,
     pub saved_page: ui::saved::SavedPage,
     pub local_page: ui::local::LocalPage,
+    /// Find replacement and Fix unavailable, for Playlists and Saved.
+    pub replace: ui::replace::ReplaceDialog,
     /// A short message at the bottom of the window, and when it was shown.
     toast: Option<(String, std::time::Instant)>,
     /// What the player bar works through: a playlist or ad-hoc picks.
@@ -98,6 +101,8 @@ impl App {
         let mut jobs = JobManager::load();
         jobs.set_wake(wake.clone());
         let player = Player::system(tools.clone(), wake.clone());
+        linkcheck::shared().set_wake(wake.clone());
+        linkcheck::shared().set_tools(tools.clone(), settings.network.clone());
         #[cfg(windows)]
         let media_keys = Self::media_keys(cc, &player, &wake);
         Self {
@@ -119,6 +124,7 @@ impl App {
             saved: Saved::load(),
             saved_page: Default::default(),
             local_page: Default::default(),
+            replace: Default::default(),
             toast: None,
             now: NowPlaying::default(),
             seen_advances: 0,
@@ -242,7 +248,9 @@ impl App {
     }
 
     /// Replaces Now playing with `tracks` and starts at `start`.
+    /// Links known to be dead are left out.
     pub fn play_tracks(&mut self, tracks: Vec<Track>, start: usize, playlist: Option<PlaylistId>) {
+        let (tracks, start) = linkcheck::shared().drop_dead(tracks, start);
         self.now.start(tracks, start, playlist);
         self.load_current();
     }
@@ -264,6 +272,8 @@ impl App {
     }
 
     fn play_from(&mut self, tracks: Vec<Track>, start: usize, shuffle: bool, playlist: Option<PlaylistId>) {
+        // Before shuffling, so the random first track isn't a dead one.
+        let (tracks, start) = linkcheck::shared().drop_dead(tracks, start);
         let start = if shuffle && !tracks.is_empty() {
             // Shuffle from a random first track, not always the top one.
             self.now.shuffle = true;
@@ -277,8 +287,10 @@ impl App {
         self.play_tracks(tracks, start, playlist);
     }
 
-    /// Adds tracks to the end of Now playing, starting it if nothing's queued.
+    /// Adds tracks to the end of Now playing, starting it if nothing's queued. Links known
+    /// to be dead are left out.
     pub fn queue_tracks(&mut self, tracks: Vec<Track>) {
+        let (tracks, _) = linkcheck::shared().drop_dead(tracks, 0);
         if self.now.is_empty() {
             self.play_tracks(tracks, 0, None);
         } else {
@@ -470,6 +482,7 @@ impl eframe::App for App {
         if self.installer.take_finished() {
             self.tools = ToolPaths::locate(&self.settings);
             self.player.send(Command::SetTools(self.tools.clone()));
+            linkcheck::shared().set_tools(self.tools.clone(), self.settings.network.clone());
             self.settings_page.invalidate_version();
             self.encoders_task = Self::detect_encoders(&self.wake, &self.tools);
         }
@@ -481,9 +494,11 @@ impl eframe::App for App {
         self.playlists_page.poll(&mut self.library);
         ui::saved::poll(self);
         ui::local::poll(self);
+        ui::replace::poll(self);
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());
             self.player.send(Command::SetNetwork(self.settings.network.clone()));
+            linkcheck::shared().set_tools(self.tools.clone(), self.settings.network.clone());
         }
         if let Some(e) = self.encoders_task.as_ref().and_then(Task::take) {
             self.encoders = e;
@@ -521,6 +536,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.handle_dropped_files(&ctx);
         self.shutdown_window(&ctx);
+        ui::replace::show(&ctx, self);
         ui::player_panels::show(&ctx, self);
 
         Panel::bottom("now-bar")

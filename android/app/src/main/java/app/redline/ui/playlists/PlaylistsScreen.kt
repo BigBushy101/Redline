@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
@@ -34,6 +33,7 @@ import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FindReplace
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Link
@@ -86,8 +86,13 @@ import app.redline.ui.components.MenuItem
 import app.redline.ui.components.PageHeader
 import app.redline.ui.components.PagePadding
 import app.redline.ui.components.PillButton
+import app.redline.ui.components.ReplacementDialog
+import app.redline.ui.components.ReviewDialog
 import app.redline.ui.components.SectionCard
 import app.redline.ui.components.TrackRow
+import app.redline.ui.components.UnavailableBar
+import app.redline.ui.components.dead
+import app.redline.ui.components.unavailable
 import app.redline.ui.theme.LocalAccent
 import app.redline.ui.theme.RedlineColors
 
@@ -108,9 +113,10 @@ fun PlaylistsScreen(
     val version by music.playlistsVersion.collectAsStateWithLifecycle()
     val id = model.openId
     val savedVersion by music.savedVersion.collectAsStateWithLifecycle()
-    // Re-read after edits, when History changes which links have a downloaded copy, and when
-    // Saved changes which are saved.
-    LaunchedEffect(id, version, history, savedVersion) { model.reload() }
+    val linkVersion by music.linkCheckVersion.collectAsStateWithLifecycle()
+    // Re-read after edits, when History changes which links have a downloaded copy, when
+    // Saved changes which are saved, and when link checks find dead ones.
+    LaunchedEffect(id, version, history, savedVersion, linkVersion) { model.reload() }
     if (id == null) {
         PlaylistList(model, playlists)
     } else {
@@ -194,6 +200,13 @@ private fun meta(count: Int, secs: Double) =
 private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: PlayerSnapshotRecord?, queue: List<QueueTrackRecord>) {
     var renaming by rememberSaveable { mutableStateOf(false) }
     var deleting by rememberSaveable { mutableStateOf(false) }
+    // Only the unavailable songs, while the chip is on and there are some.
+    var onlyUnavailable by rememberSaveable(p.id) { mutableStateOf(false) }
+    // The song "Find replacement…" is open for, and its place.
+    var replacing by remember(p.id) { mutableStateOf<Pair<Int, TrackRecord>?>(null) }
+    val unavailable = p.tracks.count { it.unavailable }
+    val filtering = onlyUnavailable && unavailable > 0
+    val rows = p.tracks.withIndex().filter { !filtering || it.value.unavailable }
     // The row playing: this playlist's queue, at this track's place.
     val current = queue.firstOrNull { it.isCurrent }?.track?.location?.takeIf { snapshot?.playlistId == p.id }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -207,6 +220,18 @@ private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: P
                 delete = { deleting = true },
             )
         }
+        if (unavailable > 0) {
+            item {
+                UnavailableBar(
+                    count = unavailable,
+                    filtered = filtering,
+                    onFilter = { onlyUnavailable = !filtering },
+                    canFix = p.tracks.any { it.dead },
+                    fixing = model.fixing == p.id,
+                    onFix = { model.fixUnavailable(p.id) },
+                )
+            }
+        }
         item { AddBar(model, p.id) }
         if (p.tracks.isEmpty()) {
             item {
@@ -218,7 +243,7 @@ private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: P
                 )
             }
         }
-        itemsIndexed(p.tracks, key = { i, t -> "$i:${t.location}" }) { i, t ->
+        items(rows, key = { (i, t) -> "$i:${t.location}" }) { (i, t) ->
             PlaylistTrackRow(
                 index = i,
                 track = t,
@@ -232,6 +257,7 @@ private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: P
                         TrackAction.Queue -> model.queue(t)
                         TrackAction.Offline -> model.downloadForOffline(t)
                         TrackAction.Save -> model.saveTrack(t)
+                        TrackAction.Replace -> replacing = i to t
                         TrackAction.Up -> model.move(p.id, i, i - 1)
                         TrackAction.Down -> model.move(p.id, i, i + 1)
                         TrackAction.Remove -> model.remove(p.id, i)
@@ -239,6 +265,17 @@ private fun PlaylistDetail(model: PlaylistsModel, p: PlaylistRecord, snapshot: P
                 },
             )
         }
+    }
+    replacing?.let { (i, t) ->
+        ReplacementDialog(
+            t,
+            search = { model.findReplacements(t) },
+            onPick = { pick -> model.replace(p.id, i, pick) },
+            onDismiss = { replacing = null },
+        )
+    }
+    model.review?.takeIf { it.first == p.id }?.let { (_, items) ->
+        ReviewDialog(items, onPick = { item, pick -> model.replace(p.id, item.index.toInt(), pick) }, onDismiss = model::closeReview)
     }
     if (renaming) {
         NameDialog("Rename playlist", p.name, "Rename", onConfirm = { model.rename(p.id, it) }, onDismiss = { renaming = false })
@@ -371,7 +408,7 @@ private fun AddBar(model: PlaylistsModel, id: ULong) {
     }
 }
 
-private enum class TrackAction { Play, Next, Queue, Offline, Save, Up, Down, Remove }
+private enum class TrackAction { Play, Next, Queue, Offline, Save, Replace, Up, Down, Remove }
 
 /** One track, with the playlist's menu (playlists.rs's row buttons). */
 @Composable
@@ -386,6 +423,7 @@ private fun PlaylistTrackRow(index: Int, track: TrackRecord, count: Int, playing
         MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) { pick(TrackAction.Queue) }
         if (track.canGoOffline) MenuItem("Download for offline", Icons.Rounded.Download) { pick(TrackAction.Offline) }
         if (track.kind == TrackKind.LINK && !saved) MenuItem("Save to Saved", Icons.Rounded.BookmarkBorder) { pick(TrackAction.Save) }
+        if (track.kind == TrackKind.LINK) MenuItem("Find replacement…", Icons.Rounded.FindReplace) { pick(TrackAction.Replace) }
         LibraryMenuItems(track, close, playlist = false)
         if (index > 0) MenuItem("Move up", Icons.Rounded.KeyboardArrowUp) { pick(TrackAction.Up) }
         if (index + 1 < count) MenuItem("Move down", Icons.Rounded.KeyboardArrowDown) { pick(TrackAction.Down) }

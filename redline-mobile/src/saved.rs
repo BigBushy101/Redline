@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use redline_core::history::History;
 use redline_core::library::{self, Track};
+use redline_core::linkcheck::{self, LinkStatus};
 use redline_core::platform::{self, Platform as CorePlatform};
 use redline_core::player::Source;
 use redline_core::saved::{self, Collection, CollectionId, Import, SaveOutcome, Saved, SavedTrack};
@@ -20,7 +21,7 @@ use redline_core::saved::{self, Collection, CollectionId, Import, SaveOutcome, S
 use crate::engine::State;
 use crate::error::RedlineError;
 use crate::music::{Inner, Music};
-use crate::records::{TrackRecord, track_record};
+use crate::records::{FixReportRecord, ReplacementRecord, TrackRecord, track_record};
 
 /// Collections not refreshed for this long are refreshed on launch (the desktop's 12 hours).
 pub(crate) const STALE_SECS: i64 = 12 * 3600;
@@ -690,6 +691,31 @@ impl Music {
         }))
     }
 
+    // ---- Dead links ----
+
+    /// Swaps a replacement into every saved track with this link (in collections and the
+    /// single songs), keeping its title and place. Returns whether there was one.
+    pub fn replace_saved_track(&self, location: String, candidate: ReplacementRecord) -> bool {
+        let key = platform::canonical(&location);
+        let c = candidate.to_core();
+        let done = self.inner.saved(|s| s.replace_link(&key, &c));
+        if done {
+            linkcheck::shared().record(&c.url, LinkStatus::Alive);
+        }
+        done
+    }
+
+    /// "Fix unavailable" for a collection: like `fix_unavailable_playlist`. Blocks for a few
+    /// seconds per dead track.
+    pub fn fix_unavailable_collection(&self, id: u64) -> Result<FixReportRecord, RedlineError> {
+        let tracks: Vec<Track> = {
+            let ctl = self.inner.ctl();
+            ctl.saved.get(id).map(|c| c.tracks.iter().map(|t| t.track.clone()).collect()).unwrap_or_default()
+        };
+        let items = self.find_fixes(&tracks)?;
+        Ok(self.fix_report(items, |_, was, c| self.inner.saved(|s| s.replace_link(&was.key(), c))))
+    }
+
     // ---- Playing ----
 
     /// Replaces Now playing with a collection's songs still on the platform, from the track
@@ -806,6 +832,8 @@ mod tests {
             added_at: 0,
             platform: None,
             offline: false,
+            link_status: crate::records::LinkStatusRecord::Unknown,
+            replaced_from: None,
         };
         assert_eq!(music.save_track(song.clone()), "Saved Song");
         assert_eq!(music.save_track(song.clone()), "Already saved");

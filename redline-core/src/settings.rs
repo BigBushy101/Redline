@@ -112,6 +112,8 @@ pub struct Settings {
     pub local_folders: Vec<PathBuf>,
     /// Single songs kept in Local because they were added on the Convert page.
     pub local_files: Vec<PathBuf>,
+    /// Replace unavailable songs automatically: swap in clear matches when a song's link dies.
+    pub auto_replace_dead: bool,
 }
 
 impl Default for Settings {
@@ -137,6 +139,7 @@ impl Default for Settings {
             refresh_saved_on_start: true,
             local_folders: crate::local::default_folders(),
             local_files: Vec::new(),
+            auto_replace_dead: false,
         }
     }
 }

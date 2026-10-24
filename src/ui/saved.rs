@@ -5,13 +5,15 @@ use eframe::egui::{self, Align, CornerRadius, Frame, Key, Layout, Margin, RichTe
 use egui_phosphor::regular as icons;
 use redline_core::format::ago;
 use redline_core::library::{self, Track};
+use redline_core::linkcheck::{self, LinkStatus};
 use redline_core::platform::Platform;
 use redline_core::player::Source;
 use redline_core::download_plan::PlannedDownload;
 use redline_core::saved::{self, CollectionId, Import, SaveOutcome, SavedTrack};
 
 use super::playlists::{AddTarget, add_menu, add_to, playlist_names};
-use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
+use super::replace::{self, List, Target};
+use super::tracks::{RowAction, RowState, convert_button, list_header, replace_button, search_box, track_row};
 use crate::app::{App, Page};
 use crate::format::fmt_duration;
 use crate::task::Task;
@@ -685,6 +687,7 @@ fn row_state<'a>(app: &App, t: &Track, tag: Option<&'a str>) -> RowState<'a> {
         offline: t.is_link() && matches!(local, Source::Local(_)),
         tag,
         platform_link: false,
+        link: LinkStatus::Unknown,
     }
 }
 
@@ -725,22 +728,30 @@ fn songs_table(ui: &mut Ui, app: &mut App, p: Platform) {
         return;
     }
     let query = app.saved_page.search.trim().to_lowercase();
+    let list = List::Songs(p);
+    let refs: Vec<&Track> = tracks.iter().collect();
+    let links = replace::list_statuses(ui, app, list, &refs);
+    replace::header(ui, app, list, &refs, &links);
+    let only_unavailable = app.replace.filtering(list);
     list_header(ui);
     let names = playlist_names(&app.library);
     let mut action = None;
     let mut add = None;
     for (idx, t) in tracks.iter().enumerate() {
-        if !query.is_empty() && !t.matches(&query) {
+        let link = links[idx];
+        if (!query.is_empty() && !t.matches(&query)) || (only_unavailable && link.label().is_none()) {
             continue;
         }
-        let state = row_state(app, t, None);
+        let state = RowState { link, ..row_state(app, t, None) };
         let offline = state.offline;
         let row = track_row(ui, idx, t, state, |ui| {
             let mut a = None;
             if theme::icon_button(ui, icons::X, "Remove from Saved").clicked() {
                 a = Some(RowAction::Remove(idx));
             }
-            if !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked() {
+            if link.label().is_some() {
+                a = replace_button(ui, idx, link).or(a);
+            } else if !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked() {
                 a = Some(RowAction::Offline(idx));
             }
             if let Some(target) = add_menu(ui, &names) {
@@ -760,6 +771,7 @@ fn songs_table(ui: &mut Ui, app: &mut App, p: Platform) {
             app.saved.remove_song(&tracks[i].key());
         }
         Some(RowAction::Offline(i)) => queue_offline(app, &tracks[i]),
+        Some(RowAction::FindReplacement(i)) => replace::find(app, list.target(i, &tracks[i]), tracks[i].clone()),
         _ => {}
     }
 }
@@ -777,32 +789,49 @@ fn all_songs(ui: &mut Ui, app: &mut App, p: Platform) {
         ui.label(theme::muted(plural(all.len(), "song")));
     });
     ui.add_space(8.0);
-    saved_table(ui, app, &all, p);
+    saved_table(ui, app, &all, p, None);
 }
 
-/// Rows of saved tracks, with the ones gone from the platform tagged.
-fn saved_table(ui: &mut Ui, app: &mut App, list: &[SavedTrack], p: Platform) {
+/// Rows of saved tracks, with the ones gone from the platform tagged. With `checked`, the
+/// links are checked and the list gets the unavailable-songs header; otherwise rows show
+/// what's already known.
+fn saved_table(ui: &mut Ui, app: &mut App, list: &[SavedTrack], p: Platform, checked: Option<List>) {
     if list.is_empty() {
         ui.label(theme::muted("Nothing here yet."));
         return;
     }
     let query = app.saved_page.search.trim().to_lowercase();
     let tag = format!("Removed from {}", p.label());
+    let refs: Vec<&Track> = list.iter().map(|t| &t.track).collect();
+    let links: Vec<LinkStatus> = match checked {
+        Some(l) => {
+            let links = replace::list_statuses(ui, app, l, &refs);
+            replace::header(ui, app, l, &refs, &links);
+            links
+        }
+        None => linkcheck::shared().statuses(refs.iter().copied()),
+    };
+    let only_unavailable = checked.is_some_and(|l| app.replace.filtering(l));
     list_header(ui);
     let names = playlist_names(&app.library);
     let mut action = None;
     let mut add = None;
     for (idx, st) in list.iter().enumerate() {
         let t = &st.track;
-        if !query.is_empty() && !t.matches(&query) {
+        let link = links[idx];
+        if (!query.is_empty() && !t.matches(&query)) || (only_unavailable && link.label().is_none()) {
             continue;
         }
-        let state = row_state(app, t, st.removed_upstream.then_some(tag.as_str()));
+        let state = RowState { link, ..row_state(app, t, st.removed_upstream.then_some(tag.as_str())) };
         let offline = state.offline;
         let has_file = offline || !t.is_link();
         let row = track_row(ui, idx, t, state, |ui| {
-            let a = (t.is_link() && !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked())
-                .then_some(RowAction::Offline(idx));
+            let a = if link.label().is_some() {
+                replace_button(ui, idx, link)
+            } else {
+                (t.is_link() && !offline && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked())
+                    .then_some(RowAction::Offline(idx))
+            };
             if let Some(target) = add_menu(ui, &names) {
                 add = Some((target, idx));
             }
@@ -817,6 +846,10 @@ fn saved_table(ui: &mut Ui, app: &mut App, list: &[SavedTrack], p: Platform) {
         Some(RowAction::Convert(i)) => convert_song(app, &list[i].track),
         Some(RowAction::Play(i)) => play_saved(app, list, i, false),
         Some(RowAction::Offline(i)) => queue_offline(app, &list[i].track),
+        Some(RowAction::FindReplacement(i)) => {
+            let t = &list[i].track;
+            replace::find(app, Target::Saved { key: t.key() }, t.clone());
+        }
         _ => {}
     }
 }
@@ -974,7 +1007,7 @@ fn collection(ui: &mut Ui, app: &mut App, id: CollectionId) {
         search_box(ui, &mut app.saved_page.search, "Find in collection");
         ui.add_space(8.0);
     }
-    saved_table(ui, app, &tracks, p);
+    saved_table(ui, app, &tracks, p, Some(List::Collection(id)));
 }
 
 /// Turning it on downloads everything that isn't downloaded yet, straight away.

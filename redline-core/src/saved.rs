@@ -13,6 +13,7 @@ use crate::download_plan::PlannedDownload;
 use crate::history::History;
 use crate::jobs::{JobManager, JobSpec};
 use crate::library::{self, Track};
+use crate::linkcheck::Candidate;
 use crate::platform::{self, Platform};
 use crate::player::Source;
 use crate::settings::{self, Settings};
@@ -420,6 +421,21 @@ impl Saved {
         removed
     }
 
+    /// Swaps a replacement link into every saved track with this key, in collections and
+    /// single songs. Returns whether there was one.
+    pub fn replace_link(&mut self, key: &str, c: &Candidate) -> bool {
+        let tracks = self.collections.iter_mut().flat_map(|col| col.tracks.iter_mut().map(|t| &mut t.track));
+        let mut found = false;
+        for t in tracks.chain(self.songs.iter_mut()).filter(|t| t.key() == key) {
+            t.swap_link(c);
+            found = true;
+        }
+        if found {
+            self.touch();
+        }
+        found
+    }
+
     /// The whole of Saved as an export file ([`SavedExport`]), for moving it to another
     /// install or keeping a copy.
     pub fn export_json(&self) -> String {
@@ -609,7 +625,8 @@ impl MergeReport {
 /// The result follows the platform's order. Tracks already saved are kept (matched by key,
 /// so `added_at` stays) with their details refreshed; new ones go in at the platform's
 /// position; ones missing upstream stay where they were relative to their neighbours,
-/// flagged, and lose the flag if they come back.
+/// flagged, and lose the flag if they come back. A track whose link was replaced still
+/// matches the dead entry it replaced, and is kept as it is.
 ///
 /// An empty listing is an error: a playlist that comes back empty has far more likely
 /// failed to load than been emptied.
@@ -617,8 +634,18 @@ pub fn sync_plan(collection: &Collection, fresh: &[Track]) -> Result<SyncResult>
     if fresh.is_empty() {
         bail!("The platform returned no tracks for this playlist; it wasn't changed.");
     }
+    // Dead links that were replaced, to the replacement's key.
+    let replaced: HashMap<String, String> = collection
+        .tracks
+        .iter()
+        .filter_map(|t| Some((platform::canonical(t.track.replaced_from.as_deref()?), t.track.key())))
+        .collect();
+    let key_of = |t: &Track| {
+        let key = t.key();
+        replaced.get(&key).cloned().unwrap_or(key)
+    };
     let mut fresh_keys = HashSet::new();
-    let fresh: Vec<&Track> = fresh.iter().filter(|t| fresh_keys.insert(t.key())).collect();
+    let fresh: Vec<&Track> = fresh.iter().filter(|t| fresh_keys.insert(key_of(t))).collect();
 
     // Tracks missing upstream, grouped under the nearest earlier track still there.
     let mut missing_after: HashMap<Option<String>, Vec<SavedTrack>> = HashMap::new();
@@ -649,8 +676,13 @@ pub fn sync_plan(collection: &Collection, fresh: &[Track]) -> Result<SyncResult>
     let mut added = Vec::new();
     let mut restored = 0;
     for f in fresh {
-        let key = f.key();
+        let key = key_of(f);
         let track = match old.get(&key) {
+            // The dead entry of a replaced track says nothing worth taking.
+            Some(prev) if key != f.key() => {
+                restored += prev.removed_upstream as usize;
+                prev.track.clone()
+            }
             Some(prev) => {
                 restored += prev.removed_upstream as usize;
                 let mut t = prev.track.clone();
@@ -846,6 +878,25 @@ mod tests {
         // x was after b in the old order, so it stays after b.
         assert_eq!(keys(&r.order), ["C", "B", "X-", "A"]);
         assert!(r.order.iter().filter(|t| !t.removed_upstream).all(|t| t.track.added_at == 100));
+    }
+
+    #[test]
+    fn sync_keeps_a_replaced_track_for_its_dead_entry() {
+        let mut c = collection(&[("a", false), ("b", false), ("c", false)]);
+        let mut s = s_with(&c);
+        let new = Candidate { url: "https://www.youtube.com/watch?v=new".into(), ..Default::default() };
+        assert!(s.contains(&yt("b").key()));
+        assert!(s.replace_link(&yt("b").key(), &new));
+        assert!(s.contains(&platform::canonical(&new.url)), "the key index is rebuilt");
+        assert!(!s.replace_link("https://nowhere", &new));
+        c = s.collections[0].clone();
+
+        let mut listing = fresh(&["a", "b", "c"]);
+        listing[1].title = "[Deleted video]".into();
+        let r = sync_plan(&c, &listing).unwrap();
+        assert_eq!(keys(&r.order), ["A", "B", "C"]);
+        assert!(r.added.is_empty() && r.removed.is_empty(), "nothing re-added or flagged");
+        assert_eq!(r.order[1].track.source, Source::Link(new.url.clone()));
     }
 
     #[test]

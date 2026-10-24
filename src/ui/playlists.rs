@@ -9,7 +9,8 @@ use redline_core::player::Source;
 
 use crate::app::App;
 use crate::format::fmt_duration;
-use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
+use super::replace::{self, List};
+use super::tracks::{RowAction, RowState, convert_button, list_header, replace_button, search_box, track_row};
 use crate::task::Task;
 use crate::theme;
 use crate::tools::ytdlp;
@@ -254,11 +255,17 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
         search_box(ui, &mut app.playlists_page.search, "Find in playlist");
         ui.add_space(8.0);
     }
+    let list = List::Playlist(id);
+    let refs: Vec<&Track> = tracks.iter().collect();
+    let links = replace::list_statuses(ui, app, list, &refs);
+    replace::header(ui, app, list, &refs, &links);
+    let only_unavailable = app.replace.filtering(list);
     list_header(ui);
     let mut action = None;
     let n = tracks.len();
     for (idx, t) in tracks.iter().enumerate() {
-        if !query.is_empty() && !t.matches(&query) {
+        let link = links[idx];
+        if (!query.is_empty() && !t.matches(&query)) || (only_unavailable && link.label().is_none()) {
             continue;
         }
         let local = library::playable_source(t, &app.history);
@@ -268,6 +275,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             playing,
             offline,
             platform_link: true,
+            link,
             ..Default::default()
         };
         let saved = t.is_link() && app.saved.contains(&t.key());
@@ -281,7 +289,9 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             if t.is_link() && theme::toggle_icon(ui, icons::BOOKMARK_SIMPLE, saved, tip).clicked() && !saved {
                 a = Some(RowAction::Save(idx));
             }
-            if t.is_link()
+            if link.label().is_some() {
+                a = replace_button(ui, idx, link).or(a);
+            } else if t.is_link()
                 && !offline
                 && theme::icon_button(ui, icons::DOWNLOAD_SIMPLE, "Download for offline").clicked()
             {
@@ -314,6 +324,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             }
         }
         Some(RowAction::OpenPlatform(p)) => app.page = crate::app::Page::Saved(Some(p)),
+        Some(RowAction::FindReplacement(i)) => replace::find(app, list.target(i, &tracks[i]), tracks[i].clone()),
         None => {}
     }
 }

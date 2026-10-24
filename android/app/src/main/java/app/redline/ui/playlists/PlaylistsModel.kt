@@ -14,9 +14,12 @@ import androidx.lifecycle.viewModelScope
 import app.redline.RedlineApp
 import app.redline.core.PlaylistRecord
 import app.redline.core.RedlineException
+import app.redline.core.ReplacementRecord
+import app.redline.core.ReviewRecord
 import app.redline.core.TrackKind
 import app.redline.core.TrackRecord
 import app.redline.state.MusicState
+import app.redline.ui.components.dead
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -61,6 +64,15 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
     var savedLinks by mutableStateOf<Set<String>>(emptySet())
         private set
 
+    /** The playlist "Fix unavailable" is searching for. */
+    var fixing by mutableStateOf<ULong?>(null)
+        private set
+    /** What it found no clear match for, to review: the playlist and its songs. */
+    var review by mutableStateOf<Pair<ULong, List<ReviewRecord>>?>(null)
+        private set
+    /** The playlist whose links were last sent to be checked, and how long it was then. */
+    private var checked: Pair<ULong, Int>? = null
+
     private val _messages = Channel<PlaylistsMessage>(Channel.BUFFERED)
     val messages = _messages.receiveAsFlow()
 
@@ -95,6 +107,12 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
             } else {
                 detail = p
                 savedLinks = saved
+                // Opened, or songs added: check the links nobody checked lately.
+                if (checked != id to p.tracks.size) {
+                    checked = id to p.tracks.size
+                    music.act { it.checkLinks(p.tracks) }
+                }
+                autoFix(id, p)
             }
         }
     }
@@ -164,6 +182,58 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
                 _messages.send(PlaylistsMessage.Error(e.message ?: "Couldn't queue that download."))
             }
         }
+    }
+
+    // ---- Dead links ---------------------------------------------------------------------
+
+    /** Other uploads of a track's song, for "Find replacement…" (blocks on the IO dispatcher). */
+    suspend fun findReplacements(track: TrackRecord): List<ReplacementRecord> =
+        music?.onMusicSlow { it.findReplacements(track) }.orEmpty()
+
+    /** Swaps [pick] in for the playlist's track at [index], keeping its title and place. */
+    fun replace(id: ULong, index: Int, pick: ReplacementRecord) {
+        val music = music ?: return
+        viewModelScope.launch {
+            val done = music.editPlaylistsNow { it.replacePlaylistTrack(id, index.toUInt(), pick) }
+            _messages.send(
+                if (done) PlaylistsMessage.Info("Replaced with “${pick.title}”") else PlaylistsMessage.Error("That song isn't in the playlist any more."),
+            )
+        }
+    }
+
+    /**
+     * "Fix unavailable": searches for each dead song, swaps in the clear matches and opens the
+     * review for the rest. [quiet] (the auto-replace setting) only swaps, saying nothing.
+     */
+    fun fixUnavailable(id: ULong, quiet: Boolean = false) {
+        val music = music ?: return
+        if (fixing != null) return
+        fixing = id
+        viewModelScope.launch {
+            try {
+                val report = music.onMusicSlow { it.fixUnavailablePlaylist(id) }
+                music.reloadPlaylists()
+                if (quiet) return@launch
+                val n = report.fixed.toInt()
+                _messages.send(PlaylistsMessage.Info(if (n == 0 && report.review.isNotEmpty()) "No clear matches; pick from what was found" else "Fixed $n"))
+                if (report.review.isNotEmpty()) review = id to report.review
+            } catch (e: RedlineException) {
+                if (!quiet) _messages.send(PlaylistsMessage.Error(e.message ?: "Couldn't look for replacements."))
+            } finally {
+                fixing = null
+            }
+        }
+    }
+
+    fun closeReview() {
+        review = null
+    }
+
+    /** With the auto-replace setting on, fixes a playlist with dead songs once a session. */
+    private fun autoFix(id: ULong, p: PlaylistRecord) {
+        val music = music ?: return
+        if (state.settings.value?.autoReplaceDead != true || fixing != null || p.tracks.none { it.dead }) return
+        if (music.autoFixed.add("playlist:$id")) fixUnavailable(id, quiet = true)
     }
 
     // ---- Adding -------------------------------------------------------------------------

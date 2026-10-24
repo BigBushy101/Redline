@@ -119,6 +119,15 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                     .color(theme::SUBTLE),
             );
         });
+        ui.horizontal(|ui| {
+            theme::toggle(ui, &mut app.settings.auto_replace_dead, "Replace unavailable songs automatically");
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Swaps in another upload when a song's link dies and a clear match is found")
+                    .small()
+                    .color(theme::SUBTLE),
+            );
+        });
     });
     ui.add_space(16.0);
 
@@ -238,6 +247,7 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
     if changed {
         app.tools = ToolPaths::locate(&app.settings);
         app.player.send(redline_core::player::Command::SetTools(app.tools.clone()));
+        redline_core::linkcheck::shared().set_tools(app.tools.clone(), app.settings.network.clone());
         app.settings_page.invalidate_version();
     }
 }

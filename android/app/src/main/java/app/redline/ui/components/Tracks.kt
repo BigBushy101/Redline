@@ -1,7 +1,9 @@
 package app.redline.ui.components
 
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,11 +18,13 @@ import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -35,9 +39,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.redline.core.LinkStatusRecord
 import app.redline.core.TrackKind
 import app.redline.core.TrackRecord
 import app.redline.core.fmtDuration
@@ -48,11 +55,30 @@ import app.redline.ui.theme.icon
 import app.redline.ui.theme.label
 import app.redline.util.art
 
+/** The amber of a link that's private or blocked from playing here. */
+val RestrictedColor = Color(0xFFFFB020)
+
+/** What a long press on a dead or restricted row says (linkcheck.rs `LinkStatus::label`). */
+fun linkLabel(status: LinkStatusRecord): String? = when (status) {
+    LinkStatusRecord.DEAD -> "This video is no longer available"
+    LinkStatusRecord.RESTRICTED -> "This video is private or can't be played here"
+    else -> null
+}
+
+/** A link track whose link is gone. */
+val TrackRecord.dead: Boolean get() = kind == TrackKind.LINK && linkStatus == LinkStatusRecord.DEAD
+
+/** A link track whose link has stopped playing, or plays only for some. */
+val TrackRecord.unavailable: Boolean
+    get() = kind == TrackKind.LINK && (linkStatus == LinkStatusRecord.DEAD || linkStatus == LinkStatusRecord.RESTRICTED)
+
 /**
  * One track (tracks.rs `track_row`): number, art, title, artist and where it plays from, length
  * and a menu, whose items [menu] adds (it gets the call that closes the menu). A [tag] (Saved's
- * "Removed from YouTube") takes the place of where it plays from, and greys the row.
+ * "Removed from YouTube") takes the place of where it plays from, and greys the row; so does a
+ * dead link's "No longer available". A long press on a dead or restricted row says why.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TrackRow(
     index: Int,
@@ -63,12 +89,18 @@ fun TrackRow(
     menu: @Composable (close: () -> Unit) -> Unit,
 ) {
     val accent = LocalAccent.current
+    val context = LocalContext.current
     var open by remember { mutableStateOf(false) }
+    val dead = track.kind == TrackKind.LINK && track.linkStatus == LinkStatusRecord.DEAD
+    val label = if (track.kind == TrackKind.LINK) linkLabel(track.linkStatus) else null
     Row(
         Modifier
             .fillMaxWidth()
             .background(if (playing) RedlineColors.Elevated else RedlineColors.Bg)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = label?.let { { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() } },
+            )
             .padding(start = PagePadding, top = 6.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -88,13 +120,17 @@ fun TrackRow(
                 style = MaterialTheme.typography.titleSmall,
                 color = when {
                     playing -> accent.hover
-                    tag != null -> RedlineColors.Muted
+                    tag != null || dead -> RedlineColors.Muted
                     else -> RedlineColors.Text
                 },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (tag != null) TagLine(tag) else SourceLine(track)
+            when {
+                tag != null -> TagLine(tag)
+                dead -> TagLine("No longer available", Icons.Rounded.LinkOff)
+                else -> SourceLine(track)
+            }
         }
         track.durationSecs?.let {
             Spacer(Modifier.width(8.dp))
@@ -128,6 +164,10 @@ private fun SourceLine(track: TrackRecord) {
         else -> RedlineColors.Muted
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
+        if (track.kind == TrackKind.LINK && track.linkStatus == LinkStatusRecord.RESTRICTED) {
+            Icon(Icons.Rounded.WarningAmber, "Private or blocked", tint = RestrictedColor, modifier = Modifier.size(12.dp))
+            Spacer(Modifier.width(3.dp))
+        }
         val artist = track.artist?.takeIf { it.isNotBlank() }
         if (artist != null) {
             Text(
@@ -147,9 +187,9 @@ private fun SourceLine(track: TrackRecord) {
 
 /** The row's tag in place of its source, e.g. "⊖ Removed from YouTube". */
 @Composable
-private fun TagLine(tag: String) {
+private fun TagLine(tag: String, icon: ImageVector = Icons.Rounded.RemoveCircleOutline) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(Icons.Rounded.RemoveCircleOutline, null, tint = LocalAccent.current.hover, modifier = Modifier.size(12.dp))
+        Icon(icon, null, tint = LocalAccent.current.hover, modifier = Modifier.size(12.dp))
         Spacer(Modifier.width(3.dp))
         Text(tag, style = MaterialTheme.typography.bodySmall, color = LocalAccent.current.hover, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

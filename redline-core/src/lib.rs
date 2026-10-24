@@ -9,6 +9,7 @@ pub mod format;
 pub mod history;
 pub mod jobs;
 pub mod library;
+pub mod linkcheck;
 pub mod local;
 #[cfg(windows)]
 pub mod media_keys;

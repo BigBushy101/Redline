@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.KeyboardActions
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.FindReplace
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreVert
@@ -80,6 +82,7 @@ import app.redline.core.SavedOverviewRecord
 import app.redline.core.SavedPlatformPageRecord
 import app.redline.core.SavedPlatformRecord
 import app.redline.core.SavedTrackRecord
+import app.redline.core.TrackKind
 import app.redline.core.TrackRecord
 import app.redline.core.fmtAgo
 import app.redline.core.fmtDuration
@@ -95,9 +98,14 @@ import app.redline.ui.components.MenuItem
 import app.redline.ui.components.PageHeader
 import app.redline.ui.components.PagePadding
 import app.redline.ui.components.PillButton
+import app.redline.ui.components.ReplacementDialog
+import app.redline.ui.components.ReviewDialog
 import app.redline.ui.components.SectionCard
 import app.redline.ui.components.ToggleRow
 import app.redline.ui.components.TrackRow
+import app.redline.ui.components.UnavailableBar
+import app.redline.ui.components.dead
+import app.redline.ui.components.unavailable
 import app.redline.ui.playlists.AddToPlaylistDialog
 import app.redline.ui.playlists.NameDialog
 import app.redline.ui.playlists.ShuffleButton
@@ -121,10 +129,11 @@ fun SavedScreen(model: SavedModel, music: MusicState, history: List<HistoryRecor
     val overview by music.savedOverview.collectAsStateWithLifecycle()
     val queue by music.queue.collectAsStateWithLifecycle()
     val current = queue.firstOrNull { it.isCurrent }?.track?.location
+    val linkVersion by music.linkCheckVersion.collectAsStateWithLifecycle()
     val p = model.platform
-    // Re-read after any change to Saved (refreshes included), and when History changes which
-    // links have a downloaded copy.
-    LaunchedEffect(p, model.collectionId, model.allSongs, version, history) { model.reload() }
+    // Re-read after any change to Saved (refreshes included), when History changes which links
+    // have a downloaded copy, and when link checks find dead ones.
+    LaunchedEffect(p, model.collectionId, model.allSongs, version, history, linkVersion) { model.reload() }
     if (p == null) {
         Overview(model, overview)
         return
@@ -139,6 +148,9 @@ fun SavedScreen(model: SavedModel, music: MusicState, history: List<HistoryRecor
             id != null -> if (collection == null || collection.summary.id != id) Loading() else CollectionPage(model, collection, current, playlists)
             model.allSongs -> if (all == null) Loading() else AllSongsPage(model, p, all, current)
             else -> if (page == null || page.platform != p) Loading() else PlatformPage(model, page, current)
+        }
+        model.replacing?.let { t ->
+            ReplacementDialog(t, search = { model.findReplacements(t) }, onPick = { model.replace(t, it) }, onDismiss = { model.replacing = null })
         }
     }
 }
@@ -395,6 +407,10 @@ private fun PlatformPage(model: SavedModel, page: SavedPlatformPageRecord, curre
                             model.downloadForOffline(t)
                         }
                     }
+                    MenuItem("Find replacement…", Icons.Rounded.FindReplace) {
+                        close()
+                        model.replacing = t
+                    }
                     MenuItem("Remove from Saved", Icons.Rounded.RemoveCircleOutline) {
                         close()
                         model.removeSong(t)
@@ -481,6 +497,10 @@ private fun CollectionPage(model: SavedModel, c: CollectionRecord, current: Stri
     var menu by remember { mutableStateOf(false) }
     val removed = s.removedCount.toInt()
     val playable = s.songCount > 0u
+    // Only the unavailable songs, while the chip is on and there are some.
+    var onlyUnavailable by rememberSaveable(s.id) { mutableStateOf(false) }
+    val unavailable = c.tracks.count { it.track.unavailable }
+    val filtering = onlyUnavailable && unavailable > 0
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
             TintedHeader(
@@ -577,7 +597,23 @@ private fun CollectionPage(model: SavedModel, c: CollectionRecord, current: Stri
                 }
             }
         }
-        savedTracks(c.tracks, label, current, play = { i -> model.playCollection(s.id, i) }, model)
+        if (unavailable > 0) {
+            item {
+                UnavailableBar(
+                    count = unavailable,
+                    filtered = filtering,
+                    onFilter = { onlyUnavailable = !filtering },
+                    canFix = c.tracks.any { it.track.dead },
+                    fixing = model.fixing == s.id,
+                    onFix = { model.fixUnavailable(s.id) },
+                )
+            }
+        }
+        val rows = c.tracks.withIndex().filter { !filtering || it.value.track.unavailable }
+        savedTracks(rows, label, current, play = { i -> model.playCollection(s.id, i) }, model)
+    }
+    model.review?.takeIf { it.first == s.id }?.let { (_, items) ->
+        ReviewDialog(items, onPick = { item, pick -> model.replace(item.track, pick) }, onDismiss = model::closeReview)
     }
     if (renaming) {
         NameDialog("Rename collection", s.name, "Rename", onConfirm = { model.rename(s.id, it) }, onDismiss = { renaming = false }, placeholder = "Name")
@@ -608,8 +644,8 @@ private fun CollectionPage(model: SavedModel, c: CollectionRecord, current: Stri
 }
 
 /** Rows of saved tracks, the ones gone from the platform marked (saved.rs `saved_table`). */
-private fun androidx.compose.foundation.lazy.LazyListScope.savedTracks(
-    tracks: List<SavedTrackRecord>,
+private fun LazyListScope.savedTracks(
+    tracks: List<IndexedValue<SavedTrackRecord>>,
     label: String,
     current: String?,
     play: (Int) -> Unit,
@@ -618,7 +654,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.savedTracks(
     if (tracks.isEmpty()) {
         item { Text("Nothing here yet.", Modifier.padding(horizontal = PagePadding), color = RedlineColors.Muted) }
     }
-    itemsIndexed(tracks, key = { i, t -> "$i:${t.track.location}" }) { i, t ->
+    items(tracks, key = { (i, t) -> "$i:${t.track.location}" }) { (i, t) ->
         val track: TrackRecord = t.track
         TrackRow(
             i,
@@ -646,6 +682,12 @@ private fun androidx.compose.foundation.lazy.LazyListScope.savedTracks(
                 MenuItem("Download for offline", Icons.Rounded.Download) {
                     close()
                     model.downloadForOffline(track)
+                }
+            }
+            if (track.kind == TrackKind.LINK) {
+                MenuItem("Find replacement…", Icons.Rounded.FindReplace) {
+                    close()
+                    model.replacing = track
                 }
             }
         }
@@ -677,6 +719,6 @@ private fun AllSongsPage(model: SavedModel, p: Platform, all: List<SavedTrackRec
                 }
             }
         }
-        savedTracks(all, label, current, play = { i -> model.playAll(p, i) }, model)
+        savedTracks(all.withIndex().toList(), label, current, play = { i -> model.playAll(p, i) }, model)
     }
 }

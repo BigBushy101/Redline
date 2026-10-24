@@ -258,6 +258,8 @@ pub struct PlaylistItem {
     pub uploader: Option<String>,
     pub duration: Option<f64>,
     pub thumbnail: Option<String>,
+    /// What the listing says about whether it still plays (deleted and private entries).
+    pub availability: Option<crate::linkcheck::LinkStatus>,
 }
 
 impl PlaylistItem {
@@ -274,6 +276,7 @@ impl PlaylistItem {
                     .flatten()
             })?;
         Some(Self {
+            availability: crate::linkcheck::status_from_flat(e["title"].as_str(), e["availability"].as_str()),
             title: s("title")
                 .or_else(|| title_from_link(&url))
                 .unwrap_or_else(|| url.clone()),
@@ -590,7 +593,9 @@ pub(crate) fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<st
 pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<MediaInfo> {
     let mut cmd = base_command(tools, net)?;
     cmd.args(["-J", "--flat-playlist", "--", url]);
-    parse_info(&run_json(cmd)?)
+    let info = parse_info(&run_json(cmd)?)?;
+    crate::linkcheck::shared().record_listing(&info.items);
+    Ok(info)
 }
 
 /// Runs a yt-dlp `-J` command and returns its JSON, or its error made readable.
@@ -1387,6 +1392,24 @@ mod tests {
         assert_eq!(pl.items[0].duration, Some(201.0));
         assert_eq!(pl.items[0].thumbnail.as_deref(), Some("l"));
         assert_eq!(pl.items[2].uploader.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn flat_entries_mark_deleted_and_private_videos() {
+        use crate::linkcheck::LinkStatus;
+        let info = parse_info(
+            br#"{"_type":"playlist","title":"Mix","entries":[
+                {"_type":"url","ie_key":"Youtube","id":"a","url":"https://www.youtube.com/watch?v=a","title":"One"},
+                {"_type":"url","ie_key":"Youtube","id":"b","url":"https://www.youtube.com/watch?v=b","title":"[Deleted video]"},
+                {"_type":"url","ie_key":"Youtube","id":"c","url":"https://www.youtube.com/watch?v=c","title":"Three",
+                 "availability":"private"}]}"#,
+        )
+        .unwrap();
+        let availability: Vec<_> = info.items.iter().map(|i| i.availability).collect();
+        assert_eq!(availability, [None, Some(LinkStatus::Dead), Some(LinkStatus::Restricted)]);
+        let tracks = crate::library::tracks_from_info("https://www.youtube.com/playlist?list=x", &info);
+        let titles: Vec<_> = tracks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["One", "[Deleted video]", "Three"], "kept in place, for the import to mark dead");
     }
 
     #[test]

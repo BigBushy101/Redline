@@ -67,9 +67,19 @@ class MusicState(private val app: Application, val music: Music) {
     /** Changes whenever Saved or one of its refreshes does, so open Saved pages read again. */
     val savedVersion: StateFlow<ULong> = _savedVersion.asStateFlow()
 
+    private val _linkCheckVersion = MutableStateFlow(0UL)
+    /** Changes whenever a link check finds something, so open lists read their statuses again. */
+    val linkCheckVersion: StateFlow<ULong> = _linkCheckVersion.asStateFlow()
+
     private val _savedOverview = MutableStateFlow<SavedOverviewRecord?>(null)
     /** The platforms with something saved, for the Saved overview. */
     val savedOverview: StateFlow<SavedOverviewRecord?> = _savedOverview.asStateFlow()
+
+    /**
+     * The playlists and collections "Fix unavailable" already ran on by itself this session
+     * (the auto-replace setting), so opening one again doesn't search again.
+     */
+    val autoFixed = mutableSetOf<String>()
 
     /** Copies of files picked for playlists. */
     val imported = ImportedMusic(RedlineEngine.importedMusicDir(app)) { LocalFiles.load(app) }
@@ -107,9 +117,11 @@ class MusicState(private val app: Application, val music: Music) {
                 music.playerSettings(),
                 // Saved is only read again when it changed (a refresh nudges as it starts and ends).
                 if (music.savedVersion() != savedKnown) music.savedOverview() else null,
+                music.linkCheckVersion(),
             )
         }
-        val (snap, queue, settings, saved) = pulled
+        val (snap, queue, settings, saved, links) = pulled
+        _linkCheckVersion.value = links
         if (saved != null) {
             _savedOverview.value = saved
             _savedVersion.value = saved.version
@@ -129,6 +141,7 @@ class MusicState(private val app: Application, val music: Music) {
         val queue: List<QueueTrackRecord>?,
         val settings: PlayerSettingsRecord,
         val saved: SavedOverviewRecord?,
+        val linkCheckVersion: ULong,
     )
 
     /** Runs a quick call in order behind the others, then refreshes. */

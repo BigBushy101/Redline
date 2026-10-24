@@ -7,6 +7,7 @@ pub mod player_panels;
 pub mod playlists;
 pub mod presets;
 pub mod queue;
+pub mod replace;
 pub mod saved;
 pub mod settings;
 pub mod sidebar;

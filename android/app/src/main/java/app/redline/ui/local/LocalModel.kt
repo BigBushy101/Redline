@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.redline.RedlineApp
+import app.redline.core.LinkStatusRecord
 import app.redline.core.TrackKind
 import app.redline.core.TrackRecord
 import app.redline.state.LocalFiles
@@ -224,6 +225,8 @@ class LocalModel(app: Application) : AndroidViewModel(app) {
                     addedAt = c.getLong(4),
                     platform = null,
                     offline = false,
+                    linkStatus = LinkStatusRecord.UNKNOWN,
+                    replacedFrom = null,
                 )
             }
         }
