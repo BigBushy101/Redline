@@ -7,7 +7,8 @@
 //!
 //! Links are resolved to a stream URL with yt-dlp when they're played, never earlier: the
 //! URLs expire after a few hours. The one queued next is looked up (and its URL warmed) while
-//! the current track plays, so it starts without waiting on yt-dlp.
+//! the current track plays, so it starts without waiting on yt-dlp; if that look-up fails,
+//! [`PlayerState::next_failed`] says so before the track's turn.
 
 pub mod ab_loop;
 #[cfg(target_os = "android")]
@@ -99,6 +100,8 @@ pub struct PlayerState {
     pub advances: u64,
     /// A-B loop markers on the current track; a new track clears them.
     pub ab_loop: AbLoop,
+    /// The last `SetNext` link that failed to look up ahead of time: its URL and the error.
+    pub next_failed: Option<(String, String)>,
 }
 
 impl Default for PlayerState {
@@ -114,6 +117,7 @@ impl Default for PlayerState {
             load_id: 0,
             advances: 0,
             ab_loop: AbLoop::default(),
+            next_failed: None,
         }
     }
 }
@@ -303,6 +307,7 @@ impl Player {
                     want_play: false,
                     next: None,
                     prefetching: None,
+                    prefetch_error: None,
                     last_wake: Instant::now(),
                     lost_at: None,
                 }
@@ -395,6 +400,8 @@ struct Engine {
     /// The next link being looked up ahead of time. Kept after a failure so it isn't tried
     /// over and over; playing it shows the error.
     prefetching: Option<String>,
+    /// The link whose look-up ahead of time failed, and the error.
+    prefetch_error: Option<(String, String)>,
     last_wake: Instant,
     /// While the output device is gone: when to try opening it again.
     lost_at: Option<Instant>,
@@ -513,8 +520,16 @@ impl Engine {
                 }
                 // The queue or the cookies may have changed while it was looked up.
                 let wanted = self.next.as_ref() == Some(&Source::Link(url.clone())) && network == self.env.network;
-                if let (true, Ok(r)) = (wanted, result) {
-                    self.links.insert(url, (r, Instant::now()));
+                match (wanted, result) {
+                    (true, Ok(r)) => {
+                        self.links.insert(url, (r, Instant::now()));
+                    }
+                    // Told now, so the app can mark the track before its turn comes.
+                    (true, Err(e)) => {
+                        self.set_state(|s| s.next_failed = Some((url.clone(), e.clone())));
+                        self.prefetch_error = Some((url, e));
+                    }
+                    _ => {}
                 }
             }
             Msg::Shutdown => {}
@@ -615,6 +630,17 @@ impl Engine {
             start_at,
             stream: None,
         });
+        // A link whose look-up ahead of time already failed for good (it's gone, or private)
+        // fails now with that, rather than after asking yt-dlp again. Once: playing it again
+        // asks.
+        if let Source::Link(url) = &source
+            && let Some((_, e)) = self
+                .prefetch_error
+                .take_if(|(u, e)| u == url && crate::linkcheck::status_for_ytdlp_error(e) != crate::linkcheck::LinkStatus::Unknown)
+        {
+            self.fail(e);
+            return;
+        }
         let cached = match &source {
             Source::Link(url) => self.cached(url),
             Source::Local(_) => None,

@@ -496,3 +496,46 @@ fn ab_loop_with_b_at_the_end_loops_instead_of_ending() {
     wait_for(&p, "looped", |s| s.status != Status::Ended && tone.starts.lock().unwrap().contains(&0.2));
     assert_eq!(p.state().advances, 0);
 }
+
+/// Files play as a short tone; links fail to look up, with YouTube's error for an upload
+/// that's there but won't play here. Counts the look-ups.
+struct BlockedLinks {
+    resolves: Mutex<u32>,
+}
+
+const BLOCKED: &str = "Video unavailable. This video is not available";
+
+impl Media for BlockedLinks {
+    fn resolve(&self, env: &Env, source: &Source) -> Result<Resolved> {
+        if matches!(source, Source::Link(_)) {
+            *self.resolves.lock().unwrap() += 1;
+            return Err(anyhow!(BLOCKED));
+        }
+        Tone::new(0.5).resolve(env, source)
+    }
+
+    fn decode(&self, env: &Env, input: &Input, start: f64, rate: u32) -> Result<Pcm> {
+        Tone::new(0.5).decode(env, input, start, rate)
+    }
+}
+
+#[test]
+fn next_link_that_failed_ahead_of_time_says_so_and_fails_at_once() {
+    let capture = Capture::new(RATE, 2.0);
+    let media = Arc::new(BlockedLinks { resolves: Mutex::default() });
+    let p = player(media.clone(), &capture);
+    let url = "https://www.youtube.com/watch?v=blocked";
+    p.send(Command::Load(track(), 0.0));
+    p.send(Command::SetNext(Some(Source::Link(url.into()))));
+    // Told before its turn, so the app can mark the row.
+    let s = wait_for(&p, "the look-ahead failure", |s| s.next_failed.is_some());
+    assert_eq!(s.next_failed, Some((url.to_owned(), BLOCKED.to_owned())));
+    assert_eq!(s.status, Status::Playing, "the current track carries on");
+    // Its turn: the same error straight away, without asking yt-dlp again.
+    let s = wait_for(&p, "advanced", |s| s.advances == 1 && matches!(s.status, Status::Error(_)));
+    assert_eq!(s.status, Status::Error(BLOCKED.into()));
+    assert_eq!(*media.resolves.lock().unwrap(), 1);
+    // Playing it again does ask.
+    p.send(Command::Play);
+    wait_for(&p, "asked again", |_| *media.resolves.lock().unwrap() == 2);
+}

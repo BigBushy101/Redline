@@ -22,7 +22,8 @@ pub enum RowAction {
     Convert(usize),
     /// The platform glyph in the source column was clicked.
     OpenPlatform(Platform),
-    /// Look for another upload of a dead or restricted link.
+    /// Look for another upload of a link: a dead or restricted one's button, or any link's
+    /// right-click menu.
     FindReplacement(usize),
 }
 
@@ -93,6 +94,9 @@ pub struct RowState<'a> {
     pub platform_link: bool,
     /// What the last link check found.
     pub link: LinkStatus,
+    /// A right-click menu with Play and Find replacement… (links in lists that can take a
+    /// replacement), whether or not the link is known to be broken.
+    pub replace_menu: bool,
 }
 
 /// A playlist-style row. Double-click asks to play it; `actions` draws the buttons on the
@@ -110,6 +114,7 @@ pub fn track_row(
         tag,
         platform_link,
         link,
+        replace_menu,
     } = state;
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, 56.0), Sense::click());
@@ -122,6 +127,26 @@ pub fn track_row(
         );
     }
     let mut action = resp.double_clicked().then_some(RowAction::Play(idx));
+    if replace_menu && t.is_link() {
+        // Find replacement… comes first for a link known not to play, after Play otherwise.
+        let flagged = link.label().is_some();
+        resp.context_menu(|ui| {
+            let mut pick = |ui: &mut Ui, label: String, a: RowAction| {
+                if ui.button(label).clicked() {
+                    action = Some(a);
+                    ui.close();
+                }
+            };
+            let find = format!("{}  Find replacement…", icons::SWAP);
+            if flagged {
+                pick(ui, find.clone(), RowAction::FindReplacement(idx));
+            }
+            pick(ui, format!("{}  Play", icons::PLAY), RowAction::Play(idx));
+            if !flagged {
+                pick(ui, find, RowAction::FindReplacement(idx));
+            }
+        });
+    }
     let mut row = ui.new_child(
         UiBuilder::new()
             .max_rect(rect.shrink2(vec2(12.0, 0.0)))

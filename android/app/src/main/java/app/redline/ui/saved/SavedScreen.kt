@@ -388,6 +388,14 @@ private fun PlatformPage(model: SavedModel, page: SavedPlatformPageRecord, curre
             item { SectionTitle("Songs") }
             itemsIndexed(page.songs, key = { i, t -> "song:$i:${t.location}" }) { i, t ->
                 TrackRow(i, t, playing = t.location == current, onClick = { model.playSongs(page.songs, i) }) { close ->
+                    val replace = @Composable {
+                        MenuItem("Find replacement…", Icons.Rounded.FindReplace) {
+                            close()
+                            model.replacing = t
+                        }
+                    }
+                    // First for a song that won't play; further down otherwise.
+                    if (t.unavailable) replace()
                     MenuItem("Play", Icons.Rounded.PlayArrow) {
                         close()
                         model.playSongs(page.songs, i)
@@ -407,10 +415,7 @@ private fun PlatformPage(model: SavedModel, page: SavedPlatformPageRecord, curre
                             model.downloadForOffline(t)
                         }
                     }
-                    MenuItem("Find replacement…", Icons.Rounded.FindReplace) {
-                        close()
-                        model.replacing = t
-                    }
+                    if (!t.unavailable) replace()
                     MenuItem("Remove from Saved", Icons.Rounded.RemoveCircleOutline) {
                         close()
                         model.removeSong(t)
@@ -663,6 +668,14 @@ private fun LazyListScope.savedTracks(
             onClick = { play(i) },
             tag = if (t.removed) "Removed from $label" else null,
         ) { close ->
+            val replace = @Composable {
+                MenuItem("Find replacement…", Icons.Rounded.FindReplace) {
+                    close()
+                    model.replacing = track
+                }
+            }
+            // Any link can look for another upload; first for one that won't play.
+            if (track.unavailable) replace()
             MenuItem("Play", Icons.Rounded.PlayArrow) {
                 close()
                 play(i)
@@ -684,12 +697,7 @@ private fun LazyListScope.savedTracks(
                     model.downloadForOffline(track)
                 }
             }
-            if (track.kind == TrackKind.LINK) {
-                MenuItem("Find replacement…", Icons.Rounded.FindReplace) {
-                    close()
-                    model.replacing = track
-                }
-            }
+            if (track.kind == TrackKind.LINK && !track.unavailable) replace()
         }
     }
 }

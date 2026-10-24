@@ -169,6 +169,19 @@ fn start_fix(app: &mut App, list: List, tracks: Vec<(usize, Track)>, auto: bool)
     app.replace.fixing.push(Fixing { list, auto, task });
 }
 
+/// Where a replacement for a song that failed to play goes: its place in the playlist it was
+/// playing from, else its copies in Saved, else the first playlist that has it.
+pub fn target_for(app: &App, track: &Track, playlist: Option<PlaylistId>) -> Option<Target> {
+    let in_playlist = |id: PlaylistId| {
+        let index = app.library.get(id)?.tracks.iter().position(|t| t.source == track.source)?;
+        Some(Target::Playlist { id, index })
+    };
+    playlist
+        .and_then(in_playlist)
+        .or_else(|| (track.is_link() && app.saved.contains(&track.key())).then(|| Target::Saved { key: track.key() }))
+        .or_else(|| app.library.playlists.iter().find_map(|p| in_playlist(p.id)))
+}
+
 /// Opens Find replacement for `track`, searching straight away.
 pub fn find(app: &mut App, target: Target, track: Track) {
     let (tools, net) = (app.tools.clone(), app.settings.network.clone());

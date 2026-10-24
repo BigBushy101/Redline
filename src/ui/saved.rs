@@ -688,6 +688,7 @@ fn row_state<'a>(app: &App, t: &Track, tag: Option<&'a str>) -> RowState<'a> {
         tag,
         platform_link: false,
         link: LinkStatus::Unknown,
+        replace_menu: false,
     }
 }
 
@@ -742,7 +743,7 @@ fn songs_table(ui: &mut Ui, app: &mut App, p: Platform) {
         if (!query.is_empty() && !t.matches(&query)) || (only_unavailable && link.label().is_none()) {
             continue;
         }
-        let state = RowState { link, ..row_state(app, t, None) };
+        let state = RowState { link, replace_menu: true, ..row_state(app, t, None) };
         let offline = state.offline;
         let row = track_row(ui, idx, t, state, |ui| {
             let mut a = None;
@@ -822,7 +823,7 @@ fn saved_table(ui: &mut Ui, app: &mut App, list: &[SavedTrack], p: Platform, che
         if (!query.is_empty() && !t.matches(&query)) || (only_unavailable && link.label().is_none()) {
             continue;
         }
-        let state = RowState { link, ..row_state(app, t, st.removed_upstream.then_some(tag.as_str())) };
+        let state = RowState { link, replace_menu: true, ..row_state(app, t, st.removed_upstream.then_some(tag.as_str())) };
         let offline = state.offline;
         let has_file = offline || !t.is_link();
         let row = track_row(ui, idx, t, state, |ui| {

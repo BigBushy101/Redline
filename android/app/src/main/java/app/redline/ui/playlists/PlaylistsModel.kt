@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import app.redline.RedlineApp
+import app.redline.core.PlayFailureRecord
 import app.redline.core.PlaylistRecord
 import app.redline.core.RedlineException
 import app.redline.core.ReplacementRecord
@@ -197,6 +198,21 @@ class PlaylistsModel(app: Application, private val saved: SavedStateHandle) : An
             val done = music.editPlaylistsNow { it.replacePlaylistTrack(id, index.toUInt(), pick) }
             _messages.send(
                 if (done) PlaylistsMessage.Info("Replaced with “${pick.title}”") else PlaylistsMessage.Error("That song isn't in the playlist any more."),
+            )
+        }
+    }
+
+    /**
+     * Swaps [pick] in for a song that failed to play: in the playlist the failure names, found
+     * by its link, or else in its copies in Saved.
+     */
+    fun replaceFailed(failure: PlayFailureRecord, pick: ReplacementRecord) {
+        val music = music ?: return
+        viewModelScope.launch {
+            val done = music.editPlaylistsNow { it.replaceFailedTrack(failure.track, failure.playlistId, pick) }
+            if (failure.playlistId == null) music.act { } // Saved changed
+            _messages.send(
+                if (done) PlaylistsMessage.Info("Replaced with “${pick.title}”") else PlaylistsMessage.Error("That song isn't there any more."),
             )
         }
     }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -55,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.redline.NavModel
+import app.redline.core.PlayFailureRecord
 import app.redline.core.TrackRecord
 import app.redline.state.EngineStatus
 import app.redline.state.MusicState
@@ -62,6 +64,7 @@ import app.redline.state.RedlineState
 import app.redline.ui.components.LocalOpenSettings
 import app.redline.ui.convert.ConvertMessage
 import app.redline.ui.components.LocalTrackActions
+import app.redline.ui.components.ReplacementDialog
 import app.redline.ui.components.TrackActions
 import app.redline.ui.convert.ConvertModel
 import app.redline.ui.convert.ConvertScreen
@@ -159,6 +162,8 @@ private fun Pages(
     val playlists by music.playlists.collectAsStateWithLifecycle()
     // A History or Library row's track waiting for "Add to playlist…" to pick where.
     var toAdd by remember { mutableStateOf<TrackRecord?>(null) }
+    // A song that failed to play, with "Find replacement…" open for it.
+    var replacingFailed by remember { mutableStateOf<PlayFailureRecord?>(null) }
     val queue by state.queue.collectAsStateWithLifecycle()
     val active by state.activeCount.collectAsStateWithLifecycle()
     val history by state.history.collectAsStateWithLifecycle()
@@ -231,6 +236,25 @@ private fun Pages(
         }
     }
 
+    // A link that failed to play (the desktop's notice above the player bar): why, and Find
+    // replacement where there's a playlist or Saved copy to put one. The core has already
+    // marked its rows and moved on; a newer failure takes the place of the one showing.
+    LaunchedEffect(music) {
+        music.failures.collect { f ->
+            snackbar.currentSnackbarData?.dismiss()
+            scope.launch {
+                val reason = f.error.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+                val r = snackbar.showSnackbar(
+                    "Couldn't play “${f.track.title}”. $reason",
+                    actionLabel = if (f.playlistId != null || f.saved) "Find replacement" else null,
+                    withDismissAction = true,
+                    duration = SnackbarDuration.Long,
+                )
+                if (r == SnackbarResult.ActionPerformed) replacingFailed = f
+            }
+        }
+    }
+
     LaunchedEffect(localModel) {
         localModel.messages.collect { m ->
             when (m) {
@@ -278,7 +302,8 @@ private fun Pages(
     Box(Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = RedlineColors.Bg,
-            snackbarHost = { SnackbarHost(snackbar) },
+            // Over the full player instead while it's open (below).
+            snackbarHost = { if (!nav.playerOpen) SnackbarHost(snackbar) },
             bottomBar = {
                 Column(Modifier.background(RedlineColors.Black)) {
                     MiniPlayer(music) { nav.playerOpen = true }
@@ -381,6 +406,8 @@ private fun Pages(
         ) {
             FullPlayer(music) { nav.playerOpen = false }
         }
+        // Messages (a song that failed to play, say) show over the full player too.
+        if (nav.playerOpen) SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding())
     }
     toAdd?.let { track ->
         AddToPlaylistDialog(
@@ -396,6 +423,14 @@ private fun Pages(
                 }
             },
             onDismiss = { toAdd = null },
+        )
+    }
+    replacingFailed?.let { f ->
+        ReplacementDialog(
+            f.track,
+            search = { playlistsModel.findReplacements(f.track) },
+            onPick = { pick -> playlistsModel.replaceFailed(f, pick) },
+            onDismiss = { replacingFailed = null },
         )
     }
 }

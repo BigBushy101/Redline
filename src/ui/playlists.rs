@@ -276,6 +276,7 @@ fn playlist(ui: &mut Ui, app: &mut App, id: PlaylistId) {
             offline,
             platform_link: true,
             link,
+            replace_menu: true,
             ..Default::default()
         };
         let saved = t.is_link() && app.saved.contains(&t.key());

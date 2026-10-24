@@ -1,7 +1,9 @@
 //! Bottom bar: the player while a track is loaded, otherwise the current job. Styled like
 //! Spotify's player bar.
 
-use eframe::egui::{self, Align, Layout, Rect, RichText, Ui, UiBuilder, vec2};
+use std::time::Duration;
+
+use eframe::egui::{self, Align, Frame, Layout, Margin, Rect, RichText, Ui, UiBuilder, vec2};
 use egui_phosphor::regular as icons;
 use redline_core::library::Repeat;
 use redline_core::player::{Command, Status};
@@ -11,6 +13,69 @@ use crate::format::fmt_duration;
 use crate::jobs::JobStatus;
 use crate::theme;
 use super::player_panels::{Panel, speed_label};
+use super::replace;
+
+/// How long the notice about a song that failed to play stays up.
+const FAILURE_SHOWN: Duration = Duration::from_secs(15);
+
+/// Just above the player bar for a while after a link fails to play (the player has usually
+/// moved on by then): "Couldn't play “Song”", why, and Find replacement for its playlist or
+/// Saved copy.
+pub fn failure_notice(ctx: &egui::Context, app: &mut App) {
+    let Some((failed, at)) = &app.failed_play else { return };
+    if at.elapsed() > FAILURE_SHOWN {
+        app.failed_play = None;
+        return;
+    }
+    let target = replace::target_for(app, &failed.track, failed.playlist);
+    let title = format!("Couldn't play “{}”", failed.track.title);
+    let reason = failed.error.lines().next().unwrap_or_default().to_owned();
+    let skipped = failed.skip && app.now.current().is_some_and(|t| t.source != failed.track.source);
+    let can_search = app.tools.ytdlp.is_some();
+    let (mut find, mut dismiss) = (false, false);
+    egui::Area::new(egui::Id::new("failed-play"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::LEFT_BOTTOM, vec2(12.0, -96.0))
+        .show(ctx, |ui| {
+            Frame::new()
+                .fill(theme::ELEVATED)
+                .corner_radius(8)
+                .inner_margin(Margin::symmetric(14, 10))
+                .shadow(ui.visuals().popup_shadow)
+                .show(ui, |ui| {
+                    ui.set_max_width(440.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icons::WARNING_CIRCLE).color(theme::accent().base));
+                        ui.add(egui::Label::new(theme::strong(title.as_str())).truncate());
+                    });
+                    ui.add(egui::Label::new(RichText::new(reason.as_str()).small().color(theme::MUTED)).wrap());
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if target.is_some()
+                            && theme::small_pill_button(ui, &format!("{}  Find replacement", icons::SWAP), can_search)
+                                .clicked()
+                        {
+                            find = true;
+                        }
+                        if theme::ghost_button(ui, "Dismiss", true).clicked() {
+                            dismiss = true;
+                        }
+                        if skipped {
+                            ui.label(RichText::new("Skipped to the next song").small().color(theme::MUTED));
+                        }
+                    });
+                });
+        });
+    if find {
+        if let (Some(target), Some((failed, _))) = (target, app.failed_play.take()) {
+            replace::find(app, target, failed.track);
+        }
+    } else if dismiss {
+        app.failed_play = None;
+    } else {
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+}
 
 pub fn show(ui: &mut Ui, app: &mut App) {
     if app.player_state.is_active() {

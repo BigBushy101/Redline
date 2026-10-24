@@ -60,6 +60,10 @@ pub struct App {
     pub replace: ui::replace::ReplaceDialog,
     /// A short message at the bottom of the window, and when it was shown.
     toast: Option<(String, std::time::Instant)>,
+    /// Notices links failing to play, and records why.
+    play_watch: linkcheck::PlayWatch,
+    /// The last link that failed to play, and when, shown with Find replacement.
+    pub failed_play: Option<(linkcheck::FailedPlay, std::time::Instant)>,
     /// What the player bar works through: a playlist or ad-hoc picks.
     pub now: NowPlaying,
     /// Auto-advances of the player the queue has caught up with.
@@ -126,6 +130,8 @@ impl App {
             local_page: Default::default(),
             replace: Default::default(),
             toast: None,
+            play_watch: Default::default(),
+            failed_play: None,
             now: NowPlaying::default(),
             seen_advances: 0,
             sent_next: None,
@@ -359,6 +365,18 @@ impl App {
         }
     }
 
+    /// When a link fails to play: the link checks note why (so its row shows it), the queue
+    /// moves on if it won't play however often it's tried, and the error stays up for a
+    /// while with Find replacement.
+    fn watch_failures(&mut self) {
+        let lc = linkcheck::shared();
+        let Some(failed) = self.play_watch.check(lc, &self.player_state, &self.now) else { return };
+        if failed.skip && lc.skip_failed(&mut self.now) {
+            self.load_current();
+        }
+        self.failed_play = Some((failed, std::time::Instant::now()));
+    }
+
     fn run_after_queue(&mut self, ctx: &egui::Context, step: AfterQueueStep) {
         match step {
             AfterQueueStep::OpenFolder(dir) => {
@@ -489,6 +507,7 @@ impl eframe::App for App {
         self.player_state = self.player.state();
         self.sync_player();
         self.follow_queue();
+        self.watch_failures();
         #[cfg(windows)]
         self.media_keys_frame(ctx);
         self.playlists_page.poll(&mut self.library);
@@ -588,6 +607,7 @@ impl eframe::App for App {
                 theme::with_accent(ui, accent, |ui| self.central(ui));
             });
         self.toast_area(&ctx);
+        ui::now_bar::failure_notice(&ctx, self);
 
         // Full-window hint while files are dragged over.
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {

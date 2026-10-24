@@ -418,12 +418,14 @@ private fun PlaylistTrackRow(index: Int, track: TrackRecord, count: Int, playing
             close()
             onAction(a)
         }
+        // Any link can look for another upload; it's the first thing offered for one that won't play.
+        if (track.unavailable) MenuItem("Find replacement…", Icons.Rounded.FindReplace) { pick(TrackAction.Replace) }
         MenuItem("Play", Icons.Rounded.PlayArrow) { pick(TrackAction.Play) }
         MenuItem("Play next", Icons.Rounded.QueuePlayNext) { pick(TrackAction.Next) }
         MenuItem("Add to queue", Icons.AutoMirrored.Rounded.QueueMusic) { pick(TrackAction.Queue) }
         if (track.canGoOffline) MenuItem("Download for offline", Icons.Rounded.Download) { pick(TrackAction.Offline) }
         if (track.kind == TrackKind.LINK && !saved) MenuItem("Save to Saved", Icons.Rounded.BookmarkBorder) { pick(TrackAction.Save) }
-        if (track.kind == TrackKind.LINK) MenuItem("Find replacement…", Icons.Rounded.FindReplace) { pick(TrackAction.Replace) }
+        if (track.kind == TrackKind.LINK && !track.unavailable) MenuItem("Find replacement…", Icons.Rounded.FindReplace) { pick(TrackAction.Replace) }
         LibraryMenuItems(track, close, playlist = false)
         if (index > 0) MenuItem("Move up", Icons.Rounded.KeyboardArrowUp) { pick(TrackAction.Up) }
         if (index + 1 < count) MenuItem("Move down", Icons.Rounded.KeyboardArrowDown) { pick(TrackAction.Down) }

@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use redline_core::Wake;
 use redline_core::history::History;
 use redline_core::library::{self, Library, NowPlaying, PlaylistId, Track};
-use redline_core::linkcheck::{self, Candidate, FixItem, LinkStatus};
+use redline_core::linkcheck::{self, Candidate, FixItem, LinkStatus, PlayWatch};
 use redline_core::player::{Command, Player, PlayerSettings, PlayerState, Source, dsp};
 use redline_core::saved::Saved;
 use redline_core::tools::ToolPaths;
@@ -64,6 +64,10 @@ pub(crate) struct Controller {
     player_sent: Option<PlayerSettings>,
     player_network: Option<NetworkOptions>,
     player_tools: Option<ToolPaths>,
+    /// Notices links failing to play, and records why.
+    play_watch: PlayWatch,
+    /// The last link that failed to play, for Kotlin to say so with Find replacement.
+    failure: Option<PlayFailureRecord>,
 }
 
 impl Controller {
@@ -131,6 +135,20 @@ impl Controller {
             player.send(Command::SetNext(playable));
             self.sent_next = Some(next);
         }
+    }
+
+    /// When a link fails to play (the desktop's `watch_failures`): the link checks note why,
+    /// so its rows show it; the queue moves on if it won't play however often it's tried; and
+    /// the failure is kept for Kotlin to show with Find replacement.
+    fn watch_failures(&mut self, player: &Player, ps: &PlayerState, history: &History) {
+        let lc = linkcheck::shared();
+        let Some(failed) = self.play_watch.check(lc, ps, &self.now) else { return };
+        let skipped = failed.skip && lc.skip_failed(&mut self.now);
+        if skipped {
+            self.load_current(player, history);
+        }
+        let id = self.failure.as_ref().map_or(1, |f| f.id + 1);
+        self.failure = Some(play_failure_record(id, &failed, skipped, &self.library, &self.saved, history));
     }
 
     /// Loads the queue's current track, from its downloaded copy when there is one.
@@ -213,6 +231,7 @@ impl Inner {
             let mut st = self.engine.state();
             let changed = ctl.sync_player(&self.player, &ps, &mut st);
             ctl.follow_queue(&self.player, &ps, &st.history);
+            ctl.watch_failures(&self.player, &ps, &st.history);
             changed
         };
         ctl.library.save_if_dirty();
@@ -411,7 +430,7 @@ impl Music {
     pub fn snapshot(&self) -> PlayerSnapshotRecord {
         let ps = self.inner.player.state();
         let ctl = self.inner.ctl();
-        player_snapshot(&ps, &ctl.now, ctl.queue_version)
+        PlayerSnapshotRecord { failure: ctl.failure.clone(), ..player_snapshot(&ps, &ctl.now, ctl.queue_version) }
     }
 
     /// Now playing, in play order. Changes when `snapshot().queue_version` does.
@@ -649,6 +668,16 @@ impl Music {
             linkcheck::shared().record(&c.url, LinkStatus::Alive);
         }
         done
+    }
+
+    /// Swaps a replacement in for a song that failed to play ([`PlayFailureRecord`]): in
+    /// `playlist_id`'s playlist, found by its link, or else in every saved copy. Returns
+    /// whether the song was still there.
+    pub fn replace_failed_track(&self, track: TrackRecord, playlist_id: Option<u64>, candidate: ReplacementRecord) -> bool {
+        let Some(id) = playlist_id else { return self.replace_saved_track(track.location, candidate) };
+        let source = track.to_core().source;
+        let index = self.inner.ctl().library.get(id).and_then(|p| p.tracks.iter().position(|t| t.source == source));
+        index.is_some_and(|i| self.replace_playlist_track(id, i as u32, candidate))
     }
 
     /// "Fix unavailable": searches for each dead link in the playlist, swaps in the clear
@@ -1026,6 +1055,68 @@ pub(crate) mod tests {
 
         music.delete_playlist(id);
         music.delete_playlist(clean);
+        drop(music);
+        drop(engine);
+    }
+
+    /// Links ending in `gone` fail to look up the way YouTube's blocked uploads do; the rest
+    /// play as [`Tone`].
+    struct SomeGone;
+
+    impl Media for SomeGone {
+        fn resolve(&self, env: &Env, source: &Source) -> anyhow::Result<Resolved> {
+            match source {
+                Source::Link(u) if u.ends_with("gone") => Err(anyhow::anyhow!("Video unavailable. This video is not available")),
+                _ => Tone.resolve(env, source),
+            }
+        }
+
+        fn decode(&self, env: &Env, input: &Input, start: f64, rate: u32) -> anyhow::Result<Pcm> {
+            Tone.decode(env, input, start, rate)
+        }
+    }
+
+    #[test]
+    fn links_that_fail_to_play_are_marked_and_skipped() {
+        let _turn = one_engine_at_a_time();
+        let dir = test_dirs();
+        let engine = Engine::start(ToolPaths::default(), Arc::new(Counter::default()), Some(dir.join("converted")));
+        let capture = Capture::new(8000, 8.0);
+        let music = engine.music_with(Arc::new(Counter::default()), |wake| {
+            Player::spawn(ToolPaths::default(), Arc::new(SomeGone), capture.opener(), wake)
+        });
+        music.set_shuffle(false);
+        music.set_repeat(RepeatMode::Off);
+        let gone = TrackRecord { location: "https://www.youtube.com/watch?v=960gone".into(), ..link(960) };
+        let id = music.create_playlist("Gaps".into());
+        music.add_tracks(id, vec![link(961), gone.clone(), link(962)]);
+        assert_eq!(music.playlist(id).unwrap().tracks[1].link_status, LinkStatusRecord::Unknown);
+
+        // Played: it fails, its row says so, and the queue moves on by itself.
+        music.play_playlist(id, 1, false);
+        let s = until(&music, "the next track", |s| s.queue_index == Some(2));
+        let f = s.failure.expect("the failure, to say so");
+        assert_eq!((f.track.location.as_str(), f.skipped, f.playlist_id, f.saved), (gone.location.as_str(), true, Some(id), false));
+        assert!(f.error.contains("This video is not available"), "{}", f.error);
+        assert_eq!(music.playlist(id).unwrap().tracks[1].link_status, LinkStatusRecord::Dead);
+
+        // Find replacement puts the pick in its place.
+        let pick = ReplacementRecord {
+            url: "https://www.youtube.com/watch?v=960new".into(),
+            title: "Song 960".into(),
+            uploader: None,
+            duration_secs: Some(60.0),
+            thumbnail: None,
+            delta_secs: Some(0.0),
+            clear_match: true,
+        };
+        assert!(music.replace_failed_track(f.track.clone(), f.playlist_id, pick.clone()));
+        let t = &music.playlist(id).unwrap().tracks[1];
+        assert_eq!((t.location.as_str(), t.link_status), (pick.url.as_str(), LinkStatusRecord::Alive));
+        assert!(!music.replace_failed_track(f.track, f.playlist_id, pick), "it isn't there any more");
+
+        music.stop();
+        music.delete_playlist(id);
         drop(music);
         drop(engine);
     }

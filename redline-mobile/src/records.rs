@@ -1051,6 +1051,53 @@ pub struct PlayerSnapshotRecord {
     /// The A-B loop's markers, in seconds; it loops once both are set.
     pub loop_a_secs: Option<f64>,
     pub loop_b_secs: Option<f64>,
+    /// The last link that failed to play, until another does. Say so once per `id`.
+    pub failure: Option<PlayFailureRecord>,
+}
+
+/// A link that failed to play ([`linkcheck::FailedPlay`]), for a message with Find replacement.
+/// Its link status is already recorded, so its rows show it.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct PlayFailureRecord {
+    /// Counts the failures, so a new one can be told from the last.
+    pub id: u64,
+    pub track: TrackRecord,
+    /// The player's error.
+    pub error: String,
+    /// The queue moved on to the next track: this link won't play however often it's tried.
+    pub skipped: bool,
+    /// Where a replacement goes: this playlist (the one playing, or else the first that has
+    /// the song), found by its link...
+    pub playlist_id: Option<u64>,
+    /// ...or, with no playlist, the song's copies in Saved. Neither: nowhere to put one.
+    pub saved: bool,
+}
+
+/// The record of a link that failed to play, with where a replacement would go: the playlist
+/// playing, else the song's copies in Saved, else the first playlist that has it (as on the
+/// desktop).
+pub fn play_failure_record(
+    id: u64,
+    f: &linkcheck::FailedPlay,
+    skipped: bool,
+    library: &library::Library,
+    saved: &redline_core::saved::Saved,
+    history: &History,
+) -> PlayFailureRecord {
+    let has = |pid: u64| library.get(pid).is_some_and(|p| p.tracks.iter().any(|t| t.source == f.track.source));
+    let mut playlist_id = f.playlist.filter(|p| has(*p));
+    let in_saved = playlist_id.is_none() && f.track.is_link() && saved.contains(&f.track.key());
+    if playlist_id.is_none() && !in_saved {
+        playlist_id = library.playlists.iter().map(|p| p.id).find(|p| has(*p));
+    }
+    PlayFailureRecord {
+        id,
+        track: track_record(&f.track, history),
+        error: f.error.clone(),
+        skipped,
+        playlist_id,
+        saved: in_saved,
+    }
 }
 
 pub fn player_snapshot(st: &PlayerState, now: &NowPlaying, queue_version: u64) -> PlayerSnapshotRecord {
@@ -1105,6 +1152,7 @@ pub fn player_snapshot(st: &PlayerState, now: &NowPlaying, queue_version: u64) -
         queue_version,
         loop_a_secs: st.ab_loop.a,
         loop_b_secs: st.ab_loop.b,
+        failure: None,
     }
 }
 

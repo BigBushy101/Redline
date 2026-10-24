@@ -5,6 +5,7 @@ import app.redline.RedlineEngine
 import app.redline.core.EqRecord
 import app.redline.core.Music
 import app.redline.core.MusicListener
+import app.redline.core.PlayFailureRecord
 import app.redline.core.PlayerChoicesRecord
 import app.redline.core.PlayerSettingsRecord
 import app.redline.core.PlayerSnapshotRecord
@@ -20,8 +21,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,6 +79,11 @@ class MusicState(private val app: Application, val music: Music) {
     /** The platforms with something saved, for the Saved overview. */
     val savedOverview: StateFlow<SavedOverviewRecord?> = _savedOverview.asStateFlow()
 
+    private val _failures = MutableSharedFlow<PlayFailureRecord>(extraBufferCapacity = 4)
+    /** Each link that fails to play, once; the core has already marked it and moved on. */
+    val failures: SharedFlow<PlayFailureRecord> = _failures.asSharedFlow()
+    private var lastFailure: ULong? = null
+
     /**
      * The playlists and collections "Fix unavailable" already ran on by itself this session
      * (the auto-replace setting), so opening one again doesn't search again.
@@ -127,6 +136,12 @@ class MusicState(private val app: Application, val music: Music) {
             _savedVersion.value = saved.version
         }
         _snapshot.value = snap
+        snap.failure?.let { f ->
+            if (f.id != lastFailure) {
+                lastFailure = f.id
+                _failures.tryEmit(f)
+            }
+        }
         if (queue != null) {
             _queue.value = queue
             queueVersion = snap.queueVersion
