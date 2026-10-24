@@ -576,3 +576,57 @@ fn skipping_to_a_link_being_looked_up_ahead_waits_for_that_look_up() {
     assert_eq!(s.track.unwrap().title, "Tone https://youtu.be/b");
     assert_eq!(*media.resolves.lock().unwrap(), 1, "looked up once");
 }
+
+fn link() -> Source {
+    Source::Link("https://youtu.be/x".into())
+}
+
+#[test]
+fn ab_loop_on_a_link_plays_from_its_kept_audio() {
+    let capture = Capture::new(RATE, 8.0);
+    let tone = Tone::new(3.0);
+    let p = player(tone.clone(), &capture);
+    p.send(Command::Load(link(), 0.0));
+    wait_for(&p, "playing", |s| s.status == Status::Playing && s.position > 1.1);
+    p.send(Command::SetLoopA(0.5));
+    p.send(Command::SetLoopB(1.0));
+    // Round the loop a few times: back near A after getting near B.
+    let mut laps = 0;
+    let mut near_b = false;
+    let start = Instant::now();
+    while laps < 3 {
+        let s = p.state();
+        assert_ne!(s.status, Status::Ended, "looped instead of ending");
+        if s.position > 0.9 {
+            near_b = true;
+        } else if near_b && s.position < 0.7 {
+            near_b = false;
+            laps += 1;
+        }
+        assert!(start.elapsed() < Duration::from_secs(10), "didn't loop: {s:?}");
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(*tone.starts.lock().unwrap(), vec![0.0], "decoded once");
+    assert!(loud_frames(&capture) > 0);
+}
+
+#[test]
+fn repeating_a_link_plays_it_again_from_its_kept_audio_until_another_track_loads() {
+    let capture = Capture::new(RATE, 8.0);
+    let tone = Tone::new(1.0);
+    let p = player(tone.clone(), &capture);
+    p.send(Command::Load(link(), 0.0));
+    p.send(Command::SetNext(Some(link())));
+    wait_for(&p, "repeated", |s| s.advances == 1);
+    wait_for(&p, "end", |s| s.status == Status::Ended);
+    // And seeking back into it.
+    p.send(Command::Seek(0.25));
+    wait_for(&p, "end again", |s| s.status == Status::Ended && s.position == 1.0);
+    assert_eq!(*tone.starts.lock().unwrap(), vec![0.0], "decoded once");
+
+    p.send(Command::Load(Source::Link("https://youtu.be/y".into()), 0.0));
+    wait_for(&p, "other ended", |s| s.status == Status::Ended && s.load_id == 3);
+    p.send(Command::Load(link(), 0.0));
+    wait_for(&p, "back", |s| s.status == Status::Ended && s.load_id == 4);
+    assert_eq!(tone.starts.lock().unwrap().len(), 3, "dropped when the track changed");
+}
