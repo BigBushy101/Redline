@@ -8,7 +8,8 @@
 //! Links are resolved to a stream URL with yt-dlp when they're played, never earlier: the
 //! URLs expire after a few hours. The one queued next is looked up (and its URL warmed) while
 //! the current track plays, so it starts without waiting on yt-dlp; if that look-up fails,
-//! [`PlayerState::next_failed`] says so before the track's turn.
+//! [`PlayerState::next_failed`] says so before the track's turn. Skipping to it while it's
+//! still being looked up waits for that answer rather than running yt-dlp again.
 
 pub mod ab_loop;
 #[cfg(target_os = "android")]
@@ -307,6 +308,7 @@ impl Player {
                     want_play: false,
                     next: None,
                     prefetching: None,
+                    in_flight: None,
                     prefetch_error: None,
                     last_wake: Instant::now(),
                     lost_at: None,
@@ -366,6 +368,9 @@ struct Current {
     resolved: Option<Resolved>,
     /// Where to start once resolved.
     start_at: f64,
+    /// Loaded while its look-up ahead of time was running, so it waits for that answer
+    /// instead of starting yt-dlp a second time.
+    awaits_prefetch: bool,
     stream: Option<ActiveStream>,
 }
 
@@ -400,6 +405,8 @@ struct Engine {
     /// The next link being looked up ahead of time. Kept after a failure so it isn't tried
     /// over and over; playing it shows the error.
     prefetching: Option<String>,
+    /// The link a look-up ahead of time is running for right now, and its network settings.
+    in_flight: Option<(String, NetworkOptions)>,
     /// The link whose look-up ahead of time failed, and the error.
     prefetch_error: Option<(String, String)>,
     last_wake: Instant,
@@ -518,6 +525,24 @@ impl Engine {
                 if self.prefetching.as_ref() == Some(&url) && result.is_ok() {
                     self.prefetching = None;
                 }
+                if self.in_flight.as_ref().is_some_and(|(u, _)| *u == url) {
+                    self.in_flight = None;
+                }
+                // Skipped to while it was being looked up: this is its answer.
+                if let Some(cur) = self
+                    .current
+                    .as_mut()
+                    .filter(|c| c.awaits_prefetch && c.source == Source::Link(url.clone()))
+                {
+                    cur.awaits_prefetch = false;
+                    let (source, load_id) = (cur.source.clone(), cur.load_id);
+                    if network == self.env.network {
+                        self.handle(Msg::Resolved(load_id, result));
+                    } else {
+                        self.resolve(source, load_id);
+                    }
+                    return;
+                }
                 // The queue or the cookies may have changed while it was looked up.
                 let wanted = self.next.as_ref() == Some(&Source::Link(url.clone())) && network == self.env.network;
                 match (wanted, result) {
@@ -628,6 +653,7 @@ impl Engine {
             retry_at: None,
             resolved: None,
             start_at,
+            awaits_prefetch: false,
             stream: None,
         });
         // A link whose look-up ahead of time already failed for good (it's gone, or private)
@@ -645,8 +671,18 @@ impl Engine {
             Source::Link(url) => self.cached(url),
             Source::Local(_) => None,
         };
+        let in_flight = match &source {
+            Source::Link(url) => self.in_flight.as_ref().is_some_and(|(u, n)| u == url && *n == self.env.network),
+            Source::Local(_) => false,
+        };
         match cached {
             Some(r) => self.handle(Msg::Resolved(load_id, Ok(r))),
+            // Its look-up ahead of time answers when it's done (Msg::Prefetched).
+            None if in_flight => {
+                if let Some(cur) = self.current.as_mut() {
+                    cur.awaits_prefetch = true;
+                }
+            }
             None => self.resolve(source, load_id),
         }
     }
@@ -666,14 +702,17 @@ impl Engine {
             return;
         }
         self.prefetching = Some(url.clone());
+        self.in_flight = Some((url.clone(), self.env.network.clone()));
         let (media, env, tx, rate) = (self.media.clone(), self.env.clone(), self.tx.clone(), self.rate);
         let (url, source) = (url.clone(), Source::Link(url.clone()));
         thread::spawn(move || {
             let result = media.resolve(&env, &source).map_err(|e| format!("{e:#}"));
-            if let Ok(r) = &result {
-                warm(media.as_ref(), &env, &r.input, rate);
+            let input = result.as_ref().ok().map(|r| r.input.clone());
+            // Handed over before the warming, so skipping to it now needn't wait for that.
+            let _ = tx.send(Msg::Prefetched(url, env.network.clone(), result));
+            if let Some(input) = input {
+                warm(media.as_ref(), &env, &input, rate);
             }
-            let _ = tx.send(Msg::Prefetched(url, env.network, result));
         });
     }
 
@@ -715,6 +754,7 @@ impl Engine {
         }
         self.links.remove(url);
         cur.refreshed = true;
+        cur.awaits_prefetch = false;
         cur.refusals = 0;
         cur.resolved = None;
         cur.start_at = pos;

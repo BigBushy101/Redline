@@ -1,5 +1,6 @@
 //! First-run download of yt-dlp, ffmpeg/ffprobe and deno into the app's bin folder. Not on
-//! Android, where the tools come in the APK; updating yt-dlp works everywhere.
+//! Android, where the tools come in the APK; updating yt-dlp works everywhere, and Android's
+//! yt-dlp zipapp is unpacked so it starts faster.
 
 #[cfg(not(target_os = "android"))]
 use std::fs::{self, File};
@@ -275,12 +276,94 @@ fn update_script(tools: &ToolPaths) -> Result<String> {
         });
     match result {
         Ok(last) => {
-            std::fs::rename(&copy, script)?;
+            // Already up to date: keep the original, and with it the unpacked copy and the
+            // bytecode cached there (a new file, even the same bytes, would be unpacked again).
+            if same_contents(&copy, script) {
+                let _ = std::fs::remove_file(&copy);
+            } else {
+                std::fs::rename(&copy, script)?;
+                // Until this is done the new script runs as it is, only slower.
+                let _ = unpack_ytdlp(tools);
+            }
             Ok(last)
         }
         Err(e) => {
             let _ = std::fs::remove_file(&copy);
             Err(e)
+        }
+    }
+}
+
+fn same_contents(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let len = |p| std::fs::metadata(p).map(|m| m.len()).ok();
+    len(a).is_some() && len(a) == len(b) && std::fs::read(a).ok() == std::fs::read(b).ok()
+}
+
+/// Where the zipapp at `script` is unpacked: a folder beside it, named for the script's size
+/// and modification time, so a replaced script is never mistaken for the one unpacked there.
+fn unpacked_dir(script: &std::path::Path, meta: &std::fs::Metadata) -> Option<std::path::PathBuf> {
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(unpacked_root(script).join(format!("{}-{}", meta.len(), modified.as_nanos())))
+}
+
+fn unpacked_root(script: &std::path::Path) -> std::path::PathBuf {
+    let mut root = script.as_os_str().to_owned();
+    root.push(".unpacked");
+    root.into()
+}
+
+/// The unpacked copy of the zipapp at `script` to run instead of it, if it's there and
+/// matches the script.
+pub(crate) fn unpacked_main(script: &std::path::Path) -> Option<std::path::PathBuf> {
+    let main = unpacked_dir(script, &std::fs::metadata(script).ok()?)?.join("__main__.py");
+    main.is_file().then_some(main)
+}
+
+/// Python keeps no compiled bytecode for what it imports from a zip, so every run of the
+/// zipapp (Android's yt-dlp) compiled yt-dlp from source again: seconds on a phone, before
+/// every song played and every link looked up. This unpacks the script into a folder beside
+/// it, where Python caches the bytecode on the first run; [`ToolPaths::ytdlp_command`] runs
+/// that copy from then on. Does nothing for a yt-dlp that runs by itself.
+pub fn unpack_ytdlp(tools: &ToolPaths) -> Result<()> {
+    let (Some(_), Some(script)) = (&tools.ytdlp_launcher, &tools.ytdlp) else { return Ok(()) };
+    let file = std::fs::File::open(script)?;
+    // Named for the file that's open, which a `yt-dlp -U` meanwhile can't change.
+    let Some(dest) = unpacked_dir(script, &file.metadata()?) else { bail!("no modification time") };
+    if dest.join("__main__.py").is_file() {
+        return Ok(());
+    }
+    // Unpacked aside and moved into place whole, so a half-unpacked copy is never run.
+    static PART: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut part = dest.clone().into_os_string();
+    part.push(format!(".part{}-{n}", std::process::id()));
+    let part = std::path::PathBuf::from(part);
+    let result = (|| {
+        std::fs::create_dir_all(&part)?;
+        zip::ZipArchive::new(file)?.extract(&part)?;
+        if !part.join("__main__.py").is_file() {
+            bail!("{} isn't a zipapp", script.display());
+        }
+        match std::fs::rename(&part, &dest) {
+            // Another thread got there first.
+            Err(_) if dest.join("__main__.py").is_file() => {}
+            r => r?,
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&part);
+    result
+}
+
+/// Removes copies [`unpack_ytdlp`] made of scripts since replaced. Only call it before any
+/// yt-dlp has started: one may be running from an old copy.
+pub fn remove_stale_unpacked(tools: &ToolPaths) {
+    let (Some(_), Some(script)) = (&tools.ytdlp_launcher, &tools.ytdlp) else { return };
+    let current = std::fs::metadata(script).ok().and_then(|m| unpacked_dir(script, &m));
+    let Ok(entries) = std::fs::read_dir(unpacked_root(script)) else { return };
+    for entry in entries.flatten() {
+        if Some(entry.path()) != current {
+            let _ = std::fs::remove_dir_all(entry.path());
         }
     }
 }
@@ -310,4 +393,89 @@ fn last_line(out: std::process::Output) -> Result<String> {
 pub fn ytdlp_version(tools: &ToolPaths) -> Option<String> {
     let out = tools.ytdlp_command().ok()?.arg("--version").output().ok()?;
     Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()).filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    /// A zipapp like yt-dlp's: a shebang line, then a zip with `__main__.py` at its root.
+    fn write_zipapp(path: &std::path::Path, body: &str) {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("__main__.py", opts).unwrap();
+        zip.write_all(b"import pkg\n").unwrap();
+        zip.start_file("pkg/__init__.py", opts).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+        let mut bytes = b"#!/usr/bin/env python3\n".to_vec();
+        bytes.extend(zip.finish().unwrap().into_inner());
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn script_arg(tools: &ToolPaths) -> PathBuf {
+        tools.ytdlp_command().unwrap().get_args().next().unwrap().into()
+    }
+
+    #[test]
+    fn zipapp_runs_from_its_unpacked_copy_while_that_matches() {
+        let dir = std::env::temp_dir().join(format!("redline-unpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("yt-dlp");
+        write_zipapp(&script, "print('one')\n");
+        let tools = ToolPaths {
+            ytdlp: Some(script.clone()),
+            ytdlp_launcher: Some(PathBuf::from("python3")),
+            ..Default::default()
+        };
+        assert_eq!(script_arg(&tools), script, "the script itself until it's unpacked");
+
+        unpack_ytdlp(&tools).unwrap();
+        let main = script_arg(&tools);
+        assert_ne!(main, script);
+        assert!(main.ends_with("__main__.py"), "{}", main.display());
+        assert_eq!(std::fs::read_to_string(main.with_file_name("pkg").join("__init__.py")).unwrap(), "print('one')\n");
+        unpack_ytdlp(&tools).unwrap();
+        assert_eq!(script_arg(&tools), main, "unpacked once");
+
+        // Replaced (by an update): the new script runs as it is until it's unpacked too, and
+        // the old copy stays until the next start.
+        write_zipapp(&script, "print('two, longer')\n");
+        assert_eq!(script_arg(&tools), script);
+        unpack_ytdlp(&tools).unwrap();
+        let new_main = script_arg(&tools);
+        assert_ne!(new_main, main);
+        assert!(main.is_file());
+        remove_stale_unpacked(&tools);
+        assert!(!main.exists() && new_main.is_file());
+        let leftovers: Vec<_> = std::fs::read_dir(unpacked_root(&script)).unwrap().collect();
+        assert_eq!(leftovers.len(), 1, "no parts left behind");
+
+        // Not a zipapp: nothing to run instead.
+        std::fs::write(&script, b"not a zip").unwrap();
+        assert!(unpack_ytdlp(&tools).is_err());
+        assert_eq!(script_arg(&tools), script);
+
+        // A yt-dlp that runs by itself is left as it is.
+        let plain = ToolPaths { ytdlp_launcher: None, ..tools.clone() };
+        unpack_ytdlp(&plain).unwrap();
+        assert_eq!(plain.ytdlp_command().unwrap().get_program(), script.as_os_str());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn same_contents_compares_bytes() {
+        let dir = std::env::temp_dir().join(format!("redline-same-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        std::fs::write(&a, b"abc").unwrap();
+        std::fs::write(&b, b"abc").unwrap();
+        std::fs::write(&c, b"abd").unwrap();
+        assert!(same_contents(&a, &b));
+        assert!(!same_contents(&a, &c));
+        assert!(!same_contents(&a, &dir.join("missing")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

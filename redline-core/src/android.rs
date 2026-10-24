@@ -54,7 +54,12 @@ pub fn init(paths: AndroidPaths) -> Result<ToolPaths> {
     link_tool(&paths.ffprobe, &bin.join(exe_name("ffprobe")))?;
 
     tools::set_bundled(bundled_tools(&paths, &bin))?;
-    Ok(ToolPaths::locate(&Settings::load()))
+    let tools = ToolPaths::locate(&Settings::load());
+    // Nothing has run yt-dlp yet, so copies of older scripts can go now.
+    tools::install::remove_stale_unpacked(&tools);
+    let unpack = tools.clone();
+    std::thread::spawn(move || tools::install::unpack_ytdlp(&unpack));
+    Ok(tools)
 }
 
 /// The APK's tools as [`ToolPaths::locate`] should see them, with ffmpeg and ffprobe through

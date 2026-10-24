@@ -113,7 +113,8 @@ impl ToolPaths {
         Ok(match &self.ytdlp_launcher {
             Some(launcher) => {
                 let mut cmd = command(launcher);
-                cmd.arg(ytdlp);
+                // The unpacked copy starts faster (see install::unpack_ytdlp).
+                cmd.arg(install::unpacked_main(ytdlp).unwrap_or_else(|| ytdlp.clone()));
                 cmd
             }
             None => command(ytdlp),
