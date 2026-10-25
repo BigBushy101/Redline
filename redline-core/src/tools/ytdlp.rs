@@ -602,18 +602,20 @@ pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<
 fn run_json(mut cmd: std::process::Command) -> Result<Vec<u8>> {
     let out = cmd.output().context("failed to run yt-dlp")?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let line = err
-            .lines()
-            .rev()
-            .find(|l| l.starts_with("ERROR:"))
-            .or_else(|| err.lines().rev().find(|l| !l.trim().is_empty()))
-            .unwrap_or("yt-dlp failed")
-            .trim_start_matches("ERROR:")
-            .trim();
-        bail!("{}", friendly_error(line));
+        bail!("{}", friendly_error(error_line(&String::from_utf8_lossy(&out.stderr))));
     }
     Ok(out.stdout)
+}
+
+/// The line of yt-dlp's error output that says what went wrong, without its `ERROR:`.
+fn error_line(err: &str) -> &str {
+    err.lines()
+        .rev()
+        .find(|l| l.starts_with("ERROR:"))
+        .or_else(|| err.lines().rev().find(|l| !l.trim().is_empty()))
+        .unwrap_or("yt-dlp failed")
+        .trim_start_matches("ERROR:")
+        .trim()
 }
 
 /// A direct audio stream for a page URL, valid for a few hours at most.
@@ -629,11 +631,22 @@ pub struct StreamInfo {
     pub thumbnail: Option<String>,
 }
 
-/// `yt-dlp -J -f bestaudio/best --no-playlist URL`: the stream to play `url` from.
+/// `yt-dlp -J -f bestaudio/best --no-playlist URL`: the stream to play `url` from. Asked of a
+/// yt-dlp kept running for it (see [`super::ytdlp_worker`]) when one can be, as songs are
+/// looked up one after another.
 pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
+    const ARGS: [&str; 4] = ["-J", "-f", "bestaudio/best", "--no-playlist"];
     let mut cmd = base_command(tools, net)?;
-    cmd.args(["-J", "-f", "bestaudio/best", "--no-playlist", "--", url]);
-    parse_stream(&run_json(cmd)?)
+    cmd.args(ARGS);
+    match super::ytdlp_worker::extract(cmd, url) {
+        Some(Ok(info)) => stream_info(serde_json::from_value(info).context("unexpected yt-dlp output")?),
+        Some(Err(e)) => bail!("{}", friendly_error(error_line(&e))),
+        None => {
+            let mut cmd = base_command(tools, net)?;
+            cmd.args(ARGS).args(["--", url]);
+            parse_stream(&run_json(cmd)?)
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -656,7 +669,10 @@ struct RawStream {
 }
 
 fn parse_stream(json: &[u8]) -> Result<StreamInfo> {
-    let mut raw: RawStream = serde_json::from_slice(json).context("unexpected yt-dlp output")?;
+    stream_info(serde_json::from_slice(json).context("unexpected yt-dlp output")?)
+}
+
+fn stream_info(mut raw: RawStream) -> Result<StreamInfo> {
     // A merged pick lists its parts; the audio one is last.
     if raw.url.is_none()
         && let Some(part) = raw.requested_formats.pop()
@@ -1228,7 +1244,7 @@ mod tests {
 
     #[test]
     fn bot_check_error_leads_with_plain_words() {
-        // As yt-dlp words it, after run_json drops the `ERROR:`.
+        // As yt-dlp words it, after error_line drops the `ERROR:`.
         let raw = "[youtube] 6ueeeG0TBjs: Sign in to confirm you\u{2019}re not a bot. Use --cookies-from-browser \
                    or --cookies for the authentication. See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp  \
                    for how to manually pass cookies.";

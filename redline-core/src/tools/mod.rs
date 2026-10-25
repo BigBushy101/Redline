@@ -9,6 +9,7 @@ pub mod hwaccel;
 pub mod image_conv;
 pub mod install;
 pub mod ytdlp;
+mod ytdlp_worker;
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};

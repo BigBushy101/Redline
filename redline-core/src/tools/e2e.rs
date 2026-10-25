@@ -582,3 +582,31 @@ fn soundcloud_set_tracks_get_readable_titles() {
     let known = ytdlp::fetch_titled(&tools, &net, url, &|_| true).unwrap();
     assert!(known.items.iter().filter(|i| i.title == i.url).count() > 0);
 }
+
+/// Songs after the first are looked up by the same running yt-dlp, and its errors still read
+/// like yt-dlp's own.
+#[test]
+#[ignore]
+fn stream_lookups_reuse_a_worker() {
+    let tools = ensure_tools();
+    let net = ytdlp::NetworkOptions::default();
+    let mut workers = Vec::new();
+    for id in ["9bZkp7q19f0", "OPf0YbXqDm0"] {
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        let start = Instant::now();
+        let s = ytdlp::resolve_stream(&tools, &net, &url).unwrap();
+        println!("{id}: {:?} in {:?}", s.title, start.elapsed());
+        assert!(s.url.starts_with("http") && s.duration.is_some(), "{s:?}");
+        workers.push(ytdlp_worker::idle_pids());
+    }
+    assert_eq!(workers[0].len(), 1, "{workers:?}");
+    assert_eq!(workers[0], workers[1], "the second look-up started another yt-dlp");
+
+    let start = Instant::now();
+    let bogus = "https://www.youtube.com/watch?v=xxxxxxxxxxx";
+    let e = ytdlp::resolve_stream(&tools, &net, bogus).unwrap_err().to_string();
+    println!("bogus: {e} in {:?}", start.elapsed());
+    // Without its `ERROR:` or color codes, like one-shot yt-dlp's.
+    assert!(e.contains("unavailable") && !e.contains("ERROR:") && !e.contains('\u{1b}'), "{e}");
+    assert_eq!(ytdlp_worker::idle_pids(), workers[0], "an error shouldn't cost the worker");
+}
