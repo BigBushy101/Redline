@@ -75,6 +75,15 @@ pub fn set_child_env(vars: Vec<(String, String)>) -> Result<()> {
     Ok(())
 }
 
+/// Where scratch files go: the tools' `TMPDIR` if one was set (Android's cache folder, since
+/// its default isn't writable by apps), else the system's.
+pub fn temp_dir() -> PathBuf {
+    CHILD_ENV
+        .get()
+        .and_then(|vars| vars.iter().find(|(k, _)| k == "TMPDIR"))
+        .map_or_else(std::env::temp_dir, |(_, v)| PathBuf::from(v))
+}
+
 impl ToolPaths {
     pub fn locate(s: &Settings) -> Self {
         Self::locate_with(s, BUNDLED.get())

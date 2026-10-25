@@ -10,10 +10,14 @@
 //! the current track plays, so it starts without waiting on yt-dlp; if that look-up fails,
 //! [`PlayerState::next_failed`] says so before the track's turn. Skipping to it while it's
 //! still being looked up waits for that answer rather than running yt-dlp again.
+//!
+//! A link's audio is kept on disk while it's the current track ([`cache`]), so A-B loops,
+//! repeat one and seeking back play from there instead of opening the stream again.
 
 pub mod ab_loop;
 #[cfg(target_os = "android")]
 mod aaudio;
+mod cache;
 pub mod decode;
 pub mod dsp;
 pub mod output;
@@ -37,6 +41,7 @@ use crate::tools::ToolPaths;
 use crate::tools::ytdlp::{self, NetworkOptions};
 use decode::{Input, Pcm};
 use output::{OpenOutput, Output};
+use cache::TrackCache;
 use render::{RenderMsg, Renderer, Shared, Stream};
 
 /// What to play.
@@ -294,6 +299,7 @@ impl Player {
                         network: NetworkOptions::default(),
                     },
                     links: HashMap::new(),
+                    cache: None,
                     open_output,
                     output: None,
                     render_tx: None,
@@ -387,6 +393,8 @@ struct Engine {
     env: Env,
     /// Resolved links and when, so replays and seeks skip yt-dlp.
     links: HashMap<String, (Resolved, Instant)>,
+    /// The current link's decoded audio, until another track loads.
+    cache: Option<TrackCache>,
     open_output: OpenOutput,
     output: Option<Box<dyn Output>>,
     render_tx: Option<rtrb::Producer<RenderMsg>>,
@@ -514,7 +522,11 @@ impl Engine {
                     .as_ref()
                     .and_then(|c| c.stream.as_ref())
                     .is_some_and(|s| s.id == id);
-                if let (true, Err(e)) = (current, result)
+                if current && self.cache.as_ref().is_some_and(TrackCache::is_broken) {
+                    // Carry on straight from the stream (track_cache won't hand it out again).
+                    let pos = self.state.lock().unwrap().position;
+                    self.start_stream(pos);
+                } else if let (true, Err(e)) = (current, result)
                     && !self.retry_refused(id, &e)
                     && !self.refresh_link(&e)
                 {
@@ -589,6 +601,7 @@ impl Engine {
             Command::Stop => {
                 self.stop_stream();
                 self.current = None;
+                self.cache = None;
                 self.next = None;
                 self.want_play = false;
                 self.shared.playing.store(false, Ordering::Relaxed);
@@ -629,6 +642,10 @@ impl Engine {
 
     fn load(&mut self, source: Source, start_at: f64) {
         self.stop_stream();
+        // Another track: its audio won't be needed again. The same one (repeat one) keeps it.
+        if self.cache.as_ref().is_some_and(|c| c.source != source) {
+            self.cache = None;
+        }
         self.load_id += 1;
         let load_id = self.load_id;
         self.want_play = true;
@@ -688,9 +705,12 @@ impl Engine {
     }
 
     fn cached(&self, url: &str) -> Option<Resolved> {
+        // Kept past its time while its audio is: a stale URL only matters if more of the
+        // track needs decoding, and an expired one gets looked up again then (refresh_link).
+        let kept = self.cache.as_ref().is_some_and(|c| c.source == Source::Link(url.to_owned()));
         self.links
             .get(url)
-            .filter(|(_, at)| at.elapsed() < LINK_TTL)
+            .filter(|(_, at)| kept || at.elapsed() < LINK_TTL)
             .map(|(r, _)| r.clone())
     }
 
@@ -859,7 +879,12 @@ impl Engine {
         else {
             return;
         };
-        let pcm = match self.media.decode(&self.env, &input, pos, self.rate) {
+        let (media, env, rate) = (self.media.clone(), self.env.clone(), self.rate);
+        let pcm = match self.track_cache() {
+            Some(cache) => Ok(cache.reader(pos, Arc::new(move |start| media.decode(&env, &input, start, rate)))),
+            None => self.media.decode(&self.env, &input, pos, self.rate),
+        };
+        let pcm = match pcm {
             Ok(p) => p,
             Err(e) => {
                 self.fail(format!("{e:#}"));
@@ -899,6 +924,24 @@ impl Engine {
                 kill: Arc::from(kill),
             });
         }
+    }
+
+    /// The cache for the current track, made if it's a link of a known, not too long
+    /// duration (a live stream has none).
+    fn track_cache(&mut self) -> Option<&TrackCache> {
+        let cur = self.current.as_ref()?;
+        let fits = self.cache.as_ref().is_some_and(|c| c.source == cur.source && c.rate == self.rate);
+        if !fits {
+            let duration = cur.resolved.as_ref().and_then(|r| r.info.duration);
+            let wanted = matches!(cur.source, Source::Link(_)) && duration.is_some_and(|d| d <= cache::MAX_SECS);
+            self.cache = None;
+            if wanted {
+                self.cache = TrackCache::new(cur.source.clone(), self.rate, &crate::tools::temp_dir());
+            }
+        }
+        // One that couldn't be written to (a full disk) stays, so this track streams
+        // directly from then on rather than trying a new file each time.
+        self.cache.as_ref().filter(|c| !c.is_broken())
     }
 
     fn fail(&mut self, msg: String) {
