@@ -592,11 +592,23 @@ pub(crate) fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<st
 
 /// `yt-dlp -J --flat-playlist URL`, parsed into the bits the UI shows.
 pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<MediaInfo> {
-    let mut cmd = base_command(tools, net)?;
-    cmd.args(["-J", "--flat-playlist", "--", url]);
-    let info = parse_info(&run_json(cmd)?)?;
+    let info = parse_info(&run_json(info_command(tools, net, url)?)?)?;
     crate::linkcheck::shared().record_listing(&info.items);
     Ok(info)
+}
+
+/// The yt-dlp run behind fetch_info.
+fn info_command(
+    tools: &ToolPaths,
+    net: &NetworkOptions,
+    url: &str,
+) -> Result<std::process::Command> {
+    let mut cmd = base_command(tools, net)?;
+    // The same clients the stream look-up asks for: the default one costs a player download
+    // and a JS challenge just to list a video's formats, which is the slow part on a phone.
+    cmd.args(["--extractor-args", YOUTUBE_CLIENTS])
+        .args(["-J", "--flat-playlist", "--", url]);
+    Ok(cmd)
 }
 
 /// Runs a yt-dlp `-J` command and returns its JSON, or its error made readable.
@@ -632,17 +644,17 @@ pub struct StreamInfo {
     pub thumbnail: Option<String>,
 }
 
-/// The YouTube clients stream look-ups ask for. yt-dlp's default asks for a client whose
-/// formats cost a player download and a JS challenge solve, which is seconds of QuickJS on
-/// Android for no better audio; these hand out the same audio-only formats without it, and
-/// the next two are there for videos the first can't see. Other sites ignore the setting.
-const YOUTUBE_STREAM_CLIENTS: &str = "youtube:player_client=visionos,android_vr,web";
+/// The YouTube clients look-ups ask for. yt-dlp's default asks for a client whose formats cost
+/// a player download and a JS challenge solve, which is seconds of QuickJS on Android for no
+/// better audio or metadata; these hand out the same formats without it, and the next two are
+/// there for videos the first can't see. Other sites ignore the setting.
+const YOUTUBE_CLIENTS: &str = "youtube:player_client=visionos,android_vr,web";
 
 /// The yt-dlp run that finds a link's stream: one JSON look-up of its best audio.
 fn stream_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process::Command> {
     const ARGS: [&str; 4] = ["-J", "-f", "bestaudio/best", "--no-playlist"];
     let mut cmd = base_command(tools, net)?;
-    cmd.args(["--extractor-args", YOUTUBE_STREAM_CLIENTS]).args(ARGS);
+    cmd.args(["--extractor-args", YOUTUBE_CLIENTS]).args(ARGS);
     Ok(cmd)
 }
 
@@ -1367,10 +1379,22 @@ mod tests {
         let cmd = stream_command(&tools, &NetworkOptions::default()).unwrap();
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(
-            args.windows(2).any(|w| w[0] == "--extractor-args" && w[1] == YOUTUBE_STREAM_CLIENTS),
+            args.windows(2).any(|w| w[0] == "--extractor-args" && w[1] == YOUTUBE_CLIENTS),
             "{args:?}"
         );
         assert!(args.contains(&"-J".to_string()) && args.contains(&"bestaudio/best".to_string()));
+    }
+
+    #[test]
+    fn info_lookups_skip_youtube_js_challenges() {
+        let tools = ToolPaths { ytdlp: Some(PathBuf::from("yt-dlp")), ..Default::default() };
+        let cmd = info_command(&tools, &NetworkOptions::default(), "https://youtu.be/x").unwrap();
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(
+            args.windows(2).any(|w| w[0] == "--extractor-args" && w[1] == YOUTUBE_CLIENTS),
+            "{args:?}"
+        );
+        assert!(args.contains(&"-J".to_string()) && args.contains(&"--flat-playlist".to_string()));
     }
 
     #[test]
