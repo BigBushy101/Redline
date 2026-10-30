@@ -610,3 +610,28 @@ fn stream_lookups_reuse_a_worker() {
     assert!(e.contains("unavailable") && !e.contains("ERROR:") && !e.contains('\u{1b}'), "{e}");
     assert_eq!(ytdlp_worker::idle_pids(), workers[0], "an error shouldn't cost the worker");
 }
+
+/// Warming starts the worker before the first song, so that look-up only pays for the
+/// extraction itself: the app's startup hides Python and yt-dlp starting.
+#[test]
+#[ignore]
+fn warming_starts_the_worker_before_the_first_lookup() {
+    let tools = ensure_tools();
+    // A worker of its own, so another test's idle one can't make this pass without warming.
+    let mut net = ytdlp::NetworkOptions::default();
+    net.retries = 7;
+    let before = ytdlp_worker::idle_pids().len();
+    ytdlp::warm_stream_worker(tools.clone(), net.clone());
+    let start = Instant::now();
+    while ytdlp_worker::idle_pids().len() <= before {
+        assert!(start.elapsed() < Duration::from_secs(60), "the worker didn't start");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    println!("warm after {:?}", start.elapsed());
+    let warmed = ytdlp_worker::idle_pids();
+    let looked_up = Instant::now();
+    let s = ytdlp::resolve_stream(&tools, &net, "https://www.youtube.com/watch?v=jNQXAC9IVRw").unwrap();
+    println!("first look-up {:?}: {:?}", looked_up.elapsed(), s.title);
+    assert!(s.url.starts_with("http") && s.duration.is_some(), "{s:?}");
+    assert_eq!(ytdlp_worker::idle_pids(), warmed, "the first look-up started another yt-dlp");
+}

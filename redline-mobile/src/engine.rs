@@ -270,7 +270,14 @@ impl Engine {
     #[uniffi::constructor]
     pub fn new(paths: AndroidPathsRecord, listener: Arc<dyn EngineListener>) -> Result<Arc<Self>, RedlineError> {
         let tools = init(&paths).map_err(|e| RedlineError::Invalid(format!("{e:#}")))?;
-        Ok(Self::start(tools, listener, Some(PathBuf::from(&paths.convert_dir))))
+        let engine = Self::start(tools, listener, Some(PathBuf::from(&paths.convert_dir)));
+        // Warm yt-dlp now: Python, yt-dlp and its extractors starting are most of the wait
+        // before a first song, and the app is still drawing its first screen.
+        {
+            let st = engine.state();
+            ytdlp::warm_stream_worker(st.tools.clone(), st.settings.network.clone());
+        }
+        Ok(engine)
     }
 
     /// Which tools Redline found and their readiness. Blocks while `yt-dlp --version` runs.
@@ -282,11 +289,17 @@ impl Engine {
 
     /// `yt-dlp -U`; returns its last line. Blocks for as long as the update takes.
     pub fn update_ytdlp(&self) -> Result<String, RedlineError> {
-        let tools = self.state().tools.clone();
+        let (tools, net) = {
+            let st = self.state();
+            (st.tools.clone(), st.settings.network.clone())
+        };
         if tools.ytdlp.is_none() {
             return Err(RedlineError::ToolsMissing("yt-dlp is not installed.".into()));
         }
-        install::update_ytdlp(&tools).map_err(RedlineError::failed)
+        let result = install::update_ytdlp(&tools).map_err(RedlineError::failed)?;
+        // The update retired the old worker; start one from the new script now.
+        ytdlp::warm_stream_worker(tools, net);
+        Ok(result)
     }
 
     /// Looks up a link (title, formats, playlist entries). Blocks while yt-dlp runs. The
@@ -482,7 +495,18 @@ impl Engine {
 
     /// Writes back the fields [`SettingsRecord`] covers; saved on the queue thread.
     pub fn set_settings(&self, settings: SettingsRecord) {
-        self.change(|st| apply_settings(&settings, &mut st.settings));
+        let warm = {
+            let mut st = self.state();
+            let before = st.settings.network.clone();
+            apply_settings(&settings, &mut st.settings);
+            (st.settings.network != before).then(|| (st.tools.clone(), st.settings.network.clone()))
+        };
+        self.shared.signal.poke();
+        if let Some((tools, net)) = warm {
+            // Cookies, proxy and so on are part of the worker's key: a changed one needs its
+            // own, started now rather than at the next song.
+            ytdlp::warm_stream_worker(tools, net);
+        }
     }
 
     /// The music player and playlists. There's one per engine: later calls return the same

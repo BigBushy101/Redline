@@ -250,10 +250,17 @@ fn extract(zip_path: &Path, dest_dir: &Path, names: &[&str]) -> Result<()> {
 /// Runs `yt-dlp -U` and returns its last line of output. On Android this replaces the zipapp
 /// script in the app's storage, which is writable, so it works there too.
 pub fn update_ytdlp(tools: &ToolPaths) -> Result<String> {
-    if tools.ytdlp_launcher.is_some() {
-        return update_script(tools);
+    let result = if tools.ytdlp_launcher.is_some() {
+        update_script(tools)
+    } else {
+        last_line(tools.ytdlp_command()?.arg("-U").output()?)
+    };
+    // A worker started from the old script (or one that failed to start because the update
+    // was half done) must not keep the new one out.
+    if result.is_ok() {
+        super::ytdlp_worker::clear();
     }
-    last_line(tools.ytdlp_command()?.arg("-U").output()?)
+    result
 }
 
 /// The zipapp (Android's yt-dlp, run through Python) rewrites itself in place, so a yt-dlp

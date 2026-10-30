@@ -105,6 +105,8 @@ impl App {
         let mut jobs = JobManager::load();
         jobs.set_wake(wake.clone());
         let player = Player::system(tools.clone(), wake.clone());
+        // Start yt-dlp before the first song needs it: its startup is most of a cold load.
+        redline_core::tools::ytdlp::warm_stream_worker(tools.clone(), settings.network.clone());
         linkcheck::shared().set_wake(wake.clone());
         linkcheck::shared().set_tools(tools.clone(), settings.network.clone());
         #[cfg(windows)]
@@ -500,6 +502,7 @@ impl eframe::App for App {
         if self.installer.take_finished() {
             self.tools = ToolPaths::locate(&self.settings);
             self.player.send(Command::SetTools(self.tools.clone()));
+            redline_core::tools::ytdlp::warm_stream_worker(self.tools.clone(), self.settings.network.clone());
             linkcheck::shared().set_tools(self.tools.clone(), self.settings.network.clone());
             self.settings_page.invalidate_version();
             self.encoders_task = Self::detect_encoders(&self.wake, &self.tools);
@@ -517,6 +520,7 @@ impl eframe::App for App {
         if self.player_network.as_ref() != Some(&self.settings.network) {
             self.player_network = Some(self.settings.network.clone());
             self.player.send(Command::SetNetwork(self.settings.network.clone()));
+            redline_core::tools::ytdlp::warm_stream_worker(self.tools.clone(), self.settings.network.clone());
             linkcheck::shared().set_tools(self.tools.clone(), self.settings.network.clone());
         }
         if let Some(e) = self.encoders_task.as_ref().and_then(Task::take) {

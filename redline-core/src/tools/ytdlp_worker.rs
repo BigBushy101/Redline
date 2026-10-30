@@ -1,24 +1,30 @@
 //! yt-dlp kept running between stream look-ups. Starting yt-dlp and loading its extractors
 //! takes about as long as looking a link up, so the player asks a running one instead of
-//! starting a new one per song.
+//! starting a new one per song. [`warm`] starts one at app launch, so the first song doesn't
+//! pay for it either.
 //!
 //! yt-dlp has no mode for that, so a small extractor plugin ([`PLUGIN`]) provides one: yt-dlp
 //! is started on the made-up link `redline-worker:`, and the plugin reads links from stdin,
 //! one per line, and answers each with one JSON line of the info `-J` would have printed, or
-//! the error. It exits when stdin closes, so a worker never outlives the app.
+//! the error. It exits when stdin closes, so a worker never outlives the app. The reply is
+//! trimmed to what playback needs: a full look-up is 88 KB to 650 KB, nearly all of it
+//! formats, subtitles and comments.
 //!
 //! With QuickJS (Android's) the plugin also keeps YouTube's player, once made ready for the
-//! JS challenge solver, in memory for the next link. yt-dlp has that cache but leaves it off
-//! (its files are big and never cleaned up). Without it QuickJS takes seconds to go through
-//! the whole player for every song, and a worker alone saves next to nothing there.
+//! JS challenge solver, in memory for the next link and in yt-dlp's cache for the next
+//! worker. yt-dlp leaves that cache off (its files are big and never cleaned up); the plugin
+//! turns it on and prunes the players to 32 MB and 14 days. Without it QuickJS takes seconds
+//! to go through the whole player for every song, and again after each launch.
 //!
-//! Anything that goes wrong here (an old yt-dlp without `--plugin-dirs`, a worker that dies
-//! mid-request) makes [`extract`] return `None`, and the caller runs yt-dlp once as before.
+//! A start that fails (an old yt-dlp without `--plugin-dirs`, a script being replaced under
+//! it) is retried: three failures in a row wait a minute rather than turning the worker off
+//! for the rest of the session, and an update ([`clear`]) retires the idle workers. Anything
+//! else that goes wrong makes [`extract`] return `None`, and the caller runs yt-dlp once as
+//! before.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,13 +49,17 @@ const MAX_AGE: Duration = Duration::from_secs(30 * 60);
 /// Idle workers kept for later; more than this at once are only from look-ups that overlapped.
 const MAX_POOLED: usize = 2;
 
-/// After this many workers fail to start, this process stops trying (the yt-dlp is probably
-/// too old for `--plugin-dirs`).
+/// After this many workers fail to start in a row, starts wait for a while before trying
+/// again. It usually means the yt-dlp is too old for `--plugin-dirs`, which an update fixes;
+/// it can also be an update replacing the script under a start.
 const MAX_FAILED_STARTS: u32 = 3;
 
+/// How long a run of failed starts closes the door before one more try.
+const RETRY_AFTER_FAILURES: Duration = Duration::from_secs(60);
+
 static POOL: Mutex<Vec<Worker>> = Mutex::new(Vec::new());
-static FAILED_STARTS: AtomicU32 = AtomicU32::new(0);
 static REAPER: Once = Once::new();
+static FAILED: Mutex<Failures> = Mutex::new(Failures { count: 0, since: None });
 
 struct Worker {
     /// The command it was started with; a look-up with other settings needs another worker.
@@ -117,38 +127,142 @@ fn read_reply(r: &mut impl BufRead) -> Option<Reply> {
     }
 }
 
+/// Starts that failed in a row, and when the latest run of them began. A run closes the door
+/// for `RETRY_AFTER_FAILURES`: the yt-dlp may be half-updated or too old, and both fix
+/// themselves without keeping a worker off for the rest of the session.
+#[derive(Default)]
+struct Failures {
+    count: u32,
+    since: Option<Instant>,
+}
+
+impl Failures {
+    /// Whether a start may be tried now, opening the door again after the wait.
+    fn blocked(&mut self, now: Instant) -> bool {
+        if self.count < MAX_FAILED_STARTS {
+            return false;
+        }
+        match self.since {
+            Some(t) if now.duration_since(t) < RETRY_AFTER_FAILURES => true,
+            _ => {
+                self.count = 0;
+                self.since = None;
+                false
+            }
+        }
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.count += 1;
+        if self.count >= MAX_FAILED_STARTS {
+            self.since = Some(now);
+        }
+    }
+
+    fn worked(&mut self) {
+        self.count = 0;
+        self.since = None;
+    }
+}
+
+fn starts_blocked() -> bool {
+    FAILED.lock().unwrap().blocked(Instant::now())
+}
+
+fn start_failed() {
+    FAILED.lock().unwrap().failed(Instant::now());
+}
+
+fn start_worked() {
+    FAILED.lock().unwrap().worked();
+}
+
+/// Forgets failed starts, e.g. after yt-dlp was updated. The next look-up (or warm-up) tries
+/// the worker again.
+pub(crate) fn reset() {
+    FAILED.lock().unwrap().worked();
+}
+
+/// Retires the idle workers and forgets failed starts: after an update, the next look-up
+/// should run the new yt-dlp, not one still running from the old script.
+pub(crate) fn clear() {
+    let workers = {
+        let mut pool = POOL.lock().unwrap();
+        std::mem::take(&mut *pool)
+    };
+    retire(workers);
+    reset();
+}
+
+fn ensure_reaper() {
+    REAPER.call_once(|| {
+        thread::spawn(reap);
+    });
+}
+
+/// How a worker started with `cmd` is recognized: the program, its arguments and its
+/// environment, so a look-up with other settings gets a worker of its own.
+fn key_of(cmd: &Command) -> String {
+    format!(
+        "{:?} {:?} {:?}",
+        cmd.get_program(),
+        cmd.get_args().collect::<Vec<_>>(),
+        cmd.get_envs().collect::<Vec<_>>()
+    )
+}
+
+/// Starts a worker for `cmd` and keeps it for the next look-up. This waits for yt-dlp and its
+/// plugin to start, so call it on a thread of its own; a fresh worker with the same settings is
+/// reused rather than started twice. Warming at app start keeps Python, yt-dlp and extractor
+/// startup off the first song's way.
+pub(crate) fn warm(cmd: Command) {
+    let key = key_of(&cmd);
+    ensure_reaper();
+    {
+        let now = Instant::now();
+        let pool = POOL.lock().unwrap();
+        if pool.iter().any(|w| w.key == key && w.fresh(now)) {
+            return;
+        }
+    }
+    if starts_blocked() {
+        return;
+    }
+    match start(cmd, key) {
+        Some(w) => {
+            start_worked();
+            put_back(w);
+        }
+        None => start_failed(),
+    }
+}
+
 /// Looks `url` up with a worker started from `cmd` (yt-dlp with its options, but no link).
 /// `Some(Err)` is yt-dlp's own error text; `None` means no worker could answer, and the caller
 /// should run yt-dlp itself.
 pub(crate) fn extract(cmd: Command, url: &str) -> Option<Result<Value, String>> {
     // A link is one stdin line.
-    if url.is_empty()
-        || url.contains(['\r', '\n'])
-        || FAILED_STARTS.load(Ordering::Relaxed) >= MAX_FAILED_STARTS
-    {
+    if url.is_empty() || url.contains(['\r', '\n']) {
         return None;
     }
-    REAPER.call_once(|| {
-        thread::spawn(reap);
-    });
-    let key = format!(
-        "{:?} {:?} {:?}",
-        cmd.get_program(),
-        cmd.get_args().collect::<Vec<_>>(),
-        cmd.get_envs().collect::<Vec<_>>()
-    );
+    ensure_reaper();
+    let key = key_of(&cmd);
     let mut worker = match take(&key) {
         Some(w) => w,
+        // A run of failed starts closes the door for a while; a worker already running is
+        // still worth asking.
+        None if starts_blocked() => return None,
         None => match start(cmd, key) {
             Some(w) => w,
             None => {
-                FAILED_STARTS.fetch_add(1, Ordering::Relaxed);
+                start_failed();
                 return None;
             }
         },
     };
     match worker.ask(url) {
         Some(reply) => {
+            start_worked();
             put_back(worker);
             Some(reply)
         }
@@ -285,6 +399,26 @@ mod tests {
         // A worker that died halfway through a line.
         assert_eq!(read_reply(&mut r), None);
         assert_eq!(read_reply(&mut r), None);
+    }
+
+    #[test]
+    fn failed_starts_back_off_then_try_again() {
+        let mut f = Failures::default();
+        let now = Instant::now();
+        assert!(!f.blocked(now), "nothing has failed yet");
+        for _ in 0..MAX_FAILED_STARTS {
+            f.failed(now);
+        }
+        assert!(f.blocked(now), "three failures in a row wait");
+        assert!(f.blocked(now + RETRY_AFTER_FAILURES - Duration::from_secs(1)));
+        assert!(!f.blocked(now + RETRY_AFTER_FAILURES), "and then try again");
+        assert!(!f.blocked(now + RETRY_AFTER_FAILURES), "the wait was taken once");
+        f.failed(now);
+        f.failed(now);
+        f.failed(now);
+        assert!(f.blocked(now));
+        f.worked();
+        assert!(!f.blocked(now), "a working start clears the streak");
     }
 
     #[test]

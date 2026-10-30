@@ -28,8 +28,13 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     let page = &mut app.settings_page;
     if let Some(r) = page.update.as_ref().and_then(Task::take) {
         page.update = None;
+        let updated = r.is_ok();
         page.update_msg = Some(r.map_err(|e| format!("{e:#}")));
         page.invalidate_version();
+        if updated {
+            // The old worker ran the old yt-dlp; start one from the new script now.
+            ytdlp::warm_stream_worker(app.tools.clone(), app.settings.network.clone());
+        }
     }
     if let Some(v) = page.version.as_ref().and_then(Task::take) {
         page.version = None;
@@ -247,6 +252,7 @@ fn tools_card(ui: &mut Ui, app: &mut App) {
     if changed {
         app.tools = ToolPaths::locate(&app.settings);
         app.player.send(redline_core::player::Command::SetTools(app.tools.clone()));
+        ytdlp::warm_stream_worker(app.tools.clone(), app.settings.network.clone());
         redline_core::linkcheck::shared().set_tools(app.tools.clone(), app.settings.network.clone());
         app.settings_page.invalidate_version();
     }

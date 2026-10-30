@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -631,22 +632,46 @@ pub struct StreamInfo {
     pub thumbnail: Option<String>,
 }
 
-/// `yt-dlp -J -f bestaudio/best --no-playlist URL`: the stream to play `url` from. Asked of a
-/// yt-dlp kept running for it (see [`super::ytdlp_worker`]) when one can be, as songs are
-/// looked up one after another.
-pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
+/// The yt-dlp run that finds a link's stream: one JSON look-up of its best audio.
+fn stream_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::process::Command> {
     const ARGS: [&str; 4] = ["-J", "-f", "bestaudio/best", "--no-playlist"];
     let mut cmd = base_command(tools, net)?;
     cmd.args(ARGS);
-    match super::ytdlp_worker::extract(cmd, url) {
+    Ok(cmd)
+}
+
+/// `yt-dlp -J -f bestaudio/best --no-playlist URL`: the stream to play `url` from. Asked of a
+/// yt-dlp kept running for it (see [`super::ytdlp_worker`], warmed at launch by
+/// [`warm_stream_worker`]) when one can be, as songs are looked up one after another.
+pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
+    match super::ytdlp_worker::extract(stream_command(tools, net)?, url) {
         Some(Ok(info)) => stream_info(serde_json::from_value(info).context("unexpected yt-dlp output")?),
         Some(Err(e)) => bail!("{}", friendly_error(error_line(&e))),
         None => {
-            let mut cmd = base_command(tools, net)?;
-            cmd.args(ARGS).args(["--", url]);
+            let mut cmd = stream_command(tools, net)?;
+            cmd.args(["--", url]);
             parse_stream(&run_json(cmd)?)
         }
     }
+}
+
+/// Starts the yt-dlp worker stream look-ups use, so the first song doesn't wait for Python,
+/// yt-dlp and its extractors to start. Call it when the app starts and after the tools or the
+/// network settings change; it starts a thread and returns at once.
+pub fn warm_stream_worker(tools: ToolPaths, net: NetworkOptions) {
+    if tools.ytdlp.is_none() {
+        return;
+    }
+    thread::spawn(move || {
+        if let Ok(cmd) = stream_command(&tools, &net) {
+            super::ytdlp_worker::warm(cmd);
+        }
+    });
+}
+
+/// Lets the next look-up start a fresh worker, e.g. after yt-dlp was updated.
+pub fn reset_stream_worker() {
+    super::ytdlp_worker::reset();
 }
 
 #[derive(Deserialize)]
