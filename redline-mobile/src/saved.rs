@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use redline_core::history::History;
 use redline_core::library::{self, Track};
@@ -329,7 +329,9 @@ impl Inner {
     }
 
     /// The launch refresh: collections not refreshed in 12 hours, oldest first, if the
-    /// setting is on and yt-dlp is there.
+    /// setting is on and yt-dlp is there. Started once the app has settled and no song is
+    /// loading or playing: each refresh lists a collection with yt-dlp, which would otherwise
+    /// compete with the stream worker the first song is waiting on.
     pub(crate) fn refresh_on_launch(self: &Arc<Self>) {
         {
             let st = self.engine.state();
@@ -338,7 +340,23 @@ impl Inner {
             }
         }
         let stale = self.ctl().saved.stale(unix_now(), STALE_SECS);
-        self.queue_syncs(stale, true);
+        if stale.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        let spawned = thread::Builder::new()
+            .name("redline-saved-launch".into())
+            .spawn(move || {
+                thread::sleep(Duration::from_secs(20));
+                let deadline = Instant::now() + Duration::from_secs(120);
+                while me.player.state().is_playing() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_secs(2));
+                }
+                if !me.signal.stopped() {
+                    me.queue_syncs(stale, true);
+                }
+            });
+        let _ = spawned;
     }
 
     /// Puts collections in line for a refresh and starts the refresh thread if it isn't

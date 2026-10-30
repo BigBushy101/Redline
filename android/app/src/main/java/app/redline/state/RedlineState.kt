@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -132,9 +133,24 @@ class RedlineState(private val app: Application) {
                     _status.value = EngineStatus.Ready(engine)
                     launch { refreshLoop() }
                     launch { _settings.value = onEngine { it.settings() } }
-                    launch { _encoders.value = onEngineSlow { it.detectEncoders() } }
-                    refreshTools()
-                    launch { updateYtdlpIfStale() }
+                    // These start ffmpeg and yt-dlp again. Keep them off the first song:
+                    // wait for the player to be idle before probing encoders, tools or
+                    // updating yt-dlp.
+                    launch {
+                        delay(10_000)
+                        whenPlayerIdle()
+                        _encoders.value = onEngineSlow { it.detectEncoders() }
+                    }
+                    launch {
+                        delay(10_000)
+                        whenPlayerIdle()
+                        refreshTools()
+                    }
+                    launch {
+                        delay(5_000)
+                        whenPlayerIdle()
+                        updateYtdlpIfStale()
+                    }
                 },
                 onFailure = { e ->
                     // UnsatisfiedLinkError lands here too when libredline_mobile.so is missing.
@@ -234,6 +250,19 @@ class RedlineState(private val app: Application) {
         if (next == current) return
         _settings.value = next
         act { it.setSettings(next) }
+    }
+
+    /**
+     * Waits until nothing is loading or playing, so a background ffmpeg/yt-dlp run doesn't
+     * compete with a song (the first one most of all). Gives up after two minutes.
+     */
+    private suspend fun whenPlayerIdle() {
+        val start = System.currentTimeMillis()
+        while (music?.snapshot?.value?.isPlaying == true &&
+            System.currentTimeMillis() - start < 120_000
+        ) {
+            delay(2_000)
+        }
     }
 
     /** Re-checks the tools (runs `yt-dlp --version`). */

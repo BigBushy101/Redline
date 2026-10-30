@@ -57,9 +57,15 @@ const MAX_FAILED_STARTS: u32 = 3;
 /// How long a run of failed starts closes the door before one more try.
 const RETRY_AFTER_FAILURES: Duration = Duration::from_secs(60);
 
+/// How long a look-up waits for a warm-up that is starting its worker.
+const WARM_WAIT: Duration = Duration::from_secs(15);
+
 static POOL: Mutex<Vec<Worker>> = Mutex::new(Vec::new());
 static REAPER: Once = Once::new();
 static FAILED: Mutex<Failures> = Mutex::new(Failures { count: 0, since: None });
+/// Workers a warm-up is starting right now, so a look-up arriving meanwhile waits for one
+/// rather than starting a second yt-dlp.
+static STARTING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 struct Worker {
     /// The command it was started with; a look-up with other settings needs another worker.
@@ -228,12 +234,40 @@ pub(crate) fn warm(cmd: Command) {
     if starts_blocked() {
         return;
     }
-    match start(cmd, key) {
+    {
+        let mut starting = STARTING.lock().unwrap();
+        if starting.iter().any(|k| k == &key) {
+            return;
+        }
+        starting.push(key.clone());
+    }
+    match start(cmd, key.clone()) {
         Some(w) => {
             start_worked();
+            // Pooled before the mark goes, so a waiting look-up sees one or the other.
             put_back(w);
         }
         None => start_failed(),
+    }
+    STARTING.lock().unwrap().retain(|k| k != &key);
+}
+
+fn starting(key: &str) -> bool {
+    STARTING.lock().unwrap().iter().any(|k| k == key)
+}
+
+/// A worker a warm-up is starting for `key`, once it reaches the pool. `None` if none is
+/// starting, it failed, or the wait ran out.
+fn wait_for_warm(key: &str, timeout: Duration) -> Option<Worker> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(w) = take(key) {
+            return Some(w);
+        }
+        if !starting(key) || Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -249,16 +283,25 @@ pub(crate) fn extract(cmd: Command, url: &str) -> Option<Result<Value, String>> 
     let key = key_of(&cmd);
     let mut worker = match take(&key) {
         Some(w) => w,
-        // A run of failed starts closes the door for a while; a worker already running is
-        // still worth asking.
-        None if starts_blocked() => return None,
-        None => match start(cmd, key) {
-            Some(w) => w,
-            None => {
-                start_failed();
+        None => {
+            // A warm-up may be starting this very worker: wait for it rather than starting a
+            // second yt-dlp, which makes the first song slower, not faster.
+            if let Some(w) = wait_for_warm(&key, WARM_WAIT) {
+                w
+            } else if starts_blocked() {
+                // A run of failed starts closes the door for a while; a worker already
+                // running is still worth asking.
                 return None;
+            } else {
+                match start(cmd, key) {
+                    Some(w) => w,
+                    None => {
+                        start_failed();
+                        return None;
+                    }
+                }
             }
-        },
+        }
     };
     match worker.ask(url) {
         Some(reply) => {
