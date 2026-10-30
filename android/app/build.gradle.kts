@@ -18,8 +18,8 @@ android {
         applicationId = "app.redline"
         minSdk = 26 // cpal plays through AAudio, which exists only from API 26
         targetSdk = 37
-        versionCode = 11
-        versionName = "0.1.10"
+        versionCode = 12
+        versionName = "0.1.11"
 
         // youtubedl-android ships prebuilt python/ffmpeg per ABI; these two cover phones + emulator.
         // The Rust core is built for the same set (see rustAbis below).
