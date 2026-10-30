@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
@@ -50,6 +51,7 @@ val PagePadding = 16.dp
 fun PageHeader(eyebrow: String, title: String, subtitle: String, modifier: Modifier = Modifier) {
     val tint = LocalAccent.current.headerTint
     val openSettings = LocalOpenSettings.current
+    val openSearch = LocalOpenSearch.current
     Box(
         modifier
             .fillMaxWidth()
@@ -60,6 +62,16 @@ fun PageHeader(eyebrow: String, title: String, subtitle: String, modifier: Modif
             Text(title, style = MaterialTheme.typography.displaySmall, color = RedlineColors.Text)
             Spacer(Modifier.height(4.dp))
             Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = RedlineColors.Muted)
+        }
+        if (openSearch != null) {
+            IconButton(
+                onClick = openSearch,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 4.dp, end = if (openSettings != null) 52.dp else 4.dp),
+            ) {
+                Icon(Icons.Rounded.Search, contentDescription = "Search", tint = RedlineColors.Text)
+            }
         }
         // Settings left the bottom bar for this gear, in the top corner of every page but its own.
         if (openSettings != null) {
@@ -72,6 +84,9 @@ fun PageHeader(eyebrow: String, title: String, subtitle: String, modifier: Modif
 
 /** Opens Settings from a page header's gear; null hides the gear (on Settings itself). */
 val LocalOpenSettings = compositionLocalOf<(() -> Unit)?> { null }
+
+/** Opens global search from a page header's magnifier. */
+val LocalOpenSearch = compositionLocalOf<(() -> Unit)?> { null }
 
 /** Small bold uppercase label (theme.rs `eyebrow`). */
 @Composable

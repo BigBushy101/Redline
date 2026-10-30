@@ -46,6 +46,10 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         .max_height((ui.available_height() - last_h - 8.0).max(120.0))
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            if theme::nav_item(ui, icons::MAGNIFYING_GLASS, "Search", false, None).clicked() {
+                app.search.open();
+            }
+            ui.add_space(2.0);
             for (page, icon, label, badge) in [
                 (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
                 (Page::Batch, icons::LIST_CHECKS, "Batch", None),

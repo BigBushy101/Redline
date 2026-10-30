@@ -50,6 +50,7 @@ pub struct App {
     pub installer: Installer,
     pub download: ui::download::DownloadPage,
     pub batch: ui::batch::BatchPage,
+    pub search: ui::search::Search,
     pub convert: ui::convert::ConvertPage,
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
@@ -125,6 +126,7 @@ impl App {
             installer: Installer::default(),
             download: Default::default(),
             batch: Default::default(),
+            search: Default::default(),
             convert: Default::default(),
             history_page: Default::default(),
             settings_page: Default::default(),
@@ -580,6 +582,9 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::K)) {
+            self.search.toggle();
+        }
         self.handle_dropped_files(&ctx);
         self.shutdown_window(&ctx);
         ui::replace::show(&ctx, self);
@@ -669,6 +674,9 @@ impl eframe::App for App {
                 theme::TEXT,
             );
         }
+        let mut search = std::mem::take(&mut self.search);
+        search.show(&ctx, self);
+        self.search = search;
     }
 }
 

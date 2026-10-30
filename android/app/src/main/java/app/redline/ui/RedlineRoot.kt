@@ -61,6 +61,7 @@ import app.redline.core.TrackRecord
 import app.redline.state.EngineStatus
 import app.redline.state.MusicState
 import app.redline.state.RedlineState
+import app.redline.ui.components.LocalOpenSearch
 import app.redline.ui.components.LocalOpenSettings
 import app.redline.ui.convert.ConvertMessage
 import app.redline.ui.components.LocalTrackActions
@@ -83,6 +84,7 @@ import app.redline.ui.player.MiniPlayer
 import app.redline.ui.playlists.AddToPlaylistDialog
 import app.redline.ui.playlists.PlaylistsMessage
 import app.redline.ui.playlists.PlaylistsModel
+import app.redline.ui.search.SearchScreen
 import app.redline.ui.queue.QueueAction
 import app.redline.ui.queue.QueueScreen
 import app.redline.ui.saved.SavedMessage
@@ -163,6 +165,7 @@ private fun Pages(
     nav: NavModel,
 ) {
     val tab = nav.tab
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
     val selectTab: (Tab) -> Unit = { nav.tab = it }
     val context = LocalContext.current
     val playlists by music.playlists.collectAsStateWithLifecycle()
@@ -324,7 +327,10 @@ private fun Pages(
                     return@Box
                 }
                 val openSettings = { selectTab(Tab.Settings) }
-                CompositionLocalProvider(LocalOpenSettings provides openSettings.takeIf { tab != Tab.Settings }) {
+                CompositionLocalProvider(
+                    LocalOpenSettings provides openSettings.takeIf { tab != Tab.Settings },
+                    LocalOpenSearch provides { searchOpen = true },
+                ) {
                     when (tab) {
                         Tab.Download -> DownloadScreen(
                             download,
@@ -421,6 +427,24 @@ private fun Pages(
         }
         // Messages (a song that failed to play, say) show over the full player too.
         if (nav.playerOpen) SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding())
+        if (searchOpen) {
+            SearchScreen(
+                music,
+                savedModel,
+                playlistsModel,
+                localModel.tracks,
+                onBack = { searchOpen = false },
+                onOpenSaved = {
+                    nav.librarySection = LibrarySection.Saved
+                    selectTab(Tab.Library)
+                },
+                onOpenPlaylist = {
+                    nav.librarySection = LibrarySection.Playlists
+                    selectTab(Tab.Library)
+                },
+                onGo = selectTab,
+            )
+        }
     }
     toAdd?.let { track ->
         AddToPlaylistDialog(
