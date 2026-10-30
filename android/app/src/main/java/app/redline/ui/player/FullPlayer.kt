@@ -1,8 +1,11 @@
 package app.redline.ui.player
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -57,16 +60,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.CancellationException
 import app.redline.core.PlayerSnapshotRecord
 import app.redline.core.PlayerStatus
 import app.redline.core.QueueTrackRecord
 import app.redline.core.RepeatMode
+import app.redline.core.TrackRecord
 import app.redline.core.TrackKind
 import app.redline.core.fmtDuration
 import app.redline.state.MusicState
@@ -94,6 +100,7 @@ fun FullPlayer(music: MusicState, close: () -> Unit) {
         return
     }
     val accent = LocalAccent.current
+    val current = queue.firstOrNull { it.isCurrent }
     val upNext = queue.dropWhile { !it.isCurrent }.drop(1)
     Box(
         Modifier
@@ -113,7 +120,7 @@ fun FullPlayer(music: MusicState, close: () -> Unit) {
             contentPadding = PaddingValues(bottom = 32.dp),
         ) {
             item { TopBar(s, music, close) }
-            item { NowPlaying(s, music) }
+            item { NowPlaying(s, music, current, settings?.waveform == true) }
             item {
                 Column(Modifier.padding(horizontal = PagePadding), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     settings?.let { p ->
@@ -166,7 +173,7 @@ private fun TopBar(s: PlayerSnapshotRecord, music: MusicState, close: () -> Unit
 
 /** Art, title, artist, the seek bar and the transport. */
 @Composable
-private fun NowPlaying(s: PlayerSnapshotRecord, music: MusicState) {
+private fun NowPlaying(s: PlayerSnapshotRecord, music: MusicState, current: QueueTrackRecord?, showWaveform: Boolean) {
     val accent = LocalAccent.current
     Column(Modifier.padding(horizontal = PagePadding), horizontalAlignment = Alignment.CenterHorizontally) {
         BoxWithConstraints(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
@@ -193,12 +200,113 @@ private fun NowPlaying(s: PlayerSnapshotRecord, music: MusicState) {
         if (s.status == PlayerStatus.ERROR && (s.error?.lines()?.size ?: 0) > 1) {
             Text(s.error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = RedlineColors.Subtle, modifier = Modifier.fillMaxWidth())
         }
+        if (showWaveform && current != null) {
+            Spacer(Modifier.height(12.dp))
+            WaveformStrip(s, current.track, music)
+        }
         Spacer(Modifier.height(12.dp))
         SeekBar(s, music::seek)
         LoopControls(s, music)
         Spacer(Modifier.height(8.dp))
         Transport(s, music)
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+/**
+ * The optional waveform: cached peaks, the A-B span, and a playhead that follows the track.
+ * Press and drag anywhere on it to seek on release.
+ */
+@Composable
+private fun WaveformStrip(s: PlayerSnapshotRecord, track: TrackRecord, music: MusicState) {
+    val duration = s.durationSecs?.takeIf { it > 0 } ?: return
+    var peaks by remember(track.location, track.kind) { mutableStateOf<List<Float>?>(null) }
+    var failed by remember(track.location, track.kind) { mutableStateOf(false) }
+    LaunchedEffect(track.location, track.kind) {
+        peaks = null
+        failed = false
+        try {
+            peaks = music.waveformForTrack(track).peaks
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            failed = true
+        }
+    }
+    val bars = peaks
+    if (bars == null) {
+        Box(Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
+            if (failed) {
+                Text("Waveform unavailable", color = RedlineColors.Muted, style = MaterialTheme.typography.bodySmall)
+            } else {
+                CircularProgressIndicator(Modifier.size(18.dp), color = LocalAccent.current.base, strokeWidth = 2.dp)
+            }
+        }
+        return
+    }
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val accent = LocalAccent.current
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(84.dp)
+            .pointerInput(duration, bars) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    if (size.width <= 0) return@awaitEachGesture
+                    fun at(x: Float): Float =
+                        ((x / size.width) * duration).coerceIn(0.0, duration).toFloat()
+                    var pos = at(down.position.x)
+                    dragging = pos
+                    down.consume()
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        pos = at(change.position.x)
+                        dragging = pos
+                        change.consume()
+                    }
+                    music.seek(pos.toDouble())
+                    dragging = null
+                }
+            },
+    ) {
+        val width = size.width
+        val height = size.height
+        val mid = height / 2f
+        val play = (dragging ?: s.positionSecs.toFloat()).coerceIn(0f, duration.toFloat())
+        val playFrac = (play / duration).toFloat()
+        val a = s.loopASecs
+        val b = s.loopBSecs
+        if (a != null && b != null) {
+            drawRect(
+                color = accent.base.copy(alpha = 0.16f),
+                topLeft = Offset((a / duration).toFloat() * width, 0f),
+                size = Size(((b - a) / duration).toFloat() * width, height),
+            )
+        }
+        val slots = (width / 3.dp.toPx()).toInt().coerceIn(1, bars.size)
+        val step = width / slots
+        for (i in 0 until slots) {
+            val from = i * bars.size / slots
+            val to = ((i + 1) * bars.size / slots).coerceAtLeast(from + 1)
+            val peak = bars.subList(from, to).max()
+            val x = (i + 0.5f) * step
+            val amp = (peak * height * 0.42f).coerceAtLeast(0.5f)
+            drawLine(
+                color = if (x <= playFrac * width) accent.base else RedlineColors.Muted,
+                start = Offset(x, mid - amp),
+                end = Offset(x, mid + amp),
+                strokeWidth = (step * 0.5f).coerceAtLeast(1f),
+            )
+        }
+        for (mark in listOfNotNull(a, b)) {
+            val x = (mark / duration).toFloat() * width
+            drawLine(RedlineColors.Text, Offset(x, 0f), Offset(x, height), strokeWidth = 1.5.dp.toPx())
+        }
+        val playX = playFrac * width
+        drawLine(RedlineColors.Text, Offset(playX, 0f), Offset(playX, height), strokeWidth = 2.dp.toPx())
     }
 }
 

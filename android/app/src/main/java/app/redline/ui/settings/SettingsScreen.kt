@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.redline.core.DownloadChoiceListsRecord
 import app.redline.core.DownloadMode
 import app.redline.core.RedlineException
@@ -77,6 +78,7 @@ fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsSt
             ToolsCard(state, tools)
 
             BackupCard(state)
+            PlaybackCard(state)
 
             SectionCard(title = "Folders") {
                 OptionRow("Downloads", hint = "Redline's own folder for now; saving to your Download folder comes later.") {
@@ -313,6 +315,20 @@ private fun NetworkCard(settings: SettingsRecord, update: ((SettingsRecord) -> S
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             )
         }
+    }
+}
+
+@Composable
+private fun PlaybackCard(state: RedlineState) {
+    val music = state.music ?: return
+    val player by music.settings.collectAsStateWithLifecycle()
+    SectionCard(title = "Playback", subtitle = "Optional extras for the full player.") {
+        ToggleRow(
+            "Show waveform",
+            player?.waveform == true,
+            { v -> music.music.setWaveform(v) },
+            hint = "Reads the track once with ffmpeg; for a streamed link it fetches its audio once, then caches the peaks.",
+        )
     }
 }
 

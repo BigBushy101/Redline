@@ -22,6 +22,7 @@ pub mod saved;
 pub mod settings;
 pub mod system;
 pub mod tools;
+pub mod waveform;
 
 use std::sync::Arc;
 

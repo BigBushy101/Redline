@@ -569,6 +569,11 @@ impl Music {
         self.inner.settings(|p| p.eq = eq);
     }
 
+    /// Show the current track's waveform in the full player.
+    pub fn set_waveform(&self, on: bool) {
+        self.inner.settings(|p| p.waveform = on);
+    }
+
     // ---- Playing things ----
 
     /// Replaces Now playing with a playlist from track `start`, or from a random one shuffled.

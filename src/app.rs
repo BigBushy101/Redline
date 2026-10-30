@@ -51,6 +51,7 @@ pub struct App {
     pub download: ui::download::DownloadPage,
     pub batch: ui::batch::BatchPage,
     pub search: ui::search::Search,
+    pub waveform: ui::waveform::Waveform,
     pub convert: ui::convert::ConvertPage,
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
@@ -127,6 +128,7 @@ impl App {
             download: Default::default(),
             batch: Default::default(),
             search: Default::default(),
+            waveform: Default::default(),
             convert: Default::default(),
             history_page: Default::default(),
             settings_page: Default::default(),
@@ -539,6 +541,7 @@ impl eframe::App for App {
         self.media_keys_frame(ctx);
         self.playlists_page.poll(&mut self.library);
         ui::batch::poll(self);
+        ui::waveform::poll(self);
         ui::saved::poll(self);
         ui::local::poll(self);
         ui::replace::poll(self);
@@ -601,6 +604,20 @@ impl eframe::App for App {
                 bottom: 8,
             }))
             .show(ui, |ui| ui::now_bar::show(ui, self));
+
+        if self.settings.player.waveform && self.player_state.is_active() {
+            Panel::bottom("waveform")
+                .exact_size(78.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(Frame::new().fill(theme::BLACK).inner_margin(Margin {
+                    left: 16,
+                    right: 16,
+                    top: 8,
+                    bottom: 12,
+                }))
+                .show(ui, |ui| ui::waveform::show(ui, self));
+        }
 
         Panel::left("sidebar")
             .exact_size(260.0)

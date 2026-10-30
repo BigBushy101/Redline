@@ -175,6 +175,8 @@ pub struct PlayerSettings {
     /// Go back to 1× whenever a new track loads.
     pub reset_speed: bool,
     pub eq: dsp::EqSettings,
+    /// Draw the current track's waveform (off by default; analyzing a link needs a download).
+    pub waveform: bool,
 }
 
 impl Default for PlayerSettings {
@@ -184,6 +186,7 @@ impl Default for PlayerSettings {
             speed: 1.0,
             reset_speed: false,
             eq: dsp::EqSettings::default(),
+            waveform: false,
         }
     }
 }

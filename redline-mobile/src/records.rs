@@ -1214,6 +1214,8 @@ pub struct PlayerSettingsRecord {
     pub eq: EqRecord,
     /// The EQ preset the bands match, if any.
     pub eq_preset: Option<String>,
+    /// Draw the current track's waveform in the full player.
+    pub waveform: bool,
 }
 
 pub fn player_settings_record(p: &PlayerSettings) -> PlayerSettingsRecord {
@@ -1223,6 +1225,7 @@ pub fn player_settings_record(p: &PlayerSettings) -> PlayerSettingsRecord {
         reset_speed: p.reset_speed,
         eq: (&p.eq).into(),
         eq_preset: p.eq.preset().map(str::to_owned),
+        waveform: p.waveform,
     }
 }
 

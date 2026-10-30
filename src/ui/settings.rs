@@ -138,6 +138,8 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
     network_card(ui, &mut app.settings.network);
     ui.add_space(16.0);
+    playback_card(ui, app);
+    ui.add_space(16.0);
     backup_card(ui, app);
     ui.add_space(16.0);
 
@@ -153,6 +155,19 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         .small()
         .color(theme::SUBTLE),
     );
+}
+
+/// The optional waveform strip.
+fn playback_card(ui: &mut Ui, app: &mut App) {
+    theme::card(ui, |ui| {
+        ui.label(theme::heading("Playback"));
+        ui.add_space(6.0);
+        theme::toggle(ui, &mut app.settings.player.waveform, "Show waveform while playing");
+        ui.label(theme::muted(
+            "Reads the track once with ffmpeg and caches the peaks. For a streamed link this \
+             fetches its audio once; drag the strip to seek.",
+        ));
+    });
 }
 
 /// One file with Saved, playlists and portable settings. Machine paths stay with the machine.

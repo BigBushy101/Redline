@@ -15,6 +15,7 @@ mod format;
 mod music;
 mod records;
 mod saved;
+mod waveform;
 
 pub use backup::BackupReportRecord;
 pub use convert::*;
@@ -24,3 +25,4 @@ pub use format::*;
 pub use music::{Music, MusicListener};
 pub use records::*;
 pub use saved::*;
+pub use waveform::WaveformRecord;

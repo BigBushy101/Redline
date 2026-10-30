@@ -216,6 +216,10 @@ class MusicState(private val app: Application, val music: Music) {
     fun prev() = act { it.prev() }
     fun stop() = act { it.stop() }
     fun seek(secs: Double) = act { it.seek(secs) }
+
+    /** Cached peaks for a track; may resolve a link and fetch its audio the first time. */
+    suspend fun waveformForTrack(track: app.redline.core.TrackRecord): app.redline.core.WaveformRecord =
+        withContext(Dispatchers.IO) { music.waveformForTrack(track) }
     fun setLoopA() = act { it.setLoopA() }
     fun setLoopB() = act { it.setLoopB() }
     fun clearLoop() = act { it.clearLoop() }
