@@ -122,7 +122,10 @@ fun RedlineRoot(
         EngineStatus.Initializing -> Starting()
         is EngineStatus.Failed -> Failed(s.message)
         is EngineStatus.Ready -> {
-            LaunchedEffect(Unit) { download.onEngineReady() }
+            LaunchedEffect(Unit) {
+                download.onEngineReady()
+                saved.onMusicReady()
+            }
             AskForNotifications()
             val music = state.music
             if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, saved, local, nav)

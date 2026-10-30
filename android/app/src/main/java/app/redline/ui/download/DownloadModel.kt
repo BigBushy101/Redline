@@ -21,6 +21,8 @@ import app.redline.util.nextAt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -66,11 +68,14 @@ class DownloadModel(app: Application) : AndroidViewModel(app) {
     val messages = _messages.receiveAsFlow()
 
     private var lookup: Job? = null
+    /** A link shared for an immediate download; queue it once the lookup (and settings) land. */
+    private var autoDownload = false
 
     val isPlaylist: Boolean get() = info?.isPlaylist == true
 
     /** Typing a new link forgets everything tied to the old one. */
     fun onUrlChange(value: String) {
+        autoDownload = false
         url = value
         resetLink()
     }
@@ -81,6 +86,29 @@ class DownloadModel(app: Application) : AndroidViewModel(app) {
         if (link.isEmpty() || link == url.trim() && (info != null || fetching)) return
         onUrlChange(link)
         if (state.engine != null) lookUp() else pendingLookup = true
+    }
+
+    /** A link shared to "Download with Redline": look it up and queue it without another tap. */
+    fun shareDownload(link: String) {
+        later = false
+        shared(link)
+        autoDownload = true
+        // Sharing the link that's already looked up skips shared()'s lookup.
+        if (!fetching && info != null) autoQueue()
+    }
+
+    /**
+     * Queues the shared link once the settings are in: they load a moment after the core is
+     * ready, so the first share can arrive just before them.
+     */
+    private fun autoQueue() {
+        if (!autoDownload) return
+        autoDownload = false
+        val link = url.trim()
+        viewModelScope.launch {
+            if (state.settings.value == null) state.settings.filterNotNull().first()
+            if (url.trim() == link) download()
+        }
     }
 
     /** A link shared while the core was still starting gets looked up once it's ready. */
@@ -118,11 +146,14 @@ class DownloadModel(app: Application) : AndroidViewModel(app) {
                 trim.reset(found.durationSecs)
                 // Like the desktop: a playlist link turns "whole playlist" on, a single one off.
                 updateOptions { it.copy(playlist = found.isPlaylist) }
+                if (autoDownload) autoQueue()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RedlineException) {
+                autoDownload = false
                 error = e.message
             } catch (e: Exception) {
+                autoDownload = false
                 error = e.message ?: e.toString()
             } finally {
                 // A cancelled lookup was replaced or reset; the new state isn't ours to touch.

@@ -35,12 +35,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- "Share" a link from YouTube, SoundCloud, a browser... prefills the Download page. -->
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
             <!-- Sharing videos, songs or pictures adds them to the Convert page. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -49,6 +43,36 @@
                 <data android:mimeType="audio/*" />
                 <data android:mimeType="video/*" />
                 <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Two share-sheet targets for links: save it, or download it right away. Each is just
+             a translucent receiver that hands the link to MainActivity before finishing. -->
+        <activity
+            android:name=".ShareSaveActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/share_save"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ShareDownloadActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/share_download"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 

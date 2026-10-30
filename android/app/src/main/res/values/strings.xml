@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Redline</string>
+    <string name="share_save">Save to Redline</string>
+    <string name="share_download">Download with Redline</string>
+    <string name="share_no_link">That share didn’t contain a link.</string>
 </resources>

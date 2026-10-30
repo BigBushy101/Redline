@@ -3,6 +3,7 @@ package app.redline
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -22,6 +23,7 @@ import app.redline.ui.local.LocalModel
 import app.redline.ui.playlists.PlaylistsModel
 import app.redline.ui.saved.SavedModel
 import app.redline.ui.theme.RedlineTheme
+import app.redline.util.linkFromShare
 
 /** The one activity: the bottom-bar pages, and where shared links and files come in. */
 class MainActivity : ComponentActivity() {
@@ -54,6 +56,27 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent?) {
         when {
             intent == null -> Unit
+            // A link shared to one of the two share targets: save it, or download it right away.
+            intent.getStringExtra(EXTRA_SHARE_MODE) != null -> {
+                val link = linkFromShare(intent.getCharSequenceExtra(Intent.EXTRA_TEXT))
+                if (link == null) {
+                    Toast.makeText(this, R.string.share_no_link, Toast.LENGTH_SHORT).show()
+                    return
+                }
+                nav.playerOpen = false
+                when (intent.getStringExtra(EXTRA_SHARE_MODE)) {
+                    SHARE_SAVE -> {
+                        nav.tab = Tab.Library
+                        nav.librarySection = LibrarySection.Saved
+                        saved.showOverview()
+                        saved.shareSave(link)
+                    }
+                    SHARE_DOWNLOAD -> {
+                        nav.tab = Tab.Download
+                        download.shareDownload(link)
+                    }
+                }
+            }
             // Videos, songs and pictures shared from the gallery, a file manager...: Convert them.
             isMedia(intent.type) && (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) -> {
                 val uris = if (intent.action == Intent.ACTION_SEND) {
@@ -82,6 +105,10 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        /** Set by the share receivers: save the link, or download it right away. */
+        const val EXTRA_SHARE_MODE = "app.redline.SHARE_MODE"
+        const val SHARE_SAVE = "save"
+        const val SHARE_DOWNLOAD = "download"
         /** Set by the notifications: open on the Queue page. */
         const val EXTRA_OPEN_QUEUE = "app.redline.OPEN_QUEUE"
         /** Set by the player's notification: show the full player. */

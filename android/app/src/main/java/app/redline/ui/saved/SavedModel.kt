@@ -66,6 +66,9 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
     var saving by mutableStateOf<List<String>>(emptyList())
         private set
 
+    /** A link shared to "Save to Redline" while the core was still starting. */
+    private var pendingShare: String? = null
+
     /** Links of an imported list still to look up and save, while an import runs. */
     var importing by mutableStateOf<Int?>(null)
         private set
@@ -117,6 +120,9 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
             else -> closeAll()
         }
     }
+
+    /** Back to the overview (used after a link is shared to Save). */
+    fun showOverview() = closeAll()
 
     /** Back to the overview. */
     private fun closeAll() {
@@ -196,6 +202,20 @@ class SavedModel(app: Application, private val saved: SavedStateHandle) : Androi
                 saving = saving - link
             }
         }
+    }
+
+    /** A link shared to "Save to Redline": saved now, or once the core is ready. */
+    fun shareSave(link: String) {
+        val l = link.trim()
+        if (l.isEmpty()) return
+        if (music == null) pendingShare = l else saveLink(l)
+    }
+
+    /** A link shared while the core was starting is saved once the player is up. */
+    fun onMusicReady() {
+        val l = pendingShare ?: return
+        pendingShare = null
+        if (music != null) saveLink(l)
     }
 
     /**
