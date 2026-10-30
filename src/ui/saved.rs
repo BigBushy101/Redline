@@ -453,14 +453,18 @@ fn save_box(ui: &mut Ui, app: &mut App) {
 fn overview(ui: &mut Ui, app: &mut App) {
     let platforms = app.saved.platforms();
     let songs: usize = platforms.iter().map(|(p, _)| app.saved.all_songs(*p).len()).sum();
+    // Local sits on this page even with nothing saved online. A PC always has somewhere to
+    // look (the Music folder until others are picked), so it counts as a source here.
+    let local_ready = !app.settings.local_folders.is_empty() || !app.settings.local_files.is_empty();
     let subtitle = if platforms.is_empty() {
         "Save playlists and songs from YouTube, SoundCloud, Bandcamp and more.".to_owned()
     } else {
         format!(
-            "{} · {} · {}",
+            "{} · {} · {}{}",
             plural(app.saved.collections.len(), "collection"),
             plural(songs, "song"),
             plural(platforms.len(), "platform"),
+            if local_ready { " + Device" } else { "" },
         )
     };
     theme::page_header(ui, "Saved", "Saved music", &subtitle);
@@ -487,25 +491,17 @@ fn overview(ui: &mut Ui, app: &mut App) {
     });
     ui.add_space(24.0);
 
-    if platforms.is_empty() {
-        ui.add_space(20.0);
-        ui.vertical_centered(|ui| {
-            ui.label(RichText::new(icons::BOOKMARKS_SIMPLE).size(64.0).color(theme::SUBTLE));
-            ui.add_space(8.0);
-            ui.label(theme::heading("Save music from anywhere"));
-            ui.label(theme::muted(
-                "Paste a link above. Playlists, sets and albums stay in step with the original; \
-                 each platform gets its own page in the sidebar.",
-            ));
-        });
-        return;
-    }
     ui.label(theme::heading("Platforms"));
     ui.add_space(8.0);
     let now = unix_now();
     let mut pick = None;
+    let mut open_local = false;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(16.0, 16.0);
+        // First, beside the online platforms: the songs on this PC.
+        if local_card(ui, app.local_page.tracks.len(), app.local_page.scanning()).clicked() {
+            open_local = true;
+        }
         for (p, _) in &platforms {
             let (collections, _) = app.saved.for_platform(*p);
             let synced = collections.iter().filter_map(|c| c.synced_at).max();
@@ -520,10 +516,57 @@ fn overview(ui: &mut Ui, app: &mut App) {
             }
         }
     });
-    if let Some(p) = pick {
+    if open_local {
+        app.page = Page::Local;
+        app.saved_page.open = None;
+    } else if let Some(p) = pick {
         app.page = Page::Saved(Some(p));
         app.saved_page.open = None;
     }
+    if platforms.is_empty() {
+        ui.add_space(12.0);
+        ui.label(theme::muted("Save a link above to add YouTube, SoundCloud and more."));
+    }
+}
+
+/// The PC as a platform card: the same size and layout as the online ones, in grey.
+fn local_card(ui: &mut Ui, songs: usize, scanning: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(240.0, 150.0), Sense::click());
+    let accent = theme::MUTED;
+    let mix = if resp.hovered() { 0.24 } else { 0.14 };
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(8), theme::lerp_color(theme::CARD, accent, mix));
+    let left = rect.left() + 18.0;
+    painter.text(
+        egui::pos2(left, rect.top() + 34.0),
+        egui::Align2::LEFT_CENTER,
+        icons::HARD_DRIVES,
+        egui::FontId::proportional(34.0),
+        accent,
+    );
+    painter.text(
+        egui::pos2(left, rect.top() + 80.0),
+        egui::Align2::LEFT_CENTER,
+        "Local",
+        egui::FontId::new(20.0, theme::bold()),
+        theme::TEXT,
+    );
+    painter.text(
+        egui::pos2(left, rect.top() + 106.0),
+        egui::Align2::LEFT_CENTER,
+        format!("{} · On this PC", plural(songs, "song")),
+        egui::FontId::proportional(13.0),
+        theme::MUTED,
+    );
+    let status = if scanning { "Looking for songs…" } else { "Music folder and added files" };
+    painter.text(
+        egui::pos2(left, rect.top() + 126.0),
+        egui::Align2::LEFT_CENTER,
+        status,
+        egui::FontId::proportional(12.0),
+        theme::SUBTLE,
+    );
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A card tinted with the platform's color: glyph, name, counts and last sync. Painted

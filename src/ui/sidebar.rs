@@ -51,12 +51,13 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                 (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
                 (Page::Saved(None), icons::BOOKMARKS_SIMPLE, "Saved", None),
                 (Page::Playlists, icons::PLAYLIST, "Playlists", None),
-                (Page::Local, icons::HARD_DRIVES, "Local", None),
                 (Page::Queue, icons::QUEUE, "Queue", Some(active)),
                 (Page::History, icons::CLOCK_COUNTER_CLOCKWISE, "History", None),
                 (Page::Settings, icons::GEAR_SIX, "Settings", None),
             ] {
-                if theme::nav_item(ui, icon, label, app.page == page, badge).clicked() {
+                // Local lives on Saved's page now; keep Saved lit while it's open.
+                let selected = app.page == page || (page == Page::Saved(None) && app.page == Page::Local);
+                if theme::nav_item(ui, icon, label, selected, badge).clicked() {
                     app.page = page;
                     app.saved_page.open = None;
                 }

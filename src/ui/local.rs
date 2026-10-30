@@ -10,7 +10,7 @@ use redline_core::player::Source;
 
 use super::playlists::{add_menu, add_to, playlist_names};
 use super::tracks::{RowAction, RowState, convert_button, list_header, search_box, track_row};
-use crate::app::App;
+use crate::app::{App, Page};
 use crate::format::fmt_duration;
 use crate::task::Task;
 use crate::theme;
@@ -23,6 +23,13 @@ pub struct LocalPage {
     /// scans again.
     scanned: Option<(Vec<PathBuf>, Vec<PathBuf>)>,
     search: String,
+}
+
+impl LocalPage {
+    /// Whether a scan is under way (the Saved card says so while it runs).
+    pub fn scanning(&self) -> bool {
+        self.scan.is_some()
+    }
 }
 
 /// Scans when the folders change (and once at launch), and takes in finished scans. Called
@@ -42,12 +49,26 @@ pub fn poll(app: &mut App) {
 }
 
 pub fn show(ui: &mut Ui, app: &mut App) {
-    let page = &app.local_page;
-    let secs: f64 = page.tracks.iter().filter_map(|t| t.duration).sum();
-    let n = page.tracks.len();
+    let mut back = false;
+    ui.horizontal(|ui| {
+        if theme::ghost_button(ui, &format!("{}  Saved", icons::ARROW_LEFT), true)
+            .on_hover_text("Back to Saved")
+            .clicked()
+        {
+            back = true;
+        }
+    });
+    if back {
+        app.page = Page::Saved(None);
+        app.saved_page.open = None;
+        return;
+    }
+    ui.add_space(4.0);
+    let secs: f64 = app.local_page.tracks.iter().filter_map(|t| t.duration).sum();
+    let n = app.local_page.tracks.len();
     let mut meta = format!("{n} song{}", if n == 1 { "" } else { "s" });
     if secs > 0.0 {
-        meta.push_str(&format!(" Â· {}", fmt_duration(secs)));
+        meta.push_str(&format!(" · {}", fmt_duration(secs)));
     }
     theme::page_header(ui, "Local", "On this PC", &meta);
 
