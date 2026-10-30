@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.AudioFile
@@ -74,7 +75,7 @@ import app.redline.ui.theme.RedlineColors
  * here, with Play / Shuffle and each song's menu.
  */
 @Composable
-fun LocalScreen(model: LocalModel, music: MusicState, playlists: List<PlaylistSummaryRecord>) {
+fun LocalScreen(model: LocalModel, music: MusicState, playlists: List<PlaylistSummaryRecord>, onBack: (() -> Unit)? = null) {
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { model.permissionChanged() }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(model::addFolder) }
     // Songs may have come or gone (or the permission changed in system settings) while away.
@@ -101,6 +102,22 @@ fun LocalScreen(model: LocalModel, music: MusicState, playlists: List<PlaylistSu
     val meta = "${tracks.size} song${if (tracks.size == 1) "" else "s"}" + if (secs > 0) " · ${fmtDuration(secs)}" else ""
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+        if (onBack != null) {
+            item {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(LocalAccent.current.headerTint)
+                        .padding(start = 4.dp, end = PagePadding, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Back to Saved", tint = RedlineColors.Text)
+                    }
+                    Text("Saved", style = MaterialTheme.typography.labelLarge, color = RedlineColors.Muted)
+                }
+            }
+        }
         item { PageHeader("Local", "On this phone", meta) }
         if (!model.allowed) {
             item {

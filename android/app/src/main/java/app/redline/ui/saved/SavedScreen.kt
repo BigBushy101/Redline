@@ -31,7 +31,6 @@ import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.PlaylistPlay
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.BookmarkAdd
-import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ClearAll
 import androidx.compose.material.icons.rounded.Delete
@@ -43,6 +42,7 @@ import androidx.compose.material.icons.rounded.FindReplace
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QueuePlayNext
 import androidx.compose.material.icons.rounded.Refresh
@@ -89,7 +89,6 @@ import app.redline.core.fmtDuration
 import app.redline.state.MusicState
 import app.redline.ui.components.ArtTile
 import app.redline.ui.components.Cover
-import app.redline.ui.components.EmptyState
 import app.redline.ui.components.Eyebrow
 import app.redline.ui.components.GhostButton
 import app.redline.ui.components.InputField
@@ -106,6 +105,7 @@ import app.redline.ui.components.TrackRow
 import app.redline.ui.components.UnavailableBar
 import app.redline.ui.components.dead
 import app.redline.ui.components.unavailable
+import app.redline.ui.local.LocalModel
 import app.redline.ui.playlists.AddToPlaylistDialog
 import app.redline.ui.playlists.NameDialog
 import app.redline.ui.playlists.ShuffleButton
@@ -119,12 +119,19 @@ import app.redline.ui.theme.icon
 import app.redline.ui.theme.label
 
 /**
- * Port of src/ui/saved.rs for a phone: the overview (one card per platform), a platform's page
+ * Port of src/ui/saved.rs for a phone: the overview (one card per platform, and Local), a platform's page
  * (its collections, single songs and "All songs"), and one collection or "All songs" at a time.
  * A platform's pages take its color; the mini player and bottom bar, outside, stay red.
  */
 @Composable
-fun SavedScreen(model: SavedModel, music: MusicState, history: List<HistoryRecord>, playlists: List<PlaylistSummaryRecord>) {
+fun SavedScreen(
+    model: SavedModel,
+    music: MusicState,
+    history: List<HistoryRecord>,
+    playlists: List<PlaylistSummaryRecord>,
+    local: LocalModel,
+    onOpenLocal: () -> Unit,
+) {
     val version by music.savedVersion.collectAsStateWithLifecycle()
     val overview by music.savedOverview.collectAsStateWithLifecycle()
     val queue by music.queue.collectAsStateWithLifecycle()
@@ -135,7 +142,7 @@ fun SavedScreen(model: SavedModel, music: MusicState, history: List<HistoryRecor
     // have a downloaded copy, and when link checks find dead ones.
     LaunchedEffect(p, model.collectionId, model.allSongs, version, history, linkVersion) { model.reload() }
     if (p == null) {
-        Overview(model, overview)
+        Overview(model, overview, local, onOpenLocal)
         return
     }
     BackHandler { model.back() }
@@ -168,32 +175,68 @@ private fun count(n: Int, word: String) = "$n $word${if (n == 1) "" else "s"}"
 // ---- The overview -----------------------------------------------------------------------
 
 @Composable
-private fun Overview(model: SavedModel, overview: SavedOverviewRecord?) {
+private fun Overview(model: SavedModel, overview: SavedOverviewRecord?, local: LocalModel, onOpenLocal: () -> Unit) {
+    // The Local card shows a count before its page (and scan) has been opened. Pick up a
+    // permission granted or revoked in system settings while away, too.
+    LaunchedEffect(Unit) {
+        local.permissionChanged()
+        if (local.allowed) local.rescan()
+    }
     val platforms = overview?.platforms.orEmpty()
     val subtitle = if (overview == null || platforms.isEmpty()) {
         "Save playlists and songs from YouTube, SoundCloud, Bandcamp and more."
     } else {
-        "${count(overview.collectionCount.toInt(), "collection")} · ${songs(overview.songCount.toInt())} · ${count(platforms.size, "platform")}"
+        val saved = count(overview.collectionCount.toInt(), "collection") + " · " +
+            songs(overview.songCount.toInt()) + " · " + count(platforms.size, "platform")
+        // Local is part of the sources shown, but only once its songs can be read.
+        if (local.allowed) saved + " + Device" else saved
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item { PageHeader("Saved", "Saved music", subtitle) }
         item { SaveBox(model) }
         item { ExportImport(model) }
-        if (platforms.isEmpty()) {
-            item {
-                EmptyState(
-                    Icons.Rounded.Bookmarks,
-                    "Save music from anywhere",
-                    "Paste a link above. Playlists, sets and albums stay in step with the original; each platform gets its own page.",
-                )
-            }
-        } else {
-            item { SectionTitle("Platforms") }
-            items(platforms, key = { it.platform.name }) { p ->
-                PlatformCard(p) { model.openPlatform(p.platform) }
-                Spacer(Modifier.height(8.dp))
-            }
+        item { SectionTitle("Platforms") }
+        item {
+            LocalCard(local, onOpenLocal)
+            Spacer(Modifier.height(8.dp))
         }
+        items(platforms, key = { it.platform.name }) { p ->
+            PlatformCard(p) { model.openPlatform(p.platform) }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+/** Local songs as a card beside the online platforms: a device source, not a site. */
+@Composable
+private fun LocalCard(local: LocalModel, open: () -> Unit) {
+    val color = RedlineColors.Muted
+    Row(
+        Modifier
+            .padding(horizontal = PagePadding)
+            .fillMaxWidth()
+            .background(lerp(RedlineColors.Card, color, 0.14f), MaterialTheme.shapes.medium)
+            .clickable(onClick = open)
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, tint = color, modifier = Modifier.size(40.dp))
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Local", style = MaterialTheme.typography.titleLarge, color = RedlineColors.Text)
+            Text(
+                songs(local.tracks.size) + " · On this phone",
+                style = MaterialTheme.typography.bodyMedium,
+                color = RedlineColors.Muted,
+            )
+            val status = when {
+                !local.allowed -> "Needs access to this phone's audio"
+                local.scanning -> "Looking for songs…"
+                else -> null
+            }
+            status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Subtle) }
+        }
+        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = RedlineColors.Muted)
     }
 }
 

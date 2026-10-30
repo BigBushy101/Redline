@@ -1,5 +1,6 @@
 package app.redline.ui.library
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,13 +23,15 @@ import app.redline.ui.saved.SavedModel
 import app.redline.ui.saved.SavedScreen
 import app.redline.ui.theme.LocalAccent
 
-/** The Library's sections, the desktop sidebar's Saved, Playlists and Local. */
+/**
+ * The Library's sections. Local isn't a tab: it's a card on Saved's platform list, opened from
+ * there and closed with its back arrow (the desktop keeps it as a page beside Saved).
+ */
 enum class LibrarySection(val label: String) { Saved("Saved"), Playlists("Playlists"), Local("Local") }
 
 /**
- * The bottom bar's Library: the desktop sidebar's Saved, Playlists and Local, one tab between
- * them on a phone. The switch shows at the top of each section's first page; deeper pages have
- * Back.
+ * The bottom bar's Library: Saved and Playlists as tabs. Local lives in Saved's Platforms
+ * list, alongside the online platforms it plays the same songs as.
  */
 @Composable
 fun LibraryScreen(
@@ -44,7 +47,8 @@ fun LibraryScreen(
     val atTop = when (section) {
         LibrarySection.Saved -> saved.platform == null
         LibrarySection.Playlists -> playlistsModel.openId == null
-        LibrarySection.Local -> true
+        // Local is a page under Saved, with its own back arrow.
+        LibrarySection.Local -> false
     }
     Column(Modifier.fillMaxSize()) {
         if (atTop) {
@@ -55,14 +59,28 @@ fun LibraryScreen(
                     .background(LocalAccent.current.headerTint)
                     .padding(start = PagePadding, end = PagePadding, top = 12.dp),
             ) {
-                SegmentedSwitch(section, LibrarySection.entries.map { it to it.label }, onSection)
+                SegmentedSwitch(
+                    section,
+                    listOf(LibrarySection.Saved, LibrarySection.Playlists).map { it to it.label },
+                    onSection,
+                )
             }
         }
         Box(Modifier.weight(1f)) {
             when (section) {
-                LibrarySection.Saved -> SavedScreen(saved, music, history, playlists)
+                LibrarySection.Saved -> SavedScreen(
+                    saved,
+                    music,
+                    history,
+                    playlists,
+                    local,
+                    onOpenLocal = { onSection(LibrarySection.Local) },
+                )
                 LibrarySection.Playlists -> PlaylistsScreen(playlistsModel, music, playlists, history)
-                LibrarySection.Local -> LocalScreen(local, music, playlists)
+                LibrarySection.Local -> {
+                    BackHandler { onSection(LibrarySection.Saved) }
+                    LocalScreen(local, music, playlists, onBack = { onSection(LibrarySection.Saved) })
+                }
             }
         }
     }
