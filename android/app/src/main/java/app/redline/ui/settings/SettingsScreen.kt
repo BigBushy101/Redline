@@ -76,6 +76,8 @@ fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsSt
         Column(Modifier.padding(horizontal = PagePadding), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             ToolsCard(state, tools)
 
+            BackupCard(state)
+
             SectionCard(title = "Folders") {
                 OptionRow("Downloads", hint = "Redline's own folder for now; saving to your Download folder comes later.") {
                     Text(settings.downloadDir, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Text)
@@ -311,6 +313,70 @@ private fun NetworkCard(settings: SettingsRecord, update: ((SettingsRecord) -> S
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             )
         }
+    }
+}
+
+@Composable
+private fun BackupCard(state: RedlineState) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val music = state.music?.music
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
+    val backup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri == null || music == null) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) { music.exportBackup() }
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
+                        ?: error("the file couldn't be opened")
+                }
+                status = "Backup saved."
+            } catch (e: Exception) {
+                status = "Couldn't back up: " + (e.message ?: e.toString())
+            } finally {
+                busy = false
+            }
+        }
+    }
+    val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null || music == null) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            try {
+                val text = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                        ?: error("the file couldn't be opened")
+                }
+                val report = withContext(Dispatchers.IO) { music.importBackup(text) }
+                status = report.message
+            } catch (e: Exception) {
+                status = "Couldn't restore: " + (e.message ?: e.toString())
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    SectionCard(
+        title = "Backup",
+        subtitle = "Saved links, playlists and settings in one file. Restoring merges into this library and keeps this phone's folders.",
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            GhostButton("Back up…", { backup.launch("Redline-backup.json") }, enabled = music != null && !busy)
+            GhostButton(
+                "Restore…",
+                { restore.launch(arrayOf("application/json", "text/plain")) },
+                enabled = music != null && !busy,
+            )
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(16.dp), color = LocalAccent.current.base, strokeWidth = 2.dp)
+            }
+        }
+        status?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Muted) }
     }
 }
 

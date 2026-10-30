@@ -3,7 +3,7 @@ members = [".", "redline-core", "redline-mobile"]
 
 [package]
 name = "redline"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 description = "Download media with yt-dlp and convert local files, in a Spotify-style egui app"
 
@@ -15,6 +15,7 @@ egui_extras = { version = "0.36", features = ["http", "image", "file"] }
 egui-phosphor = "0.14"
 rfd = "0.17"
 open = "5"
+qrcode = { version = "0.14", default-features = false }
 anyhow = "1"
 # The window handle for Windows media keys; the version eframe uses
 raw-window-handle = "0.6"

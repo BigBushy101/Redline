@@ -7,6 +7,7 @@
 
 uniffi::setup_scaffolding!();
 
+mod backup;
 mod convert;
 mod engine;
 mod error;
@@ -15,6 +16,7 @@ mod music;
 mod records;
 mod saved;
 
+pub use backup::BackupReportRecord;
 pub use convert::*;
 pub use engine::{Engine, EngineListener};
 pub use error::RedlineError;

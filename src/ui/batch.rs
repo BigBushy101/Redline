@@ -1,7 +1,9 @@
 //! Batch page: paste many links, look them up one at a time, then queue or save them.
 
-use eframe::egui::{self, RichText, Spinner, TextEdit, Ui};
+use eframe::egui::{self, Color32, RichText, Spinner, TextEdit, Ui};
 use egui_phosphor::regular as icons;
+use qrcode::types::Color;
+use qrcode::QrCode;
 use redline_core::download_plan::LinkChoices;
 use redline_core::tools::ytdlp::{self, MediaInfo};
 
@@ -43,6 +45,13 @@ pub struct BatchPage {
     fetch: Option<Task<anyhow::Result<MediaInfo>>>,
     running: bool,
     error: Option<String>,
+    handoff_open: bool,
+    handoff: Option<Handoff>,
+}
+
+struct Handoff {
+    texture: egui::TextureHandle,
+    payload: String,
 }
 
 /// Every http(s) link in the pasted text, in order and without repeats.
@@ -196,6 +205,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
                 }
             }
         }
+        if !running && theme::ghost_button(ui, "Send to phone", !links.is_empty()).clicked() {
+            open_handoff(app, ui.ctx(), &links);
+        }
         if !app.batch.items.is_empty() {
             let done = app.batch.items.iter().filter(|i| matches!(i.state, State::Queued(_) | State::Saved(_) | State::Failed(_))).count();
             ui.label(theme::muted(format!("{done} of {} done", app.batch.items.len())));
@@ -264,9 +276,92 @@ pub fn show(ui: &mut Ui, app: &mut App) {
             }
         });
     }
+
+    if app.batch.handoff_open {
+        let mut open = true;
+        let mut copied = false;
+        if let Some(handoff) = &app.batch.handoff {
+            egui::Window::new("Send to phone")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
+                    ui.label(theme::muted(
+                        "Scan this with your phone's camera. Redline opens Batch with the links ready.",
+                    ));
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Image::new((handoff.texture.id(), egui::vec2(260.0, 260.0)))
+                            .texture_options(egui::TextureOptions::NEAREST),
+                    );
+                    ui.add_space(8.0);
+                    if theme::ghost_button(ui, "Copy link", true).clicked() {
+                        ui.ctx().copy_text(handoff.payload.clone());
+                        copied = true;
+                    }
+                });
+        }
+        if copied {
+            app.toast("Handoff link copied");
+        }
+        app.batch.handoff_open = open;
+        if !open {
+            app.batch.handoff = None;
+        }
+    }
+}
+
+/// A QR with a redline:// link that opens the phone's Batch inbox with these links.
+fn open_handoff(app: &mut App, ctx: &egui::Context, links: &[String]) {
+    let payload = handoff_payload(links);
+    if payload.len() > 1200 {
+        app.batch.error = Some("Too many links for one QR; send them in smaller batches.".into());
+        return;
+    }
+    let code = match QrCode::new(payload.as_bytes()) {
+        Ok(code) => code,
+        Err(e) => {
+            app.batch.error = Some(format!("Couldn't make the QR code: {e}"));
+            return;
+        }
+    };
+    let w = code.width();
+    let border = 4;
+    let size = w + border * 2;
+    let mut image = egui::ColorImage::new([size, size], vec![Color32::WHITE; size * size]);
+    for y in 0..w {
+        for x in 0..w {
+            if code[(x, y)] == Color::Dark {
+                image.pixels[(y + border) * size + x + border] = Color32::BLACK;
+            }
+        }
+    }
+    let texture = ctx.load_texture("batch-handoff", image, egui::TextureOptions::NEAREST);
+    app.batch.handoff = Some(Handoff { texture, payload });
+    app.batch.handoff_open = true;
+    app.batch.error = None;
+}
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::new();
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn handoff_payload(links: &[String]) -> String {
+    format!("redline://handoff?links={}", percent_encode(&links.join("\n")))
 }
 
 fn start(app: &mut App) {
+    app.batch.handoff = None;
+    app.batch.handoff_open = false;
     let links = links_from(&app.batch.input);
     if links.is_empty() {
         app.batch.error = Some("No http(s) links in there.".into());
@@ -300,5 +395,13 @@ mod tests {
     fn ignores_text_that_is_not_a_link() {
         assert!(links_from("hello world").is_empty());
         assert!(links_from("ftp://example.com/a").is_empty());
+    }
+
+    #[test]
+    fn handoff_uri_encodes_the_links() {
+        assert_eq!(
+            handoff_payload(&["https://a.test/x?y=1".into(), "https://b.test/z".into()]),
+            "redline://handoff?links=https%3A%2F%2Fa.test%2Fx%3Fy%3D1%0Ahttps%3A%2F%2Fb.test%2Fz"
+        );
     }
 }

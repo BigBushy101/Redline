@@ -3,6 +3,7 @@
 
 #[cfg(any(target_os = "android", test))]
 pub mod android;
+pub mod backup;
 pub mod convert_plan;
 pub mod download_plan;
 pub mod format;

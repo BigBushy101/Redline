@@ -35,6 +35,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- QR handoff from the desktop: redline://handoff?links=... opens Batch. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="redline" android:host="handoff" />
+            </intent-filter>
             <!-- Sharing videos, songs or pictures adds them to the Convert page. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

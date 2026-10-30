@@ -106,6 +106,15 @@ class BatchModel(app: Application) : AndroidViewModel(app) {
         error = null
     }
 
+    /** A redline://handoff link from the desktop: show these links in the inbox. */
+    fun openWith(text: String) {
+        stop()
+        input = text
+        items = emptyList()
+        error = null
+        open = true
+    }
+
     private fun update(index: Int, next: BatchState) {
         items = items.toMutableList().also { it[index] = it[index].copy(state = next) }
     }

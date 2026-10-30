@@ -138,6 +138,8 @@ pub fn show(ui: &mut Ui, app: &mut App) {
 
     network_card(ui, &mut app.settings.network);
     ui.add_space(16.0);
+    backup_card(ui, app);
+    ui.add_space(16.0);
 
     ui.label(
         RichText::new(format!(
@@ -151,6 +153,58 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         .small()
         .color(theme::SUBTLE),
     );
+}
+
+/// One file with Saved, playlists and portable settings. Machine paths stay with the machine.
+fn backup_card(ui: &mut Ui, app: &mut App) {
+    theme::card(ui, |ui| {
+        ui.label(theme::heading("Backup"));
+        ui.label(theme::muted(
+            "One file with Saved, playlists and settings. Restoring merges into this library and \
+             keeps this machine's folders.",
+        ));
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if theme::small_pill_button(ui, "Back up…", true).clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("Redline-backup.json")
+                    .add_filter("Redline backup", &["json"])
+                    .save_file()
+            {
+                match redline_core::backup::export(&app.saved, &app.library, &app.settings) {
+                    Ok(text) => match std::fs::write(&path, text) {
+                        Ok(()) => app.toast(format!("Backed up to {}", path.display())),
+                        Err(e) => app.toast(format!("Couldn't write the backup: {e}")),
+                    },
+                    Err(e) => app.toast(format!("Couldn't make the backup: {e:#}")),
+                }
+            }
+            if theme::ghost_button(ui, "Restore…", true).clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Redline backup", &["json"])
+                    .pick_file()
+            {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => match redline_core::backup::import(
+                        &text,
+                        &mut app.saved,
+                        &mut app.library,
+                        &mut app.settings,
+                    ) {
+                        Ok(report) => {
+                            app.saved.save_if_dirty();
+                            app.library.save_if_dirty();
+                            app.saved_page.open = None;
+                            app.playlists_page = Default::default();
+                            app.toast(report.message());
+                        }
+                        Err(e) => app.toast(format!("Couldn't restore that backup: {e:#}")),
+                    },
+                    Err(e) => app.toast(format!("Couldn't read that file: {e}")),
+                }
+            }
+        });
+    });
 }
 
 fn tools_card(ui: &mut Ui, app: &mut App) {

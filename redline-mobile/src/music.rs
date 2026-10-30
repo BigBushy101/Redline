@@ -45,7 +45,7 @@ const RESTART_AFTER: f64 = 3.0;
 /// told.
 #[derive(Default)]
 pub(crate) struct Controller {
-    library: Library,
+    pub(crate) library: Library,
     pub(crate) saved: Saved,
     /// Bumped whenever Saved or its refreshes change, so Kotlin re-reads only then.
     pub(crate) saved_version: u64,

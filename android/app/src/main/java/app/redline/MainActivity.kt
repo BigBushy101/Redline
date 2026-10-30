@@ -58,6 +58,14 @@ class MainActivity : ComponentActivity() {
     private fun handle(intent: Intent?) {
         when {
             intent == null -> Unit
+            // A QR handed over from the desktop: show its links in the Batch inbox.
+            intent.data?.let { it.scheme == "redline" && it.host == "handoff" } == true -> {
+                val links = intent.data?.getQueryParameter("links")
+                if (!links.isNullOrBlank()) {
+                    nav.tab = Tab.Download
+                    batch.openWith(links)
+                }
+            }
             // A link shared to one of the two share targets: save it, or download it right away.
             intent.getStringExtra(EXTRA_SHARE_MODE) != null -> {
                 val link = linkFromShare(intent.getCharSequenceExtra(Intent.EXTRA_TEXT))
