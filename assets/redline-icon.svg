@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="80" x2="900" y2="960" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1B171D"/>
+      <stop offset="0.55" stop-color="#0D0C10"/>
+      <stop offset="1" stop-color="#08080A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.28" cy="0.18" r="0.75">
+      <stop offset="0" stop-color="#E8263A" stop-opacity="0.28"/>
+      <stop offset="0.6" stop-color="#E8263A" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#E8263A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="disc" x1="300" y1="220" x2="760" y2="820" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF4754"/>
+      <stop offset="0.45" stop-color="#E8263A"/>
+      <stop offset="1" stop-color="#A80518"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="240" y1="180" x2="760" y2="820" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFB3B9" stop-opacity="0.75"/>
+      <stop offset="0.5" stop-color="#FF7B86" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#6E0010" stop-opacity="0.4"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.35" cy="0.25" r="0.7">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="26" stdDeviation="30" flood-color="#000000" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="224" fill="url(#glow)"/>
+  <rect x="5" y="5" width="1014" height="1014" rx="219" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="10"/>
+
+  <g filter="url(#shadow)">
+    <circle cx="512" cy="512" r="352" fill="url(#disc)"/>
+    <circle cx="512" cy="512" r="352" fill="url(#sheen)"/>
+    <circle cx="512" cy="512" r="347" fill="none" stroke="url(#rim)" stroke-width="10"/>
+
+    <g fill="none" stroke="#720411" stroke-opacity="0.42" stroke-width="5">
+      <circle cx="512" cy="512" r="306"/>
+      <circle cx="512" cy="512" r="278"/>
+      <circle cx="512" cy="512" r="250"/>
+      <circle cx="512" cy="512" r="222"/>
+      <circle cx="512" cy="512" r="194"/>
+      <circle cx="512" cy="512" r="166"/>
+    </g>
+    <g fill="none" stroke="#FFB7BE" stroke-opacity="0.18" stroke-width="3" stroke-dasharray="34 62">
+      <circle cx="512" cy="512" r="292"/>
+      <circle cx="512" cy="512" r="236"/>
+    </g>
+
+    <circle cx="512" cy="512" r="134" fill="#0A090C"/>
+    <circle cx="512" cy="512" r="134" fill="none" stroke="#FF6773" stroke-opacity="0.6" stroke-width="5"/>
+    <circle cx="512" cy="512" r="118" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="2"/>
+
+    <path d="M462 432 L462 592 L608 512 Z" fill="#FFF8F4" stroke="#FFF8F4" stroke-width="30" stroke-linejoin="round"/>
+  </g>
+</svg>
