@@ -16,6 +16,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import app.redline.ui.RedlineRoot
 import app.redline.ui.Tab
+import app.redline.ui.batch.BatchModel
 import app.redline.ui.convert.ConvertModel
 import app.redline.ui.download.DownloadModel
 import app.redline.ui.library.LibrarySection
@@ -29,6 +30,7 @@ import app.redline.util.linkFromShare
 class MainActivity : ComponentActivity() {
     private val nav: NavModel by viewModels()
     private val download: DownloadModel by viewModels()
+    private val batch: BatchModel by viewModels()
     private val convert: ConvertModel by viewModels()
     private val playlists: PlaylistsModel by viewModels()
     private val saved: SavedModel by viewModels()
@@ -42,7 +44,7 @@ class MainActivity : ComponentActivity() {
         val state = (application as RedlineApp).state
         setContent {
             RedlineTheme {
-                RedlineRoot(state, download, convert, playlists, saved, local, nav)
+                RedlineRoot(state, download, batch, convert, playlists, saved, local, nav)
             }
         }
     }

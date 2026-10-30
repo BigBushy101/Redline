@@ -237,12 +237,15 @@ fun InputField(
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     shapeRound: Boolean = false,
+    singleLine: Boolean = true,
+    minLines: Int = 1,
 ) {
     TextField(
         value = value,
         onValueChange = onChange,
         modifier = modifier.fillMaxWidth(),
-        singleLine = true,
+        singleLine = singleLine,
+        minLines = minLines,
         placeholder = { Text(placeholder, color = RedlineColors.Subtle) },
         leadingIcon = leading?.let { { Icon(it, contentDescription = null, tint = RedlineColors.Muted) } },
         trailingIcon = trailing,

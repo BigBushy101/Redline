@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod convert;
 pub mod download;
 pub mod history;

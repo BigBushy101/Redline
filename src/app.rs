@@ -25,6 +25,7 @@ use crate::ui;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Download,
+    Batch,
     Convert,
     /// The overview, or one platform's page.
     Saved(Option<Platform>),
@@ -48,6 +49,7 @@ pub struct App {
     pub history: History,
     pub installer: Installer,
     pub download: ui::download::DownloadPage,
+    pub batch: ui::batch::BatchPage,
     pub convert: ui::convert::ConvertPage,
     pub history_page: ui::history::HistoryPage,
     pub settings_page: ui::settings::SettingsPage,
@@ -122,6 +124,7 @@ impl App {
             history: History::load(),
             installer: Installer::default(),
             download: Default::default(),
+            batch: Default::default(),
             convert: Default::default(),
             history_page: Default::default(),
             settings_page: Default::default(),
@@ -439,6 +442,7 @@ impl App {
                     })
                     .show(ui, |ui| match self.page {
                         Page::Download => ui::download::show(ui, self),
+                        Page::Batch => ui::batch::show(ui, self),
                         Page::Convert => ui::convert::show(ui, self),
                         Page::Saved(p) => ui::saved::show(ui, self, p),
                         Page::Playlists => ui::playlists::show(ui, self),
@@ -492,6 +496,24 @@ impl App {
         if self.page == Page::Playlists && ui::playlists::drop_files(self, dropped.clone()) {
             return;
         }
+        if self.page == Page::Batch {
+            let mut added = false;
+            for path in &dropped {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    if !self.batch.input.is_empty() {
+                        self.batch.input.push('\n');
+                    }
+                    self.batch.input.push_str(&text);
+                    added = true;
+                }
+            }
+            if added {
+                self.toast("Links added to Batch");
+            } else {
+                self.toast("Drop a text file with one link per line.");
+            }
+            return;
+        }
         self.add_to_convert(dropped);
         self.page = Page::Convert;
     }
@@ -514,6 +536,7 @@ impl eframe::App for App {
         #[cfg(windows)]
         self.media_keys_frame(ctx);
         self.playlists_page.poll(&mut self.library);
+        ui::batch::poll(self);
         ui::saved::poll(self);
         ui::local::poll(self);
         ui::replace::poll(self);

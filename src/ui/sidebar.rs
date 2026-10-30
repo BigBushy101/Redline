@@ -48,6 +48,7 @@ pub fn show(ui: &mut Ui, app: &mut App) {
         .show(ui, |ui| {
             for (page, icon, label, badge) in [
                 (Page::Download, icons::DOWNLOAD_SIMPLE, "Download", None),
+                (Page::Batch, icons::LIST_CHECKS, "Batch", None),
                 (Page::Convert, icons::ARROWS_LEFT_RIGHT, "Convert", None),
                 (Page::Saved(None), icons::BOOKMARKS_SIMPLE, "Saved", None),
                 (Page::Playlists, icons::PLAYLIST, "Playlists", None),

@@ -152,6 +152,16 @@ fn save_info_with(app: &mut App, info: &MediaInfo, url: &str, quiet: bool) {
     }
 }
 
+/// Saves a link that's already been looked up, returning what happened for callers that show
+/// their own result (the Batch page). The toast and offline queueing stay the same.
+pub fn save_info_result(app: &mut App, info: &MediaInfo, url: &str) -> anyhow::Result<SaveOutcome> {
+    let out = app.saved.save_link(info, url)?;
+    if let SaveOutcome::Refreshed { id, sync, .. } = &out {
+        keep_new_offline(app, *id, &sync.added);
+    }
+    Ok(out)
+}
+
 /// Queues downloads that aren't already waiting in the queue. Returns how many.
 fn queue_downloads(app: &mut App, planned: Vec<PlannedDownload>) -> usize {
     let planned = saved::not_queued(planned, &app.jobs);

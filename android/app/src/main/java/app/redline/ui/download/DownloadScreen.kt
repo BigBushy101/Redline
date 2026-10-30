@@ -58,6 +58,8 @@ import app.redline.core.MediaInfoRecord
 import app.redline.core.SettingsRecord
 import app.redline.core.ToolsStatusRecord
 import app.redline.core.fmtDuration
+import app.redline.ui.batch.BatchModel
+import app.redline.ui.batch.BatchScreen
 import app.redline.ui.components.Chips
 import app.redline.ui.components.Eyebrow
 import app.redline.ui.components.GhostButton
@@ -78,6 +80,7 @@ import coil3.compose.AsyncImage
 @Composable
 fun DownloadScreen(
     model: DownloadModel,
+    batch: BatchModel,
     settings: SettingsRecord,
     lists: DownloadChoiceListsRecord,
     tools: ToolsStatusRecord?,
@@ -85,7 +88,18 @@ fun DownloadScreen(
     openSettings: () -> Unit,
     onSave: (String) -> Unit,
     isSaving: (String) -> Boolean,
+    onOpenQueue: () -> Unit,
+    onOpenSaved: () -> Unit,
 ) {
+    if (batch.open) {
+        BatchScreen(
+            batch,
+            onBack = { batch.open = false },
+            onOpenQueue = onOpenQueue,
+            onOpenSaved = onOpenSaved,
+        )
+        return
+    }
     val focus = LocalFocusManager.current
     Column(
         Modifier
@@ -108,6 +122,11 @@ fun DownloadScreen(
                 focus.clearFocus()
                 model.lookUp()
             }
+            GhostButton(
+                if (batch.running) "Batch — running" else "Batch links…",
+                { batch.open = true },
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             val info = model.info
             when {

@@ -74,6 +74,7 @@ import app.redline.ui.download.DownloadScreen
 import app.redline.ui.history.HistoryAction
 import app.redline.ui.history.HistoryScreen
 import app.redline.ui.library.LibraryScreen
+import app.redline.ui.batch.BatchModel
 import app.redline.ui.library.LibrarySection
 import app.redline.ui.local.LocalMessage
 import app.redline.ui.local.LocalModel
@@ -111,6 +112,7 @@ enum class Tab(val label: String, val icon: ImageVector, val inBar: Boolean = tr
 fun RedlineRoot(
     state: RedlineState,
     download: DownloadModel,
+    batch: BatchModel,
     convert: ConvertModel,
     playlists: PlaylistsModel,
     saved: SavedModel,
@@ -128,7 +130,7 @@ fun RedlineRoot(
             }
             AskForNotifications()
             val music = state.music
-            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, convert, playlists, saved, local, nav)
+            if (music == null) Failed("The player didn't start.") else Pages(state, music, download, batch, convert, playlists, saved, local, nav)
         }
     }
 }
@@ -153,6 +155,7 @@ private fun Pages(
     state: RedlineState,
     music: MusicState,
     download: DownloadModel,
+    batch: BatchModel,
     convert: ConvertModel,
     playlistsModel: PlaylistsModel,
     savedModel: SavedModel,
@@ -325,6 +328,7 @@ private fun Pages(
                     when (tab) {
                         Tab.Download -> DownloadScreen(
                             download,
+                            batch,
                             s,
                             lists,
                             tools,
@@ -332,6 +336,12 @@ private fun Pages(
                             openSettings = openSettings,
                             onSave = savedModel::saveLink,
                             isSaving = savedModel::isSaving,
+                            onOpenQueue = { selectTab(Tab.Queue) },
+                            onOpenSaved = {
+                                savedModel.showOverview()
+                                nav.librarySection = LibrarySection.Saved
+                                selectTab(Tab.Library)
+                            },
                         )
                         Tab.Convert -> ConvertScreen(convert, s, convertLists, encoders, tools, openSettings = openSettings)
                         Tab.Library -> CompositionLocalProvider(LocalTrackActions provides trackActions) {
