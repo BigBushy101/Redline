@@ -3,7 +3,7 @@ members = [".", "redline-core", "redline-mobile"]
 
 [package]
 name = "redline"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 description = "Download media with yt-dlp and convert local files, in a Spotify-style egui app"
 
