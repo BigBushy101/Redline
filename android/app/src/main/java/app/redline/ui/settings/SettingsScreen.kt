@@ -6,6 +6,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -263,13 +265,25 @@ private fun DefaultsCard(
     }
 }
 
-/** Cookies file, proxy, speed limit, retries (settings.rs `network_card`, minus browser cookies). */
+/** Sign-in, proxy, speed limit, retries (settings.rs `network_card`, with an in-app sign-in for browser cookies). */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NetworkCard(settings: SettingsRecord, update: ((SettingsRecord) -> SettingsRecord) -> Unit) {
     val net = settings.network
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var cookieError by remember { mutableStateOf<String?>(null) }
+    var signingIn by remember { mutableStateOf(false) }
+    if (signingIn) {
+        SignInDialog(
+            onSignedIn = { p ->
+                signingIn = false
+                cookieError = null
+                update { it.copy(network = it.network.copy(cookiesFile = p)) }
+            },
+            onDismiss = { signingIn = false },
+        )
+    }
     // yt-dlp needs a real file path, so a picked cookies.txt is copied into the app's storage.
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -281,16 +295,20 @@ private fun NetworkCard(settings: SettingsRecord, update: ((SettingsRecord) -> S
             }.onFailure { cookieError = "Couldn't read that file: ${it.message}" }
         }
     }
-    SectionCard(title = "Network & sign-in", subtitle = "A cookies.txt from a signed-in browser opens age-restricted, private or members-only videos.") {
+    SectionCard(title = "Network & sign-in", subtitle = "Signing in opens age-restricted, private or members-only videos, and gets past YouTube's bot check.") {
         OptionRow("Cookies", hint = cookieError) {
             Text(
-                if (net.cookiesFile != null) "cookies.txt file" else "Don't sign in",
+                if (net.cookiesFile != null) "Signed in (cookies.txt)" else "Not signed in",
                 color = RedlineColors.Text,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                GhostButton("Sign in…", { signingIn = true })
                 GhostButton("Choose cookies.txt…", { pick.launch(arrayOf("text/*", "application/octet-stream")) })
                 if (net.cookiesFile != null) {
-                    GhostButton("Don't sign in", { update { it.copy(network = it.network.copy(cookiesFile = null)) } })
+                    GhostButton("Sign out", {
+                        clearSignIn()
+                        update { it.copy(network = it.network.copy(cookiesFile = null)) }
+                    })
                 }
             }
         }

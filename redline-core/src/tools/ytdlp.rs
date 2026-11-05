@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -182,6 +184,95 @@ impl NetworkOptions {
         }
         a
     }
+
+    /// Whether these settings sign in, with browser cookies or a cookies.txt.
+    pub fn signs_in(&self) -> bool {
+        self.cookies_browser.as_deref().is_some_and(|b| !b.is_empty()) || self.cookies_file.is_some()
+    }
+
+    /// The same settings without the sign-in.
+    pub fn signed_out(&self) -> Self {
+        Self { cookies_browser: None, cookies_file: None, ..self.clone() }
+    }
+}
+
+/// How long look-ups sign in straight away after YouTube's bot check. The check is about the
+/// network, not the link, so asking signed out again soon would only meet it again.
+const BOT_CHECK_SIGN_IN: Duration = Duration::from_secs(30 * 60);
+
+/// Until when look-ups sign in straight away, set by a bot check.
+static SIGN_IN_FIRST: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// yt-dlp's wording for links only a signed-in account can open.
+const NEEDS_SIGN_IN: &[&str] = &[
+    "sign in to confirm your age",
+    "age-restricted",
+    "private video",
+    "members-only",
+    "login required",
+    "requires authentication",
+];
+
+/// What a signed-out look-up's error says signing in would do.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SignInHelps {
+    No,
+    /// The link needs an account.
+    ThisLink,
+    /// YouTube's bot check, which holds for every link on this network for a while.
+    ForAWhile,
+}
+
+fn sign_in_helps(err: &str) -> SignInHelps {
+    let lower = err.to_lowercase();
+    if lower.contains("not a bot") {
+        SignInHelps::ForAWhile
+    } else if NEEDS_SIGN_IN.iter().any(|w| lower.contains(w)) {
+        SignInHelps::ThisLink
+    } else {
+        SignInHelps::No
+    }
+}
+
+/// Whether look-ups with a sign-in set should use it right away.
+fn signing_in_first(until: &Mutex<Option<Instant>>, now: Instant) -> bool {
+    until.lock().unwrap().is_some_and(|t| now < t)
+}
+
+/// Runs a look-up signed out first when a sign-in is set, and again signed in only when the
+/// error says that would help. YouTube's fast clients ([`YOUTUBE_CLIENTS`]) don't take
+/// cookies, so with them yt-dlp falls back to clients that need a JS challenge per song and
+/// hand out little more than a 360p video: about 20 s a song on a phone instead of 4.
+fn signed_out_first<T>(net: &NetworkOptions, look_up: impl Fn(&NetworkOptions) -> Result<T>) -> Result<T> {
+    signed_out_first_at(&SIGN_IN_FIRST, Instant::now(), net, look_up)
+}
+
+fn signed_out_first_at<T>(
+    until: &Mutex<Option<Instant>>,
+    now: Instant,
+    net: &NetworkOptions,
+    look_up: impl Fn(&NetworkOptions) -> Result<T>,
+) -> Result<T> {
+    if !net.signs_in() || signing_in_first(until, now) {
+        return look_up(net);
+    }
+    let err = match look_up(&net.signed_out()) {
+        Err(e) => e,
+        ok => return ok,
+    };
+    match sign_in_helps(&err.to_string()) {
+        SignInHelps::No => Err(err),
+        SignInHelps::ThisLink => look_up(net),
+        SignInHelps::ForAWhile => {
+            *until.lock().unwrap() = Some(now + BOT_CHECK_SIGN_IN);
+            look_up(net)
+        }
+    }
+}
+
+/// The settings the next look-up starts with (see [`signed_out_first`]).
+fn first_look_up(net: &NetworkOptions) -> NetworkOptions {
+    if signing_in_first(&SIGN_IN_FIRST, Instant::now()) { net.clone() } else { net.signed_out() }
 }
 
 /// Only download part of the media. Times are in seconds; `end: None` runs to the end.
@@ -592,7 +683,7 @@ pub(crate) fn base_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<st
 
 /// `yt-dlp -J --flat-playlist URL`, parsed into the bits the UI shows.
 pub fn fetch_info(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<MediaInfo> {
-    let info = parse_info(&run_json(info_command(tools, net, url)?)?)?;
+    let info = signed_out_first(net, |net| parse_info(&run_json(info_command(tools, net, url)?)?))?;
     crate::linkcheck::shared().record_listing(&info.items);
     Ok(info)
 }
@@ -662,6 +753,10 @@ fn stream_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::proces
 /// yt-dlp kept running for it (see [`super::ytdlp_worker`], warmed at launch by
 /// [`warm_stream_worker`]) when one can be, as songs are looked up one after another.
 pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
+    signed_out_first(net, |net| resolve_stream_as(tools, net, url))
+}
+
+fn resolve_stream_as(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
     match super::ytdlp_worker::extract(stream_command(tools, net)?, url) {
         Some(Ok(info)) => stream_info(serde_json::from_value(info).context("unexpected yt-dlp output")?),
         Some(Err(e)) => bail!("{}", friendly_error(error_line(&e))),
@@ -681,7 +776,8 @@ pub fn warm_stream_worker(tools: ToolPaths, net: NetworkOptions) {
         return;
     }
     thread::spawn(move || {
-        if let Ok(cmd) = stream_command(&tools, &net) {
+        // The worker the next look-up asks: usually the signed-out one.
+        if let Ok(cmd) = stream_command(&tools, &first_look_up(&net)) {
             super::ytdlp_worker::warm(cmd);
         }
     });
@@ -769,7 +865,8 @@ fn parse_info(json: &[u8]) -> Result<MediaInfo> {
 }
 
 /// The settings [`friendly_error`] points to. Android has no tools installer or browser
-/// cookies (its yt-dlp, Python and QuickJS ship with the app), only a cookies.txt file.
+/// cookies (its yt-dlp, Python and QuickJS ship with the app), only a cookies.txt file, which
+/// its in-app sign-in writes.
 #[cfg(not(target_os = "android"))]
 mod advice {
     pub const JS_RUNTIME: &str = "YouTube needs a JavaScript runtime. Install Deno from Settings > Tools.";
@@ -783,10 +880,9 @@ mod advice {
 mod advice {
     pub const JS_RUNTIME: &str = "YouTube needs a JavaScript runtime, and the one built into Redline didn't work. \
                                   Reinstalling Redline may fix it.";
-    pub const COOKIES_UNREADABLE: &str = "Redline couldn't read the cookies.txt file. Choose it again in Settings > Network & sign-in.";
-    pub const BOT_CHECK: &str = "Or sign in with a cookies.txt from a signed-in browser in Settings > Network & sign-in.";
-    pub const SIGN_IN: &str = "This needs a signed-in account. Choose a cookies.txt from a signed-in browser \
-                               in Settings > Network & sign-in.";
+    pub const COOKIES_UNREADABLE: &str = "Redline couldn't read the sign-in cookies. Sign in again in Settings > Network & sign-in.";
+    pub const BOT_CHECK: &str = "Or sign in from Settings > Network & sign-in.";
+    pub const SIGN_IN: &str = "This needs a signed-in account. Sign in from Settings > Network & sign-in.";
 }
 
 /// Adds a hint to errors whose cause isn't obvious from yt-dlp's wording.
@@ -808,13 +904,7 @@ pub fn friendly_error(msg: &str) -> String {
         || lower.contains("cookie") && lower.contains("permission denied")
     {
         format!("{msg}\n\n{}", advice::COOKIES_UNREADABLE)
-    } else if lower.contains("sign in to confirm your age")
-        || lower.contains("age-restricted")
-        || lower.contains("private video")
-        || lower.contains("members-only")
-        || lower.contains("login required")
-        || lower.contains("requires authentication")
-    {
+    } else if NEEDS_SIGN_IN.iter().any(|w| lower.contains(w)) {
         format!("{msg}\n\n{}", advice::SIGN_IN)
     } else if lower.contains("unsupported url") {
         "That link isn't from a supported site.".to_owned()
@@ -1307,6 +1397,48 @@ mod tests {
         assert!(!build_args(&r).contains(&"--download-archive".to_string()));
         r.archive = Some(PathBuf::from("arch.txt"));
         assert!(has_pair(&build_args(&r), "--download-archive", "arch.txt"));
+    }
+
+    /// A look-up that answers `err` when signed out, and records which way it was asked.
+    fn fake(err: Option<&'static str>, asked: &std::cell::RefCell<Vec<bool>>) -> impl Fn(&NetworkOptions) -> Result<()> {
+        move |net| {
+            asked.borrow_mut().push(net.signs_in());
+            match err {
+                Some(e) if !net.signs_in() => bail!("{}", friendly_error(e)),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn look_ups_sign_in_only_when_it_helps() {
+        let signed_in = NetworkOptions { cookies_file: Some("c.txt".into()), proxy: "p".into(), ..Default::default() };
+        assert!(signed_in.signs_in() && !signed_in.signed_out().signs_in());
+        assert_eq!(signed_in.signed_out().proxy, "p", "the rest is kept");
+        let until = Mutex::new(None);
+        let now = Instant::now();
+        let run = |err, at| {
+            let asked = std::cell::RefCell::new(Vec::new());
+            let r = signed_out_first_at(&until, at, &signed_in, fake(err, &asked));
+            (r.is_ok(), asked.into_inner())
+        };
+
+        // Without a sign-in set there's only one way to ask.
+        let asked = std::cell::RefCell::new(Vec::new());
+        signed_out_first_at(&until, now, &NetworkOptions::default(), fake(None, &asked)).unwrap();
+        assert_eq!(asked.into_inner(), [false]);
+
+        assert_eq!(run(None, now), (true, vec![false]), "signed out works: no sign-in");
+        assert_eq!(run(Some("ERROR: Video unavailable"), now), (false, vec![false]), "signing in wouldn't help");
+        assert_eq!(run(Some("Sign in to confirm your age"), now), (true, vec![false, true]), "this link needs it");
+        assert_eq!(until.lock().unwrap().is_some(), false, "only for that link");
+
+        let bot = "[youtube] x: Sign in to confirm you're not a bot. Use --cookies-from-browser";
+        assert_eq!(run(Some(bot), now), (true, vec![false, true]), "bot check: signed in");
+        let later = now + Duration::from_secs(60);
+        assert_eq!(run(Some(bot), later), (true, vec![true]), "then straight away");
+        let after = now + BOT_CHECK_SIGN_IN + Duration::from_secs(1);
+        assert_eq!(run(None, after), (true, vec![false]), "until the window ends");
     }
 
     fn has_pair(args: &[String], a: &str, b: &str) -> bool {
