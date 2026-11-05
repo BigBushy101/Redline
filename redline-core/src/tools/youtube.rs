@@ -17,9 +17,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::ytdlp::{NetworkOptions, StreamInfo};
+use super::ytdlp::{MediaInfo, NetworkOptions, PlaylistItem, StreamInfo};
 
 const PLAYER_API: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+const BROWSE_API: &str = "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false";
 const CLIENT_NAME: &str = "VISIONOS";
 const CLIENT_ID: &str = "101";
 const CLIENT_VERSION: &str = "1.02";
@@ -31,6 +32,9 @@ const USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Most pages of a playlist read (20 songs each); a longer one is left to yt-dlp.
+const MAX_PAGES: usize = 250;
 
 /// The visitor ID requests carry, once YouTube handed one out.
 static VISITOR: Mutex<Option<String>> = Mutex::new(None);
@@ -46,11 +50,7 @@ pub fn video_id(url: &str) -> Option<String> {
 /// didn't hand one over; yt-dlp is asked then.
 pub fn resolve(net: &NetworkOptions, url: &str) -> Option<StreamInfo> {
     let id = video_id(url)?;
-    let mut config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT));
-    if !net.proxy.trim().is_empty() {
-        config = config.proxy(Some(ureq::Proxy::new(net.proxy.trim()).ok()?));
-    }
-    let agent: ureq::Agent = config.build().into();
+    let agent = agent(net)?;
     let visitor = VISITOR.lock().unwrap().clone();
     let text = ask(&agent, &id, visitor.as_deref())?;
     if let Some(stream) = parse(&text) {
@@ -65,8 +65,90 @@ pub fn resolve(net: &NetworkOptions, url: &str) -> Option<StreamInfo> {
     parse(&ask(&agent, &id, Some(&fresh))?)
 }
 
+fn agent(net: &NetworkOptions) -> Option<ureq::Agent> {
+    let mut config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT));
+    if !net.proxy.trim().is_empty() {
+        config = config.proxy(Some(ureq::Proxy::new(net.proxy.trim()).ok()?));
+    }
+    Some(config.build().into())
+}
+
+/// A YouTube playlist link's songs, listed as the visionOS client sees them (the web client's
+/// layout is newer and keeps changing). `None` when it isn't a playlist link, or any page of it
+/// didn't come: a partial list would look like songs removed from it. yt-dlp lists it then.
+pub fn playlist(net: &NetworkOptions, url: &str) -> Option<MediaInfo> {
+    let canonical = crate::platform::canonical(url);
+    let id = canonical.strip_prefix("https://www.youtube.com/playlist?list=")?;
+    let agent = agent(net)?;
+    let visitor = VISITOR.lock().unwrap().clone();
+    let browse = |api: &str, body| -> Option<serde_json::Value> {
+        serde_json::from_str(&call(&agent, api, body, visitor.as_deref())?).ok()
+    };
+    let first = browse(BROWSE_API, serde_json::json!({"browseId": format!("VL{id}")}))?;
+    let mut items = Vec::new();
+    let mut next = read_page(
+        &first["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]["tabRenderer"]["content"]
+            ["sectionListRenderer"]["contents"][0]["playlistVideoListRenderer"],
+        &mut items,
+    )?;
+    for _ in 0..MAX_PAGES {
+        let Some(token) = next else { break };
+        // The token comes URL-encoded, ready for the query string.
+        let page = browse(&format!("{BROWSE_API}&ctoken={token}&continuation={token}&type=next"), serde_json::json!({}))?;
+        next = read_page(&page["continuationContents"]["playlistVideoListContinuation"], &mut items)?;
+    }
+    if next.is_some() || items.is_empty() {
+        return None;
+    }
+    let header = &first["header"]["playlistHeaderRenderer"];
+    Some(MediaInfo {
+        title: text(&header["title"])?,
+        uploader: text(&header["ownerText"]),
+        is_playlist: true,
+        entries: items.len(),
+        items,
+        extractor: Some("youtube:tab".into()),
+        ..Default::default()
+    })
+}
+
+/// Adds a page's songs to `items`. `None` if it isn't a page of a playlist, else the token
+/// of the page after it, if there is one.
+fn read_page(list: &serde_json::Value, items: &mut Vec<PlaylistItem>) -> Option<Option<String>> {
+    for entry in list["contents"].as_array()? {
+        let v = &entry["playlistVideoRenderer"];
+        let Some(id) = v["videoId"].as_str() else { continue };
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        let title = text(&v["title"]);
+        items.push(PlaylistItem {
+            availability: crate::linkcheck::status_from_flat(title.as_deref(), None),
+            title: title.unwrap_or_else(|| url.clone()),
+            uploader: text(&v["shortBylineText"]),
+            duration: v["lengthSeconds"].as_str().and_then(|s| s.parse().ok()),
+            thumbnail: v["thumbnail"]["thumbnails"].as_array().and_then(|t| t.last()).and_then(|t| t["url"].as_str()).map(str::to_owned),
+            url,
+        });
+    }
+    Some(list["continuations"][0]["nextContinuationData"]["continuation"].as_str().map(str::to_owned))
+}
+
+/// A `{"runs": [{"text": ..}, ..]}` (or `{"simpleText": ..}`) label, joined.
+fn text(v: &serde_json::Value) -> Option<String> {
+    let s = match v["runs"].as_array() {
+        Some(runs) => runs.iter().filter_map(|r| r["text"].as_str()).collect(),
+        None => v["simpleText"].as_str()?.to_owned(),
+    };
+    (!s.is_empty()).then_some(s)
+}
+
 /// One player request for video `id`; YouTube's JSON answer.
 fn ask(agent: &ureq::Agent, id: &str, visitor: Option<&str>) -> Option<String> {
+    let body = serde_json::json!({"videoId": id, "contentCheckOk": true, "racyCheckOk": true});
+    call(agent, PLAYER_API, body, visitor)
+}
+
+/// One request to YouTube's API as the visionOS client, `body` plus the client's context.
+fn call(agent: &ureq::Agent, api: &str, mut body: serde_json::Value, visitor: Option<&str>) -> Option<String> {
     let mut client = serde_json::json!({
         "clientName": CLIENT_NAME,
         "clientVersion": CLIENT_VERSION,
@@ -77,7 +159,7 @@ fn ask(agent: &ureq::Agent, id: &str, visitor: Option<&str>) -> Option<String> {
         "hl": "en",
     });
     let mut req = agent
-        .post(PLAYER_API)
+        .post(api)
         .header("User-Agent", USER_AGENT)
         .header("X-YouTube-Client-Name", CLIENT_ID)
         .header("X-YouTube-Client-Version", CLIENT_VERSION)
@@ -86,12 +168,7 @@ fn ask(agent: &ureq::Agent, id: &str, visitor: Option<&str>) -> Option<String> {
         client["visitorData"] = v.into();
         req = req.header("X-Goog-Visitor-Id", v);
     }
-    let body = serde_json::json!({
-        "context": {"client": client},
-        "videoId": id,
-        "contentCheckOk": true,
-        "racyCheckOk": true,
-    });
+    body["context"] = serde_json::json!({"client": client});
     req.content_type("application/json")
         .send(body.to_string())
         .ok()?
@@ -252,6 +329,40 @@ mod tests {
         assert_eq!(visitor_of(bot), None);
         let live = r#"{"playabilityStatus": {"status": "OK"}, "videoDetails": {"isLive": true}}"#;
         assert!(parse(live).is_none());
+    }
+
+    #[test]
+    fn reads_playlist_pages() {
+        let page: serde_json::Value = serde_json::from_str(r#"{
+            "contents": [
+                {"playlistVideoRenderer": {"videoId": "aaaaaaaaaaa", "title": {"runs": [{"text": "Song"}]},
+                    "shortBylineText": {"runs": [{"text": "Band"}]}, "lengthSeconds": "235",
+                    "thumbnail": {"thumbnails": [{"url": "small"}, {"url": "big"}]}}},
+                {"playlistVideoRenderer": {"videoId": "bbbbbbbbbbb", "title": {"simpleText": "[Deleted video]"}}},
+                {"somethingElse": {}}
+            ],
+            "continuations": [{"nextContinuationData": {"continuation": "tok%3D"}}]
+        }"#).unwrap();
+        let mut items = Vec::new();
+        assert_eq!(read_page(&page, &mut items), Some(Some("tok%3D".into())));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].url, "https://www.youtube.com/watch?v=aaaaaaaaaaa");
+        assert_eq!((items[0].title.as_str(), items[0].uploader.as_deref()), ("Song", Some("Band")));
+        assert_eq!((items[0].duration, items[0].thumbnail.as_deref()), (Some(235.0), Some("big")));
+        assert_eq!(items[1].availability, Some(crate::linkcheck::LinkStatus::Dead));
+        // The last page has no token; something that isn't a page at all is None.
+        assert_eq!(read_page(&serde_json::json!({"contents": []}), &mut items), Some(None));
+        assert_eq!(read_page(&serde_json::json!({}), &mut items), None);
+    }
+
+    /// Lists a public playlist of over 100 songs, so it takes several pages.
+    #[test]
+    #[ignore = "network"]
+    fn live_playlist() {
+        let url = "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+        let info = playlist(&NetworkOptions::default(), url).expect("listed");
+        assert!(info.is_playlist && info.items.len() > 100, "{} items", info.items.len());
+        assert!(!info.title.is_empty());
     }
 
     /// Asks YouTube for a less-watched video that's refused without a visitor ID.

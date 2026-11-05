@@ -188,7 +188,10 @@ impl Shared {
             ytdlp::fetch_info(&tools, &net, url)
         }
         .map_err(RedlineError::failed)?;
-        self.state().remember(url.to_owned(), info.clone());
+        // A song saved through YouTube directly has no formats to plan a download from.
+        if info.is_playlist || !info.formats.is_empty() {
+            self.state().remember(url.to_owned(), info.clone());
+        }
         Ok(info)
     }
 }

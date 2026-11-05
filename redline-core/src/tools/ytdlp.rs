@@ -416,12 +416,32 @@ pub const TITLE_LOOKUP_LIMIT: usize = 100;
 
 /// [`fetch_info`], then looks up the titles of items the listing left untitled (SoundCloud
 /// sets past their first few tracks), skipping links `known` already has names for.
+///
+/// A YouTube playlist or single video is asked of YouTube directly ([`super::youtube`])
+/// first, as playing is: saving only needs titles, artists, lengths and covers, not formats.
 pub fn fetch_titled(
     tools: &ToolPaths,
     net: &NetworkOptions,
     url: &str,
     known: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<MediaInfo> {
+    if let Some(info) = super::youtube::playlist(net, url) {
+        crate::linkcheck::shared().record_listing(&info.items);
+        return Ok(info);
+    }
+    // A link with `list=` may mean its playlist, which yt-dlp lists.
+    if !url.contains("list=")
+        && let Some(s) = super::youtube::resolve(net, url)
+    {
+        return Ok(MediaInfo {
+            title: s.title,
+            uploader: s.artist,
+            duration: s.duration,
+            thumbnail: s.thumbnail,
+            extractor: Some("youtube".into()),
+            ..Default::default()
+        });
+    }
     let mut info = fetch_info(tools, net, url)?;
     fill_titles(tools, net, &mut info.items, known, TITLE_LOOKUP_LIMIT);
     Ok(info)
@@ -753,17 +773,14 @@ fn stream_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::proces
 /// yt-dlp kept running for it (see [`super::ytdlp_worker`], warmed at launch by
 /// [`warm_stream_worker`]) when one can be, as songs are looked up one after another.
 ///
-/// Signed out, a YouTube video is first asked of YouTube directly ([`super::youtube`]), which
-/// skips yt-dlp altogether; yt-dlp answers whatever that can't.
+/// A YouTube video is first asked of YouTube directly ([`super::youtube`]), signed out, which
+/// skips yt-dlp altogether; yt-dlp answers whatever that can't. That holds even while look-ups
+/// sign in after a bot check, as the direct ask is cheap and often still answered.
 pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
-    signed_out_first(net, |net| {
-        if !net.signs_in()
-            && let Some(stream) = super::youtube::resolve(net, url)
-        {
-            return Ok(stream);
-        }
-        resolve_stream_as(tools, net, url)
-    })
+    if let Some(stream) = super::youtube::resolve(net, url) {
+        return Ok(stream);
+    }
+    signed_out_first(net, |net| resolve_stream_as(tools, net, url))
 }
 
 fn resolve_stream_as(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
