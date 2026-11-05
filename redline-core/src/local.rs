@@ -132,12 +132,10 @@ fn scan_with(tools: &ToolPaths, folders: &[PathBuf], added: &[PathBuf], cache: &
             forget_cover(&c.track);
         }
     }
-    if let Some(dir) = cache.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     if let Ok(json) = serde_json::to_string(&found) {
-        let _ = std::fs::write(cache, json);
+        let _ = crate::write_atomic(cache, json.as_bytes());
     }
+
     found.into_iter().map(|c| c.track).collect()
 }
 

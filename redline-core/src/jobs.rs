@@ -108,11 +108,14 @@ impl CancelHandle {
 
     /// Registers the running process; kills it straight away if cancel already happened.
     pub fn attach(&self, mut child: Child) {
+        // Checked under the lock `cancel()` takes, so a cancel can't land between the two.
+        let mut slot = self.child.lock().unwrap();
         if self.is_cancelled() {
             tools::kill_tree(&mut child);
         }
-        *self.child.lock().unwrap() = Some(child);
+        *slot = Some(child);
     }
+
 
     /// Polls rather than blocking in `Child::wait` so `cancel()` can still take the lock.
     pub fn wait(&self) -> std::io::Result<std::process::ExitStatus> {

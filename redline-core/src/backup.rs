@@ -160,7 +160,11 @@ pub fn import(text: &str, saved: &mut Saved, library: &mut Library, settings: &m
     next.deno_path = settings.deno_path.clone();
     next.local_folders = settings.local_folders.clone();
     next.local_files = settings.local_files.clone();
+    // Sign-in belongs to the device too: another machine's cookie file or browser isn't here.
+    next.network.cookies_browser = settings.network.cookies_browser.clone();
+    next.network.cookies_file = settings.network.cookies_file.clone();
     *settings = next;
+
     report.settings_applied = true;
     Ok(report)
 }
@@ -201,6 +205,8 @@ mod tests {
         settings.download.max_height = 240;
         settings.download_dir = PathBuf::from("C:/machine/downloads");
         settings.local_folders = vec![PathBuf::from("C:/machine/music")];
+        settings.network.cookies_browser = Some("firefox".into());
+
 
         let text = export(&saved, &library, &settings).unwrap();
         let mut saved2 = Saved::default();
@@ -208,6 +214,8 @@ mod tests {
         let mut settings2 = Settings::default();
         settings2.download_dir = PathBuf::from("D:/current/downloads");
         settings2.local_folders = vec![PathBuf::from("D:/current/music")];
+        settings2.network.cookies_file = Some(PathBuf::from("D:/current/cookies.txt"));
+
         let report = import(&text, &mut saved2, &mut library2, &mut settings2).unwrap();
 
         assert_eq!(report.collections_added, 1);
@@ -216,6 +224,9 @@ mod tests {
         assert_eq!(library2.playlists[0].tracks.len(), 1);
         assert_eq!(settings2.download.max_height, 240);
         assert_eq!(settings2.download_dir, PathBuf::from("D:/current/downloads"));
+        assert_eq!(settings2.network.cookies_browser, None, "the other machine's sign-in stays there");
+        assert_eq!(settings2.network.cookies_file, Some(PathBuf::from("D:/current/cookies.txt")));
+
         assert_eq!(settings2.local_folders, vec![PathBuf::from("D:/current/music")]);
     }
 

@@ -229,16 +229,25 @@ fn extract(zip_path: &Path, dest_dir: &Path, names: &[&str]) -> Result<()> {
             continue;
         };
         if entry.is_file() && names.contains(&file_name.as_str()) {
+            // Unpacked aside and moved in whole: a half-written tool would count as installed.
             let dest = dest_dir.join(&file_name);
-            let mut out = File::create(&dest)
-                .with_context(|| format!("can't write {} (is it running?)", dest.display()))?;
-            std::io::copy(&mut entry, &mut out)?;
+            let part = dest.with_extension("part");
+            let mut out = File::create(&part).with_context(|| format!("can't write {}", part.display()))?;
+            if let Err(e) = std::io::copy(&mut entry, &mut out).and_then(|_| out.flush()) {
+                drop(out);
+                let _ = fs::remove_file(&part);
+                return Err(e).context(format!("couldn't unpack {file_name}"));
+            }
+            drop(out);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))?;
+                fs::set_permissions(&part, fs::Permissions::from_mode(0o755))?;
             }
+            fs::rename(&part, &dest)
+                .with_context(|| format!("can't write {} (is it running?)", dest.display()))?;
             found += 1;
+
         }
     }
     if found < names.len() {

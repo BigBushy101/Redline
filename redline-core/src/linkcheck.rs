@@ -696,14 +696,12 @@ impl LinkCheck {
         if !std::mem::take(&mut s.dirty) {
             return;
         }
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Some(cache) = &s.cache
             && let Ok(json) = serde_json::to_string(cache)
         {
-            let _ = std::fs::write(&self.path, json);
+            let _ = crate::write_atomic(&self.path, json.as_bytes());
         }
+
     }
 
     /// `tracks` with the dead ones taken out, and where `start` lands among the rest (the
