@@ -291,9 +291,11 @@ private fun WaveformStrip(s: PlayerSnapshotRecord, track: TrackRecord, music: Mu
         for (i in 0 until slots) {
             val from = i * bars.size / slots
             val to = ((i + 1) * bars.size / slots).coerceAtLeast(from + 1)
-            val peak = bars.subList(from, to).max()
+            // Average, not max: the loudest bin in a slot made quiet sections look as loud
+            // as the chorus.
+            val level = bars.subList(from, to).average().toFloat()
             val x = (i + 0.5f) * step
-            val amp = (peak * height * 0.42f).coerceAtLeast(0.5f)
+            val amp = (level * height * 0.42f).coerceAtLeast(0.5f)
             drawLine(
                 color = if (x <= playFrac * width) accent.base else RedlineColors.Muted,
                 start = Offset(x, mid - amp),

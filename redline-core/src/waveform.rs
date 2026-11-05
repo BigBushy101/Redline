@@ -22,6 +22,11 @@ use crate::tools::ToolPaths;
 const BINS: usize = 1000;
 /// Mono 8 kHz is plenty to see the shape and keeps ffmpeg's output small.
 const SAMPLE_RATE: u32 = 8000;
+/// Bump when the analysis maths changes so old cached peaks are redone.
+const CACHE_VERSION: u32 = 2;
+/// RMS is averaged over this many neighbouring bins (~half a second) so the strip shows
+/// sections rather than individual drum hits.
+const SMOOTH_BINS: usize = 3;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Waveform {
@@ -31,6 +36,8 @@ pub struct Waveform {
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
+    #[serde(default)]
+    version: u32,
     key: String,
     peaks: Vec<f32>,
     duration: Option<f64>,
@@ -128,7 +135,15 @@ pub fn for_source(
     Ok(wave)
 }
 
-/// Absolute peak per bucket, normalized to the loudest bucket.
+/// A short-term RMS envelope, gently smoothed and stretched between its 2nd and 98th
+/// percentiles.
+///
+/// Peak-per-bucket looks right in theory but flattens almost every modern master: a bucket
+/// of a few hundred milliseconds nearly always contains one full-scale transient, so every
+/// bar normalizes to the top. RMS tracks how loud a section actually is, which is the shape
+/// people read in a waveform. The percentile stretch keeps quiet intros and breakdowns
+/// visible without letting one stray loud bucket squash everything else; the top and bottom
+/// 2% are the only parts that sit at full height or on the baseline.
 pub fn peaks_from_pcm(pcm: &[u8], bins: usize) -> Vec<f32> {
     let samples: Vec<i16> = pcm
         .chunks_exact(2)
@@ -138,18 +153,52 @@ pub fn peaks_from_pcm(pcm: &[u8], bins: usize) -> Vec<f32> {
         return Vec::new();
     }
     let bins = bins.min(samples.len());
-    let mut peaks = vec![0.0f32; bins];
+    let mut energy = vec![0.0f64; bins];
+    let mut counts = vec![0usize; bins];
     for (i, sample) in samples.iter().enumerate() {
         let bin = i * bins / samples.len();
-        peaks[bin] = peaks[bin].max((*sample as f32).abs() / i16::MAX as f32);
+        let v = *sample as f64 / i16::MAX as f64;
+        energy[bin] += v * v;
+        counts[bin] += 1;
     }
-    let max = peaks.iter().copied().fold(0.0f32, f32::max);
-    if max > 0.0 {
-        for p in &mut peaks {
-            *p = (*p / max).clamp(0.0, 1.0);
-        }
+    let rms: Vec<f32> = energy
+        .iter()
+        .zip(&counts)
+        .map(|(e, n)| if *n == 0 { 0.0 } else { (e / *n as f64).sqrt() as f32 })
+        .collect();
+
+    // ~0.5 s at BINS over a typical song: wide enough to show sections, narrow enough to
+    // keep a drop or a stop where it is.
+    let mut smooth = vec![0.0f32; bins];
+    for (i, value) in smooth.iter_mut().enumerate() {
+        let from = i.saturating_sub(SMOOTH_BINS / 2);
+        let to = (i + SMOOTH_BINS / 2 + 1).min(bins);
+        *value = rms[from..to].iter().sum::<f32>() / (to - from) as f32;
     }
-    peaks
+
+    let mut sorted = smooth.clone();
+    sorted.sort_by(f32::total_cmp);
+    let lo = percentile(&sorted, 0.02);
+    let hi = percentile(&sorted, 0.98);
+    if hi <= lo + 0.02 {
+        // A flat or near-flat track: show its level rather than amplifying the noise.
+        return smooth
+            .iter()
+            .map(|v| if hi > 0.0 { (v / hi).clamp(0.0, 1.0) } else { 0.0 })
+            .collect();
+    }
+    smooth
+        .iter()
+        .map(|v| ((v - lo) / (hi - lo)).clamp(0.0, 1.0))
+        .collect()
+}
+
+fn percentile(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let index = (p * (sorted.len() - 1) as f32).round() as usize;
+    sorted[index.min(sorted.len() - 1)]
 }
 
 fn hash(text: &str) -> String {
@@ -168,17 +217,27 @@ fn cache_path(key: &str) -> PathBuf {
 fn read_cache(path: &Path, key: &str) -> Option<Waveform> {
     let text = std::fs::read_to_string(path).ok()?;
     let cached: Cached = serde_json::from_str(&text).ok()?;
-    if cached.key != key || cached.peaks.is_empty() {
+    if !cache_hit(&cached, key) {
         return None;
     }
     Some(Waveform { peaks: cached.peaks, duration: cached.duration })
+}
+
+/// Old caches have no version and must not be shown with the new maths.
+fn cache_hit(cached: &Cached, key: &str) -> bool {
+    cached.version == CACHE_VERSION && cached.key == key && !cached.peaks.is_empty()
 }
 
 fn write_cache(path: &Path, key: &str, wave: &Waveform) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let cached = Cached { key: key.to_owned(), peaks: wave.peaks.clone(), duration: wave.duration };
+    let cached = Cached {
+        version: CACHE_VERSION,
+        key: key.to_owned(),
+        peaks: wave.peaks.clone(),
+        duration: wave.duration,
+    };
     if let Ok(json) = serde_json::to_string(&cached) {
         let _ = std::fs::write(path, json);
     }
@@ -188,20 +247,55 @@ fn write_cache(path: &Path, key: &str, wave: &Waveform) {
 mod tests {
     use super::*;
 
+    fn pcm(amplitude: impl Fn(usize) -> f32, samples: usize) -> Vec<u8> {
+        (0..samples)
+            .flat_map(|i| ((amplitude(i) * i16::MAX as f32) as i16).to_le_bytes())
+            .collect()
+    }
+
     #[test]
-    fn peaks_are_normalized_buckets() {
-        let pcm: Vec<u8> = [0i16, 100, -3000, 32767, 0, -10000]
-            .iter()
-            .flat_map(|s| s.to_le_bytes())
-            .collect();
-        let peaks = peaks_from_pcm(&pcm, 3);
-        assert_eq!(peaks.len(), 3);
-        assert!((peaks[1] - 1.0).abs() < 0.001);
-        assert!((peaks[2] - 10000.0 / 32767.0).abs() < 0.01);
+    fn quiet_and_loud_sections_keep_their_shape() {
+        // Half at a tenth of full scale, half near full scale. Peak-per-bucket would put both
+        // halves near the top; the envelope has to leave the quiet half near the baseline.
+        let pcm = pcm(|i| if i < 10_000 { 0.1 } else { 0.9 }, 20_000);
+        let peaks = peaks_from_pcm(&pcm, 100);
+        assert_eq!(peaks.len(), 100);
+        assert!(peaks[10] < 0.05, "quiet half was {}", peaks[10]);
+        assert!(peaks[90] > 0.95, "loud half was {}", peaks[90]);
+        assert!(peaks[45] < peaks[55], "the boundary should climb");
+    }
+
+    #[test]
+    fn a_steady_tone_is_still_a_solid_bar() {
+        let pcm = pcm(|_| 0.25, 8_000);
+        let peaks = peaks_from_pcm(&pcm, 50);
+        assert!(peaks.iter().all(|p| (p - 1.0).abs() < 0.001));
+    }
+
+    #[test]
+    fn silence_is_flat() {
+        let pcm = pcm(|_| 0.0, 8_000);
+        let peaks = peaks_from_pcm(&pcm, 50);
+        assert!(peaks.iter().all(|p| *p == 0.0));
     }
 
     #[test]
     fn empty_audio_has_no_peaks() {
         assert!(peaks_from_pcm(&[], 10).is_empty());
+    }
+
+    #[test]
+    fn an_unversioned_cache_is_ignored() {
+        let old: Cached =
+            serde_json::from_str(r#"{"key":"k","peaks":[0.5],"duration":1.0}"#).unwrap();
+        assert!(!cache_hit(&old, "k"));
+        let new = Cached {
+            version: CACHE_VERSION,
+            key: "k".into(),
+            peaks: vec![0.5],
+            duration: Some(1.0),
+        };
+        assert!(cache_hit(&new, "k"));
+        assert!(!cache_hit(&new, "other"));
     }
 }

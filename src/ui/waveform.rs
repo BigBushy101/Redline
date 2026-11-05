@@ -126,7 +126,9 @@ pub fn show(ui: &mut Ui, app: &mut App) {
     for i in 0..slots {
         let from = i * bars.len() / slots;
         let to = ((i + 1) * bars.len() / slots).max(from + 1);
-        let p = bars[from..to].iter().copied().fold(0.0f32, f32::max);
+        // Average, not max: taking the loudest bin in a slot was what let one transient
+        // dominate a whole column and made the strip look clipped.
+        let p = bars[from..to].iter().sum::<f32>() / (to - from) as f32;
         let x = rect.left() + (i as f32 + 0.5) * step;
         let amp = (p * rect.height() * 0.42).max(0.5);
         let color = if x <= play_x { theme::accent().base } else { theme::SUBTLE };
