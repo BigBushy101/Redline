@@ -90,8 +90,7 @@ impl State {
         self.finished.drain(..over);
         self.jobs.save_if_dirty();
         self.history.save_if_dirty();
-        if self.settings != self.saved_settings {
-            self.settings.save();
+        if self.settings != self.saved_settings && self.settings.save() {
             self.saved_settings = self.settings.clone();
         }
         (next, changed)
@@ -619,7 +618,7 @@ impl Drop for Engine {
         st.jobs.save_if_dirty();
         st.history.save_if_dirty();
         if st.settings != st.saved_settings {
-            st.settings.save();
+            let _ = st.settings.save();
         }
     }
 }

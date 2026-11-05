@@ -170,10 +170,19 @@ impl Saved {
     }
 
     fn load_from(path: &Path) -> Self {
-        let file: SavedFile = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let file: SavedFile = match std::fs::read_to_string(path) {
+            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| {
+                // Moved aside, or the next save would replace every saved link with nothing.
+                crate::keep_aside(path);
+                SavedFile::default()
+            }),
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    crate::keep_aside(path);
+                }
+                SavedFile::default()
+            }
+        };
         Self {
             collections: file.collections,
             songs: file.songs,
@@ -183,22 +192,18 @@ impl Saved {
     }
 
     pub fn save_if_dirty(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.save_to(&saved_path());
+        if self.dirty && self.save_to(&saved_path()) {
+            self.dirty = false;
         }
     }
 
-    fn save_to(&self, path: &Path) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
+    /// Whether it was written.
+    fn save_to(&self, path: &Path) -> bool {
         let file = SavedFileRef {
             collections: &self.collections,
             songs: &self.songs,
         };
-        if let Ok(json) = serde_json::to_string(&file) {
-            let _ = std::fs::write(path, json);
-        }
+        serde_json::to_string(&file).is_ok_and(|json| crate::write_atomic(path, json.as_bytes()).is_ok())
     }
 
     /// Marks the store as changed: needs a save, and the key index is out of date.
@@ -975,6 +980,20 @@ mod tests {
         assert_eq!(back.collections, s.collections);
         assert_eq!(back.songs, s.songs);
         assert!(Saved::load_from(&path).collections.is_empty(), "no file: empty");
+
+        // A file cut off mid-write is moved aside whole, so saving can't replace it.
+        std::fs::write(&path, b"{\"songs\": [").unwrap();
+        let mut broken = Saved::load_from(&path);
+        assert!(broken.songs.is_empty() && !path.exists());
+        assert!(broken.add_song(Track::new(Source::Link("https://youtu.be/new".into()), "new".into())));
+        assert!(broken.save_to(&path));
+        assert_eq!(crate::tests::take_aside(&path), [b"{\"songs\": [".to_vec()]);
+        assert_eq!(Saved::load_from(&path).songs.len(), 1);
+        // Cut off inside a character, so it isn't even text.
+        std::fs::write(&path, b"{\"songs\": [\xc3").unwrap();
+        assert!(Saved::load_from(&path).songs.is_empty() && !path.exists());
+        assert_eq!(crate::tests::take_aside(&path).len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

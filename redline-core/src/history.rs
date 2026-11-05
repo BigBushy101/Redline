@@ -79,18 +79,14 @@ impl History {
     }
 
     pub fn save_if_dirty(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.save_to(&history_path());
+        if self.dirty && self.save_to(&history_path()) {
+            self.dirty = false;
         }
     }
 
-    fn save_to(&self, path: &Path) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string(&self.entries) {
-            let _ = std::fs::write(path, json);
-        }
+    /// Whether it was written.
+    fn save_to(&self, path: &Path) -> bool {
+        serde_json::to_string(&self.entries).is_ok_and(|json| crate::write_atomic(path, json.as_bytes()).is_ok())
     }
 
     /// Records a job that finished successfully; other outcomes are ignored.

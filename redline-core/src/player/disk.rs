@@ -198,17 +198,7 @@ fn load_links(dir: &Path) -> HashMap<String, Saved> {
 fn save_links(dir: &Path, links: &HashMap<String, Saved>) {
     let now = now();
     let live: HashMap<_, _> = links.iter().filter(|(_, s)| s.until > now).collect();
-    let _ = write_atomic(&dir.join("links.json"), &serde_json::to_vec(&live).unwrap_or_default());
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    let _ = crate::write_atomic(&dir.join("links.json"), &serde_json::to_vec(&live).unwrap_or_default());
 }
 
 fn agent(net: &NetworkOptions, timeout: Duration) -> Result<ureq::Agent> {
@@ -275,7 +265,7 @@ fn save_audio(dir: &Path, key: &str, r: &Resolved, net: &NetworkOptions) -> Resu
     }
     fs::rename(&part, dir.join(format!("{key}.audio")))?;
     // Written last: an audio file counts as kept only once this is there.
-    write_atomic(&dir.join(format!("{key}.json")), &serde_json::to_vec(&saved)?)
+    Ok(crate::write_atomic(&dir.join(format!("{key}.json")), &serde_json::to_vec(&saved)?)?)
 }
 
 /// Downloads `s` into `path`, `chunk` bytes per request, each tried [`TRIES`] times.

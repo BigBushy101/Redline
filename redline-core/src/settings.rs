@@ -157,14 +157,10 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    pub fn save(&self) {
-        let path = settings_path();
-        if let Some(dir) = path.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, json);
-        }
+    /// Whether it was written; callers that track what's on disk should try again if not.
+    pub fn save(&self) -> bool {
+        serde_json::to_string_pretty(self)
+            .is_ok_and(|json| crate::write_atomic(&settings_path(), json.as_bytes()).is_ok())
     }
 }
 

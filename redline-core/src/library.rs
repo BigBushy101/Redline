@@ -121,8 +121,19 @@ impl Library {
 
     fn load_from(path: &Path) -> Self {
         let (playlists, unreadable) = match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).map_or((Vec::new(), true), |p| (p, false)),
-            Err(e) => (Vec::new(), e.kind() != std::io::ErrorKind::NotFound),
+            Ok(s) => serde_json::from_str(&s).map_or_else(
+                |_| {
+                    // Moved aside, or the next save would replace every playlist with nothing.
+                    crate::keep_aside(path);
+                    (Vec::new(), true)
+                },
+                |p| (p, false),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false),
+            Err(_) => {
+                crate::keep_aside(path);
+                (Vec::new(), true)
+            }
         };
         Self {
             playlists,
@@ -138,19 +149,15 @@ impl Library {
     }
 
     pub fn save_if_dirty(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.save_to(&library_path());
+        if self.dirty && self.save_to(&library_path()) {
+            self.dirty = false;
             self.unreadable = false;
         }
     }
 
-    fn save_to(&self, path: &Path) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string(&self.playlists) {
-            let _ = std::fs::write(path, json);
-        }
+    /// Whether it was written.
+    fn save_to(&self, path: &Path) -> bool {
+        serde_json::to_string(&self.playlists).is_ok_and(|json| crate::write_atomic(path, json.as_bytes()).is_ok())
     }
 
     pub fn get(&self, id: PlaylistId) -> Option<&Playlist> {
@@ -621,7 +628,7 @@ mod tests {
         assert!(!back.is_unreadable());
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(Library::load_from(&path).is_unreadable(), "a broken file isn't an empty library");
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(crate::tests::take_aside(&path), [b"{ not json".to_vec()], "and is kept aside");
         assert!(!Library::load_from(&path).is_unreadable(), "no file yet is");
 
         // Older files without the optional fields still load.

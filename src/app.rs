@@ -577,8 +577,7 @@ impl eframe::App for App {
         self.history.save_if_dirty();
         self.library.save_if_dirty();
         self.saved.save_if_dirty();
-        if self.settings != self.saved_settings {
-            self.settings.save();
+        if self.settings != self.saved_settings && self.settings.save() {
             self.saved_settings = self.settings.clone();
         }
     }

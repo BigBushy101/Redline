@@ -282,16 +282,18 @@ fn lines(r: impl std::io::Read) -> impl Iterator<Item = String> {
     })
 }
 
-/// Returns `dir/stem.ext`, or `dir/stem (n).ext` if that already exists.
+/// Claims `dir/stem.ext`, or `dir/stem (n).ext` if that's taken, by creating it empty, so two
+/// jobs running at once never pick the same name. The caller writes over it.
 pub fn unique_path(dir: &Path, stem: &str, ext: &str) -> PathBuf {
-    let first = dir.join(format!("{stem}.{ext}"));
-    if !first.exists() {
-        return first;
+    let names = std::iter::once(format!("{stem}.{ext}")).chain((1..).map(|n| format!("{stem} ({n}).{ext}")));
+    for path in names.map(|name| dir.join(name)) {
+        match std::fs::File::create_new(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            // Any other error is for the writer to report.
+            _ => return path,
+        }
     }
-    (1..)
-        .map(|n| dir.join(format!("{stem} ({n}).{ext}")))
-        .find(|p| !p.exists())
-        .expect("unbounded range")
+    unreachable!("unbounded range")
 }
 
 /// Opens Explorer with the file selected (or just the folder elsewhere). Does nothing on
@@ -330,6 +332,14 @@ mod tests {
         assert_eq!(unique_path(&dir, "a", "png"), dir.join("a (1).png"));
         std::fs::write(dir.join("a (1).png"), b"").unwrap();
         assert_eq!(unique_path(&dir, "a", "png"), dir.join("a (2).png"));
+        // Jobs asking at the same moment each get their own name.
+        let mut names: Vec<PathBuf> = std::thread::scope(|s| {
+            let asks: Vec<_> = (0..8).map(|_| s.spawn(|| unique_path(&dir, "b", "mp3"))).collect();
+            asks.into_iter().map(|a| a.join().unwrap()).collect()
+        });
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 8);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

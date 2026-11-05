@@ -262,15 +262,11 @@ impl JobManager {
 
     /// Writes the queue to disk if it changed since the last save.
     pub fn save_if_dirty(&mut self) {
-        if !std::mem::take(&mut self.dirty) {
-            return;
-        }
-        let path = queue_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string(&self.jobs) {
-            let _ = std::fs::write(path, json);
+        if self.dirty
+            && serde_json::to_string(&self.jobs)
+                .is_ok_and(|json| crate::write_atomic(&queue_path(), json.as_bytes()).is_ok())
+        {
+            self.dirty = false;
         }
     }
 
