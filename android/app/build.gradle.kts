@@ -47,6 +47,12 @@ android {
     }
 
     buildTypes {
+        // Installs next to the release app (its own data and sign-in) as "Redline Debug";
+        // the name comes from src/debug/res.
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")

@@ -1,0 +1,6 @@
+<resources>
+    <!-- The debug build installs beside the release app, so its names say which is which. -->
+    <string name="app_name">Redline Debug</string>
+    <string name="share_save">Save to Redline Debug</string>
+    <string name="share_download">Download with Redline Debug</string>
+</resources>
