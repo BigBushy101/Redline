@@ -9,3 +9,5 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
+.shots/
+graphify-out/
