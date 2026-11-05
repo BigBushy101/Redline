@@ -12,13 +12,16 @@
 //! still being looked up waits for that answer rather than running yt-dlp again.
 //!
 //! A link's audio is kept on disk while it's the current track ([`cache`]), so A-B loops,
-//! repeat one and seeking back play from there instead of opening the stream again.
+//! repeat one and seeking back play from there instead of opening the stream again. Played
+//! links' downloaded audio and their stream URLs are also kept between runs ([`disk`]), so a
+//! song played before starts without a look-up.
 
 pub mod ab_loop;
 #[cfg(target_os = "android")]
 mod aaudio;
 mod cache;
 pub mod decode;
+mod disk;
 pub mod dsp;
 pub mod output;
 pub mod render;
@@ -221,8 +224,15 @@ impl Media for Ffmpeg {
         let tools = &env.tools;
         match source {
             Source::Link(url) => {
+                if let Some(r) = disk::stored_audio(url) {
+                    return Ok(r);
+                }
+                if let Some(r) = disk::stored_link(url, &env.network) {
+                    disk::keep_audio(url, &r, &env.network);
+                    return Ok(r);
+                }
                 let s = ytdlp::resolve_stream(tools, &env.network, url)?;
-                Ok(Resolved {
+                let r = Resolved {
                     input: Input {
                         location: s.url,
                         headers: s.headers,
@@ -234,7 +244,9 @@ impl Media for Ffmpeg {
                         duration: s.duration,
                         thumbnail: s.thumbnail,
                     },
-                })
+                };
+                disk::remember(url, &r, &env.network);
+                Ok(r)
             }
             Source::Local(path) => {
                 if !path.is_file() {

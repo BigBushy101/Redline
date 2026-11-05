@@ -8,6 +8,7 @@ pub mod filters;
 pub mod hwaccel;
 pub mod image_conv;
 pub mod install;
+pub mod youtube;
 pub mod ytdlp;
 mod ytdlp_worker;
 

@@ -1,0 +1,266 @@
+//! A YouTube video's stream, asked of YouTube directly instead of through yt-dlp: one request
+//! to the player API as the visionOS client, which hands out audio URLs that need no player
+//! download, JS challenge or PO token. That's about half a second where a yt-dlp look-up is
+//! several (Python on a phone, plus yt-dlp's other work). Anything this doesn't expect gives
+//! `None`, and the caller asks yt-dlp as before.
+//!
+//! Each request carries an anonymous visitor ID, as YouTube's own apps (and yt-dlp) send:
+//! asked without one, YouTube answers most less-watched videos with its bot check. The first
+//! comes from YouTube's answer to a request without one, and is reused while it works.
+//!
+//! The client's details are copied from yt-dlp (`INNERTUBE_CLIENTS['visionos']` in
+//! `yt_dlp/extractor/youtube/_base.py`). If YouTube stops answering this client, every look-up
+//! falls back to yt-dlp; update them from there.
+
+use std::sync::Mutex;
+use std::time::Duration;
+
+use serde::Deserialize;
+
+use super::ytdlp::{NetworkOptions, StreamInfo};
+
+const PLAYER_API: &str = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+const CLIENT_NAME: &str = "VISIONOS";
+const CLIENT_ID: &str = "101";
+const CLIENT_VERSION: &str = "1.02";
+const DEVICE_MAKE: &str = "Apple";
+const DEVICE_MODEL: &str = "RealityDevice17,1";
+const OS_NAME: &str = "visionOS";
+const OS_VERSION: &str = "26.5.23O471";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The visitor ID requests carry, once YouTube handed one out.
+static VISITOR: Mutex<Option<String>> = Mutex::new(None);
+
+/// The video ID of a YouTube video link, from any of its shapes.
+pub fn video_id(url: &str) -> Option<String> {
+    let canonical = crate::platform::canonical(url);
+    let id = canonical.strip_prefix("https://www.youtube.com/watch?v=")?;
+    (id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).then(|| id.to_owned())
+}
+
+/// `url`'s best audio stream, signed out. `None` when it isn't a YouTube video, or YouTube
+/// didn't hand one over; yt-dlp is asked then.
+pub fn resolve(net: &NetworkOptions, url: &str) -> Option<StreamInfo> {
+    let id = video_id(url)?;
+    let mut config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT));
+    if !net.proxy.trim().is_empty() {
+        config = config.proxy(Some(ureq::Proxy::new(net.proxy.trim()).ok()?));
+    }
+    let agent: ureq::Agent = config.build().into();
+    let visitor = VISITOR.lock().unwrap().clone();
+    let text = ask(&agent, &id, visitor.as_deref())?;
+    if let Some(stream) = parse(&text) {
+        if visitor.is_none() {
+            *VISITOR.lock().unwrap() = visitor_of(&text);
+        }
+        return Some(stream);
+    }
+    // Refused: once more with the visitor ID this answer handed out, if it's a new one.
+    let fresh = visitor_of(&text).filter(|v| Some(v) != visitor.as_ref())?;
+    *VISITOR.lock().unwrap() = Some(fresh.clone());
+    parse(&ask(&agent, &id, Some(&fresh))?)
+}
+
+/// One player request for video `id`; YouTube's JSON answer.
+fn ask(agent: &ureq::Agent, id: &str, visitor: Option<&str>) -> Option<String> {
+    let mut client = serde_json::json!({
+        "clientName": CLIENT_NAME,
+        "clientVersion": CLIENT_VERSION,
+        "deviceMake": DEVICE_MAKE,
+        "deviceModel": DEVICE_MODEL,
+        "osName": OS_NAME,
+        "osVersion": OS_VERSION,
+        "hl": "en",
+    });
+    let mut req = agent
+        .post(PLAYER_API)
+        .header("User-Agent", USER_AGENT)
+        .header("X-YouTube-Client-Name", CLIENT_ID)
+        .header("X-YouTube-Client-Version", CLIENT_VERSION)
+        .header("Origin", "https://www.youtube.com");
+    if let Some(v) = visitor {
+        client["visitorData"] = v.into();
+        req = req.header("X-Goog-Visitor-Id", v);
+    }
+    let body = serde_json::json!({
+        "context": {"client": client},
+        "videoId": id,
+        "contentCheckOk": true,
+        "racyCheckOk": true,
+    });
+    req.content_type("application/json")
+        .send(body.to_string())
+        .ok()?
+        .body_mut()
+        .read_to_string()
+        .ok()
+}
+
+/// The visitor ID a player answer hands out.
+fn visitor_of(json: &str) -> Option<String> {
+    let r: serde_json::Value = serde_json::from_str(json).ok()?;
+    r["responseContext"]["visitorData"].as_str().filter(|v| !v.is_empty()).map(str::to_owned)
+}
+
+fn parse(json: &str) -> Option<StreamInfo> {
+    let r: Player = serde_json::from_str(json).ok()?;
+    if r.playability.status != "OK" {
+        return None;
+    }
+    let details = r.details?;
+    // Live streams come as HLS, which yt-dlp handles.
+    if details.is_live {
+        return None;
+    }
+    let best = r
+        .streaming?
+        .adaptive
+        .into_iter()
+        .filter(|f| f.mime.starts_with("audio/") && f.url.is_some())
+        // Dubbed tracks and the loudness-compressed (DRC) copies aren't the real thing.
+        .filter(|f| f.track.as_ref().is_none_or(|t| t.default) && !f.drc)
+        .max_by_key(|f| f.bitrate)?;
+    let duration = best
+        .duration_ms
+        .and_then(|ms| ms.parse::<f64>().ok())
+        .map(|ms| ms / 1000.0)
+        .or_else(|| details.length.parse().ok());
+    let author = details.author.map(|a| a.strip_suffix(" - Topic").map_or(a.clone(), str::to_owned));
+    Some(StreamInfo {
+        url: best.url?,
+        headers: Some(format!("User-Agent: {USER_AGENT}\r\n")),
+        title: details.title.unwrap_or_else(|| "Untitled".into()),
+        artist: author,
+        album: None,
+        duration,
+        thumbnail: details.thumbnail.thumbnails.into_iter().last().map(|t| t.url),
+    })
+}
+
+#[derive(Deserialize)]
+struct Player {
+    #[serde(rename = "playabilityStatus")]
+    playability: Playability,
+    #[serde(rename = "streamingData")]
+    streaming: Option<Streaming>,
+    #[serde(rename = "videoDetails")]
+    details: Option<Details>,
+}
+
+#[derive(Deserialize)]
+struct Playability {
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct Streaming {
+    #[serde(rename = "adaptiveFormats", default)]
+    adaptive: Vec<Format>,
+}
+
+#[derive(Deserialize)]
+struct Format {
+    #[serde(rename = "mimeType")]
+    mime: String,
+    url: Option<String>,
+    #[serde(default)]
+    bitrate: u64,
+    #[serde(rename = "approxDurationMs")]
+    duration_ms: Option<String>,
+    #[serde(rename = "audioTrack")]
+    track: Option<AudioTrack>,
+    #[serde(rename = "isDrc", default)]
+    drc: bool,
+}
+
+#[derive(Deserialize)]
+struct AudioTrack {
+    #[serde(rename = "audioIsDefault", default)]
+    default: bool,
+}
+
+#[derive(Deserialize)]
+struct Details {
+    title: Option<String>,
+    author: Option<String>,
+    #[serde(rename = "lengthSeconds", default)]
+    length: String,
+    #[serde(rename = "isLive", default)]
+    is_live: bool,
+    #[serde(default)]
+    thumbnail: Thumbnails,
+}
+
+#[derive(Deserialize, Default)]
+struct Thumbnails {
+    #[serde(default)]
+    thumbnails: Vec<Thumb>,
+}
+
+#[derive(Deserialize)]
+struct Thumb {
+    url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn video_ids() {
+        assert_eq!(video_id("https://youtu.be/dQw4w9WgXcQ?t=3").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(video_id("https://music.youtube.com/watch?v=dQw4w9WgXcQ&si=x").as_deref(), Some("dQw4w9WgXcQ"));
+        assert_eq!(video_id("https://www.youtube.com/playlist?list=PL123"), None);
+        assert_eq!(video_id("https://soundcloud.com/a/b"), None);
+    }
+
+    #[test]
+    fn picks_the_best_original_audio() {
+        let json = r#"{
+            "playabilityStatus": {"status": "OK"},
+            "streamingData": {"adaptiveFormats": [
+                {"mimeType": "video/mp4", "url": "v", "bitrate": 900000},
+                {"mimeType": "audio/webm; codecs=\"opus\"", "url": "dub", "bitrate": 200000,
+                 "audioTrack": {"audioIsDefault": false}},
+                {"mimeType": "audio/webm; codecs=\"opus\"", "url": "drc", "bitrate": 190000, "isDrc": true},
+                {"mimeType": "audio/webm; codecs=\"opus\"", "url": "best", "bitrate": 136544,
+                 "approxDurationMs": "213061"},
+                {"mimeType": "audio/mp4", "url": "aac", "bitrate": 130677}
+            ]},
+            "videoDetails": {"title": "Song", "author": "Band - Topic", "lengthSeconds": "213",
+                "thumbnail": {"thumbnails": [{"url": "small"}, {"url": "big"}]}}
+        }"#;
+        let s = parse(json).unwrap();
+        assert_eq!(s.url, "best");
+        assert_eq!(s.artist.as_deref(), Some("Band"));
+        assert_eq!(s.duration, Some(213.061));
+        assert_eq!(s.thumbnail.as_deref(), Some("big"));
+    }
+
+    #[test]
+    fn refusals() {
+        let bot = r#"{"playabilityStatus": {"status": "LOGIN_REQUIRED",
+            "reason": "Sign in to confirm you’re not a bot"}}"#;
+        assert!(parse(bot).is_none());
+        let gone = r#"{"playabilityStatus": {"status": "ERROR", "reason": "Video unavailable"}}"#;
+        assert!(parse(gone).is_none());
+        assert_eq!(visitor_of(r#"{"responseContext": {"visitorData": "Cgt"}}"#).as_deref(), Some("Cgt"));
+        assert_eq!(visitor_of(bot), None);
+        let live = r#"{"playabilityStatus": {"status": "OK"}, "videoDetails": {"isLive": true}}"#;
+        assert!(parse(live).is_none());
+    }
+
+    /// Asks YouTube for a less-watched video that's refused without a visitor ID.
+    #[test]
+    #[ignore = "network"]
+    fn live_look_up() {
+        let s = resolve(&NetworkOptions::default(), "https://youtu.be/Zrq71nOI3C4").expect("a stream");
+        assert!(s.url.contains("googlevideo.com"), "{}", s.url);
+        assert!(VISITOR.lock().unwrap().is_some());
+        println!("{} by {:?}", s.title, s.artist);
+    }
+}

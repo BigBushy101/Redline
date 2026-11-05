@@ -752,8 +752,18 @@ fn stream_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::proces
 /// `yt-dlp -J -f bestaudio/best --no-playlist URL`: the stream to play `url` from. Asked of a
 /// yt-dlp kept running for it (see [`super::ytdlp_worker`], warmed at launch by
 /// [`warm_stream_worker`]) when one can be, as songs are looked up one after another.
+///
+/// Signed out, a YouTube video is first asked of YouTube directly ([`super::youtube`]), which
+/// skips yt-dlp altogether; yt-dlp answers whatever that can't.
 pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
-    signed_out_first(net, |net| resolve_stream_as(tools, net, url))
+    signed_out_first(net, |net| {
+        if !net.signs_in()
+            && let Some(stream) = super::youtube::resolve(net, url)
+        {
+            return Ok(stream);
+        }
+        resolve_stream_as(tools, net, url)
+    })
 }
 
 fn resolve_stream_as(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
