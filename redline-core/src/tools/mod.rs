@@ -1,5 +1,6 @@
 //! Locating and running the external tools (yt-dlp, ffmpeg, ffprobe, a JS runtime).
 
+pub mod bandcamp;
 pub mod convert;
 #[cfg(test)]
 pub(crate) mod e2e;
@@ -8,6 +9,7 @@ pub mod filters;
 pub mod hwaccel;
 pub mod image_conv;
 pub mod install;
+pub mod soundcloud;
 pub mod youtube;
 pub mod ytdlp;
 mod ytdlp_worker;

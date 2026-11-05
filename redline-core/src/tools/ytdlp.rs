@@ -417,28 +417,35 @@ pub const TITLE_LOOKUP_LIMIT: usize = 100;
 /// [`fetch_info`], then looks up the titles of items the listing left untitled (SoundCloud
 /// sets past their first few tracks), skipping links `known` already has names for.
 ///
-/// A YouTube playlist or single video is asked of YouTube directly ([`super::youtube`])
-/// first, as playing is: saving only needs titles, artists, lengths and covers, not formats.
+/// A YouTube playlist or video, Bandcamp album or track, or SoundCloud set or track is first
+/// asked of the site directly ([`super::youtube`], [`super::bandcamp`], [`super::soundcloud`]),
+/// as playing is: saving only needs titles, artists, lengths and covers, not formats.
 pub fn fetch_titled(
     tools: &ToolPaths,
     net: &NetworkOptions,
     url: &str,
     known: &(dyn Fn(&str) -> bool + Sync),
 ) -> Result<MediaInfo> {
-    if let Some(info) = super::youtube::playlist(net, url) {
+    if let Some(info) = super::youtube::playlist(net, url)
+        .or_else(|| super::bandcamp::album(net, url))
+        .or_else(|| super::soundcloud::set(net, url))
+    {
         crate::linkcheck::shared().record_listing(&info.items);
         return Ok(info);
     }
     // A link with `list=` may mean its playlist, which yt-dlp lists.
-    if !url.contains("list=")
-        && let Some(s) = super::youtube::resolve(net, url)
-    {
+    let youtube = if url.contains("list=") { None } else { super::youtube::resolve(net, url) };
+    let single = youtube
+        .map(|s| (s, "youtube"))
+        .or_else(|| super::bandcamp::resolve(net, url).map(|s| (s, "Bandcamp")))
+        .or_else(|| super::soundcloud::resolve(net, url).map(|s| (s, "Soundcloud")));
+    if let Some((s, extractor)) = single {
         return Ok(MediaInfo {
             title: s.title,
             uploader: s.artist,
             duration: s.duration,
             thumbnail: s.thumbnail,
-            extractor: Some("youtube".into()),
+            extractor: Some(extractor.into()),
             ..Default::default()
         });
     }
@@ -773,11 +780,15 @@ fn stream_command(tools: &ToolPaths, net: &NetworkOptions) -> Result<std::proces
 /// yt-dlp kept running for it (see [`super::ytdlp_worker`], warmed at launch by
 /// [`warm_stream_worker`]) when one can be, as songs are looked up one after another.
 ///
-/// A YouTube video is first asked of YouTube directly ([`super::youtube`]), signed out, which
+/// A YouTube video, Bandcamp track or SoundCloud track is first asked of the site directly
+/// ([`super::youtube`], [`super::bandcamp`], [`super::soundcloud`]), signed out, which
 /// skips yt-dlp altogether; yt-dlp answers whatever that can't. That holds even while look-ups
 /// sign in after a bot check, as the direct ask is cheap and often still answered.
 pub fn resolve_stream(tools: &ToolPaths, net: &NetworkOptions, url: &str) -> Result<StreamInfo> {
-    if let Some(stream) = super::youtube::resolve(net, url) {
+    if let Some(stream) = super::youtube::resolve(net, url)
+        .or_else(|| super::bandcamp::resolve(net, url))
+        .or_else(|| super::soundcloud::resolve(net, url))
+    {
         return Ok(stream);
     }
     signed_out_first(net, |net| resolve_stream_as(tools, net, url))

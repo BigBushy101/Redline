@@ -65,7 +65,7 @@ pub fn resolve(net: &NetworkOptions, url: &str) -> Option<StreamInfo> {
     parse(&ask(&agent, &id, Some(&fresh))?)
 }
 
-fn agent(net: &NetworkOptions) -> Option<ureq::Agent> {
+pub(super) fn agent(net: &NetworkOptions) -> Option<ureq::Agent> {
     let mut config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT));
     if !net.proxy.trim().is_empty() {
         config = config.proxy(Some(ureq::Proxy::new(net.proxy.trim()).ok()?));
