@@ -701,7 +701,6 @@ impl LinkCheck {
         {
             let _ = crate::write_atomic(&self.path, json.as_bytes());
         }
-
     }
 
     /// `tracks` with the dead ones taken out, and where `start` lands among the rest (the

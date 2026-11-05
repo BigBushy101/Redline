@@ -116,7 +116,6 @@ impl CancelHandle {
         *slot = Some(child);
     }
 
-
     /// Polls rather than blocking in `Child::wait` so `cancel()` can still take the lock.
     pub fn wait(&self) -> std::io::Result<std::process::ExitStatus> {
         loop {

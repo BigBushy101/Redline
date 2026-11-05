@@ -20,7 +20,6 @@ fn main() -> eframe::Result {
         .write(true)
         .truncate(false)
         .open(settings::data_dir().join("redline.lock"));
-
     if lock.as_ref().is_ok_and(|f| f.try_lock().is_err()) {
         rfd::MessageDialog::new()
             .set_title("Redline")

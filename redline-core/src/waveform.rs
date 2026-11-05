@@ -239,7 +239,6 @@ fn write_cache(path: &Path, key: &str, wave: &Waveform) {
     if let Ok(json) = serde_json::to_string(&cached) {
         let _ = crate::write_atomic(path, json.as_bytes());
     }
-
 }
 
 #[cfg(test)]

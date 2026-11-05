@@ -164,7 +164,6 @@ pub fn import(text: &str, saved: &mut Saved, library: &mut Library, settings: &m
     next.network.cookies_browser = settings.network.cookies_browser.clone();
     next.network.cookies_file = settings.network.cookies_file.clone();
     *settings = next;
-
     report.settings_applied = true;
     Ok(report)
 }
@@ -207,7 +206,6 @@ mod tests {
         settings.local_folders = vec![PathBuf::from("C:/machine/music")];
         settings.network.cookies_browser = Some("firefox".into());
 
-
         let text = export(&saved, &library, &settings).unwrap();
         let mut saved2 = Saved::default();
         let mut library2 = Library::default();
@@ -215,7 +213,6 @@ mod tests {
         settings2.download_dir = PathBuf::from("D:/current/downloads");
         settings2.local_folders = vec![PathBuf::from("D:/current/music")];
         settings2.network.cookies_file = Some(PathBuf::from("D:/current/cookies.txt"));
-
         let report = import(&text, &mut saved2, &mut library2, &mut settings2).unwrap();
 
         assert_eq!(report.collections_added, 1);
@@ -226,7 +223,6 @@ mod tests {
         assert_eq!(settings2.download_dir, PathBuf::from("D:/current/downloads"));
         assert_eq!(settings2.network.cookies_browser, None, "the other machine's sign-in stays there");
         assert_eq!(settings2.network.cookies_file, Some(PathBuf::from("D:/current/cookies.txt")));
-
         assert_eq!(settings2.local_folders, vec![PathBuf::from("D:/current/music")]);
     }
 

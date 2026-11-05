@@ -247,7 +247,6 @@ fn extract(zip_path: &Path, dest_dir: &Path, names: &[&str]) -> Result<()> {
             fs::rename(&part, &dest)
                 .with_context(|| format!("can't write {} (is it running?)", dest.display()))?;
             found += 1;
-
         }
     }
     if found < names.len() {

@@ -135,7 +135,6 @@ fn scan_with(tools: &ToolPaths, folders: &[PathBuf], added: &[PathBuf], cache: &
     if let Ok(json) = serde_json::to_string(&found) {
         let _ = crate::write_atomic(cache, json.as_bytes());
     }
-
     found.into_iter().map(|c| c.track).collect()
 }
 
