@@ -239,10 +239,7 @@ impl JobManager {
     /// Restores the queue saved by the last session. Jobs that were mid-run start over.
     pub fn load() -> Self {
         let mut m = Self::new();
-        let jobs: Vec<Job> = std::fs::read_to_string(queue_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let jobs: Vec<Job> = crate::load_or_aside(&queue_path());
         m.set_jobs(jobs);
         m
     }

@@ -42,6 +42,23 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// The JSON at `path`, or the default when there's none. A file that can't be read is moved
+/// aside first, or the next save would replace what's in it with the default.
+pub(crate) fn load_or_aside<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    match std::fs::read_to_string(path) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| {
+            keep_aside(path);
+            T::default()
+        }),
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                keep_aside(path);
+            }
+            T::default()
+        }
+    }
+}
+
 /// Moves a file that couldn't be read out of the way, to `<name>.<unix time>.bad`, so the next
 /// save can't overwrite what's in it.
 pub(crate) fn keep_aside(path: &Path) {
@@ -70,6 +87,22 @@ mod tests {
             }
         }
         held
+    }
+
+    #[test]
+    fn unreadable_files_are_kept_aside() {
+        let path = std::env::temp_dir().join(format!("redline-aside-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(super::load_or_aside::<Vec<u32>>(&path), Vec::<u32>::new(), "no file: default");
+        std::fs::write(&path, b"[1,2]").unwrap();
+        assert_eq!(super::load_or_aside::<Vec<u32>>(&path), [1, 2]);
+        std::fs::write(&path, b"[1,").unwrap();
+        assert!(super::load_or_aside::<Vec<u32>>(&path).is_empty() && !path.exists());
+        assert_eq!(take_aside(&path), [b"[1,".to_vec()]);
+        // Not even text.
+        std::fs::write(&path, b"[\xc3").unwrap();
+        assert!(super::load_or_aside::<Vec<u32>>(&path).is_empty() && !path.exists());
+        assert_eq!(take_aside(&path).len(), 1);
     }
 }
 

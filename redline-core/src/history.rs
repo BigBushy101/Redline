@@ -67,10 +67,7 @@ impl History {
     }
 
     fn load_from(path: &Path) -> Self {
-        let entries = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let entries = crate::load_or_aside(path);
         Self {
             entries,
             dirty: false,

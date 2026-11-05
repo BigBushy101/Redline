@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -151,10 +150,7 @@ pub fn archive_path() -> PathBuf {
 
 impl Settings {
     pub fn load() -> Self {
-        fs::read_to_string(settings_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        crate::load_or_aside(&settings_path())
     }
 
     /// Whether it was written; callers that track what's on disk should try again if not.

@@ -170,19 +170,7 @@ impl Saved {
     }
 
     fn load_from(path: &Path) -> Self {
-        let file: SavedFile = match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| {
-                // Moved aside, or the next save would replace every saved link with nothing.
-                crate::keep_aside(path);
-                SavedFile::default()
-            }),
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    crate::keep_aside(path);
-                }
-                SavedFile::default()
-            }
-        };
+        let file: SavedFile = crate::load_or_aside(path);
         Self {
             collections: file.collections,
             songs: file.songs,
