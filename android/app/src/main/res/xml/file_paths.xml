@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Downloads and conversions live in the app's external files dir (RedlineEngine.defaultDownloadDir
-     and defaultConvertDir), or under filesDir when there's no external storage. -->
+<!-- Downloads and conversions go to Download/Redline (RedlineEngine.defaultDownloadDir and
+     defaultConvertDir). Older installs and Android 8-10 without storage permission used the app's
+     external files dir, or filesDir when there's no external storage; those still open. -->
 <paths>
+    <external-path name="public_downloads" path="Download/Redline/" />
     <external-files-path name="downloads" path="." />
     <files-path name="internal_downloads" path="Redline/" />
     <files-path name="internal_converted" path="Converted/" />

@@ -83,10 +83,10 @@ fun SettingsScreen(state: RedlineState, settings: SettingsRecord, tools: ToolsSt
             PlaybackCard(state)
 
             SectionCard(title = "Folders") {
-                OptionRow("Downloads", hint = "Redline's own folder for now; saving to your Download folder comes later.") {
+                OptionRow("Downloads", hint = "Your phone's Download/Redline folder, so files show up in the Files app.") {
                     Text(settings.downloadDir, style = MaterialTheme.typography.bodySmall, color = RedlineColors.Text)
                 }
-                OptionRow("Conversions", hint = "Redline's own folder too: ffmpeg can only write there.") {
+                OptionRow("Conversions", hint = "A Converted folder inside Download/Redline.") {
                     Text(settings.convert.convertDir ?: "Next to the original file", style = MaterialTheme.typography.bodySmall, color = RedlineColors.Text)
                 }
             }

@@ -16,6 +16,10 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- Saving into Download/Redline by path; 11+ needs no permission for the app's own files. -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- extractNativeLibs: youtubedl-android executes its bundled python/ffmpeg from disk. -->
     <application

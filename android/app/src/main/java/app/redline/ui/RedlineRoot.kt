@@ -60,6 +60,7 @@ import app.redline.core.PlayFailureRecord
 import app.redline.core.TrackRecord
 import app.redline.state.EngineStatus
 import app.redline.state.MusicState
+import app.redline.RedlineEngine
 import app.redline.state.RedlineState
 import app.redline.ui.components.LocalOpenSearch
 import app.redline.ui.components.LocalOpenSettings
@@ -131,6 +132,7 @@ fun RedlineRoot(
                 saved.onMusicReady()
             }
             AskForNotifications()
+            AskForStorage(state)
             val music = state.music
             if (music == null) Failed("The player didn't start.") else Pages(state, music, download, batch, convert, playlists, saved, local, nav)
         }
@@ -148,6 +150,23 @@ private fun AskForNotifications() {
         if (!asked && !Notifications.canPost(context)) {
             asked = true
             launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+}
+
+/** Asks once for storage permission (Android 8-10), so files can go to Download/Redline. */
+@Composable
+private fun AskForStorage(state: RedlineState) {
+    if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) return
+    val context = LocalContext.current
+    var asked by rememberSaveable { mutableStateOf(false) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) state.moveOffOwnFolders()
+    }
+    LaunchedEffect(Unit) {
+        if (!asked && !RedlineEngine.canWritePublic(context)) {
+            asked = true
+            launcher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
 }

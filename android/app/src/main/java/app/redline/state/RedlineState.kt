@@ -132,7 +132,10 @@ class RedlineState(private val app: Application) {
                     music = musicCore?.let { MusicState(app, it) }
                     _status.value = EngineStatus.Ready(engine)
                     launch { refreshLoop() }
-                    launch { _settings.value = onEngine { it.settings() } }
+                    launch {
+                        _settings.value = onEngine { it.settings() }
+                        moveOffOwnFolders()
+                    }
                     // These start ffmpeg and yt-dlp again. Keep them off the first song:
                     // wait for the player to be idle before probing encoders, tools or
                     // updating yt-dlp.
@@ -250,6 +253,23 @@ class RedlineState(private val app: Application) {
         if (next == current) return
         _settings.value = next
         act { it.setSettings(next) }
+    }
+
+    /**
+     * Earlier versions saved into the app's own folders; once the public Download folder is
+     * writable, saved folders still pointing there are switched to it. Old files stay put.
+     */
+    fun moveOffOwnFolders() {
+        if (!RedlineEngine.canWritePublic(app)) return
+        val own = listOf(app.getExternalFilesDir(null), app.filesDir)
+        updateSettings { s ->
+            s.copy(
+                downloadDir = if (RedlineEngine.isOwnFolder(s.downloadDir, own)) RedlineEngine.defaultDownloadDir(app).absolutePath else s.downloadDir,
+                convert = if (RedlineEngine.isOwnFolder(s.convert.convertDir, own)) {
+                    s.convert.copy(convertDir = RedlineEngine.defaultConvertDir(app).absolutePath)
+                } else s.convert,
+            )
+        }
     }
 
     /**

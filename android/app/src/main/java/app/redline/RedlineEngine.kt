@@ -1,6 +1,9 @@
 package app.redline
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Environment
 import app.redline.core.AndroidPathsRecord
 import app.redline.core.Engine
@@ -49,15 +52,38 @@ object RedlineEngine {
     }
 
     /**
-     * App-specific external storage needs no permission. Moving downloads to the shared
-     * Download folder (MediaStore or a picked folder) comes with the settings screen.
+     * The phone's Download/Redline, so files show up in the Files app. Android 11+ lets an app
+     * create its own files there by path; 8-10 need WRITE_EXTERNAL_STORAGE, and until it's
+     * granted the app's own folder is used (see [canWritePublic]).
      */
     fun defaultDownloadDir(context: Context): File =
-        File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, "Redline")
+        if (canWritePublic(context)) {
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Redline")
+        } else {
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, "Redline")
+        }
 
-    /** Converted files: ffmpeg needs a real folder, so the app's own, beside the downloads. */
+    /** Converted files: ffmpeg needs a real folder, so Converted inside the downloads folder. */
     fun defaultConvertDir(context: Context): File =
-        File(context.getExternalFilesDir(null) ?: context.filesDir, "Converted")
+        if (canWritePublic(context)) {
+            File(defaultDownloadDir(context), "Converted")
+        } else {
+            File(context.getExternalFilesDir(null) ?: context.filesDir, "Converted")
+        }
+
+    fun canWritePublic(context: Context): Boolean =
+        Build.VERSION.SDK_INT > Build.VERSION_CODES.Q ||
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Whether a saved folder is one of the app's own (where earlier versions saved), so
+     * it can be switched to the public one. [ownRoots]: getExternalFilesDir(null) and filesDir.
+     */
+    fun isOwnFolder(path: String?, ownRoots: List<File?>): Boolean {
+        if (path == null) return false
+        val dir = File(path).absoluteFile
+        return ownRoots.filterNotNull().any { root -> generateSequence(dir) { it.parentFile }.any { it == root.absoluteFile } }
+    }
 
     /** Where files picked for playlists are copied (see [app.redline.state.ImportedMusic]). */
     fun importedMusicDir(context: Context): File =

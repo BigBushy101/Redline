@@ -99,6 +99,8 @@ dependencies {
 
     // UniFFI's Kotlin loads libredline_mobile.so through JNA; the aar carries JNA's own .so files.
     implementation(libs.jna) { artifact { type = "aar" } }
+
+    testImplementation(libs.junit)
 }
 
 // Keep the latest debug APK at android/apk/ so it's easy to find and sideload.
